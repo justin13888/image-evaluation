@@ -510,7 +510,7 @@ def measure_memory(result_dir: str, commands: list[str], command_names: list[str
 
 def run(args: RunArgs):
     """Execute benchmarks using hyperfine."""
-    formats = args.formats or list(ImageFormat)
+    formats = args.formats
 
     # Build projects
     if not args.skip_build:

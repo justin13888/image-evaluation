@@ -467,11 +467,11 @@ REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
 
 class RunArgs(BaseModel):
     formats: Annotated[
-        Optional[list[ImageFormat]],
+        list[ImageFormat],
         tyro.conf.EnumChoicesFromValues,
         tyro.conf.arg(aliases=["-f"]),
         Field(description="List of formats to test."),
-    ] = None
+    ] = list(ImageFormat)
     dataset: Annotated[
         DatasetId,
         tyro.conf.EnumChoicesFromValues,
