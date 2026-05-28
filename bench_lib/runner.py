@@ -353,6 +353,8 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                     BenchmarkMetrics(
                         name=task.name(),
                         impl=task.impl.name,
+                        lang=task.impl.lang,
+                        build=task.impl.build,
                         quality=task.quality.value,
                         input_path=task.input_path,
                         source_path=task.source_path,
@@ -381,6 +383,8 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                     BenchmarkMetrics(
                         name=task.name(),
                         impl=task.impl.name,
+                        lang=task.impl.lang,
+                        build=task.impl.build,
                         quality=task.quality.value,
                         input_path=task.input_path,
                         source_path=task.source_path,
