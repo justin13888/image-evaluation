@@ -363,7 +363,9 @@ def build_libgav1():
         cmake_args=[
             "-DLIBGAV1_ENABLE_TESTS=OFF",
             "-DLIBGAV1_ENABLE_EXAMPLES=OFF",
-            "-DLIBGAV1_THREADPOOL_USE_STD_MUTEX=ON",
+            # libgav1 validates this option must be exactly 0 or 1 (not ON/OFF);
+            # newer CMake's EQUAL no longer coerces ON->1, so pass 1 explicitly.
+            "-DLIBGAV1_THREADPOOL_USE_STD_MUTEX=1",
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
         ],
         label=label,
@@ -407,15 +409,82 @@ def build_rav1d():
     print(f"  [{label}] Installed librav1d.a to {installed}")
 
 
+def _libavif_cache_is_current(build_dir):
+    """True iff libavif's existing CMakeCache enables all desired codecs.
+
+    Guards against a stale cache (e.g. built before SVT/libgav1 support was
+    added) silently skipping the rebuild because the sentinel library already
+    exists. Makes the AVIF_CODEC_* set below the single source of truth.
+    """
+    cache = os.path.join(build_dir, "CMakeCache.txt")
+    if not os.path.exists(cache):
+        return False
+    wanted = (
+        "AVIF_CODEC_DAV1D:STRING=SYSTEM",
+        "AVIF_CODEC_AOM:STRING=SYSTEM",
+        "AVIF_CODEC_SVT:STRING=SYSTEM",
+        "AVIF_CODEC_LIBGAV1:STRING=SYSTEM",
+    )
+    with open(cache) as f:
+        text = f.read()
+    return all(w in text for w in wanted)
+
+
+def _patch_libavif_for_svt4(src):
+    """Make libavif's codec_svt.c build against the pinned SVT-AV1 >=4.x.
+
+    libavif 1.2.1 sets the SVT config field `enable_adaptive_quantization`, which
+    SVT-AV1 4.x renamed to `aq_mode` (identical semantics: 2 = CRF). Patch the
+    vendored source in place so the SVT codec compiles. Idempotent: a no-op once
+    already patched (or if a future libavif/SVT pin no longer needs it).
+    """
+    path = os.path.join(src, "src", "codec_svt.c")
+    old = "svt_config->enable_adaptive_quantization = 2;"
+    new = "svt_config->aq_mode = 2;  // SVT-AV1 >=4.x renamed enable_adaptive_quantization"
+    with open(path) as f:
+        text = f.read()
+    if old in text:
+        with open(path, "w") as f:
+            f.write(text.replace(old, new))
+        print("  [libavif] Patched codec_svt.c for SVT-AV1 >=4.x (aq_mode).")
+
+
+def _restore_libavif_svt(src):
+    """Restore codec_svt.c after building so the (submodule) working tree stays
+    clean. The patch above is reapplied on each rebuild, so this is safe."""
+    try:
+        subprocess.run(
+            ["git", "-C", src, "checkout", "--", "src/codec_svt.c"],
+            check=False,
+            capture_output=True,
+        )
+    except Exception:
+        pass
+
+
 def build_libavif():
     label = "libavif"
+    build_dir = os.path.join(BUILD_DIR, "libavif")
     sentinel = os.path.join(INSTALL_COMMON, "lib", "libavif.a")
     if not is_built(sentinel):
         sentinel = os.path.join(INSTALL_COMMON, "lib64", "libavif.a")
     if is_built(sentinel):
-        print(f"  [{label}] Already built, skipping.")
-        return
+        if _libavif_cache_is_current(build_dir):
+            print(f"  [{label}] Already built, skipping.")
+            return
+        # Stale codec configuration: wipe the build dir + installed lib so the
+        # rebuild below reconfigures with the current AVIF_CODEC_* flags.
+        print(f"  [{label}] Codec flags changed; forcing reconfigure/rebuild.")
+        if os.path.isdir(build_dir):
+            shutil.rmtree(build_dir)
+        for cand in (
+            os.path.join(INSTALL_COMMON, "lib", "libavif.a"),
+            os.path.join(INSTALL_COMMON, "lib64", "libavif.a"),
+        ):
+            if os.path.exists(cand):
+                os.remove(cand)
     src = os.path.join(VENDOR_DIR, "libavif")
+    _patch_libavif_for_svt4(src)
 
     # Build pkg-config paths to find vendored dav1d and aom
     pkg_lib_dirs = [
@@ -452,6 +521,7 @@ def build_libavif():
         label=label,
         extra_env={"PKG_CONFIG_PATH": pkg_config_path},
     )
+    _restore_libavif_svt(src)
 
 
 def build_libjxl():

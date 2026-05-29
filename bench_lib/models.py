@@ -467,11 +467,11 @@ REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
 
 class RunArgs(BaseModel):
     formats: Annotated[
-        Optional[list[ImageFormat]],
+        list[ImageFormat],
         tyro.conf.EnumChoicesFromValues,
         tyro.conf.arg(aliases=["-f"]),
         Field(description="List of formats to test."),
-    ] = None
+    ] = list(ImageFormat)
     dataset: Annotated[
         DatasetId,
         tyro.conf.EnumChoicesFromValues,
@@ -714,6 +714,11 @@ def filename_from_key(key: BenchmarkKey) -> str:
 class BenchmarkMetrics(TypedDict):
     name: str
     impl: str
+    # Implementation language (e.g. "c", "c++", "rust", "c/asm") and build
+    # ecosystem ("cpp"/"rust"). These differ for e.g. rav1d: a Rust library
+    # benchmarked through the C++ harness (lang="rust", build="cpp").
+    lang: str
+    build: str
     quality: str
     input_path: str
     source_path: str

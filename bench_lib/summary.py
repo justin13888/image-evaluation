@@ -9,7 +9,11 @@ from typing import Optional, Tuple
 import humanize
 import matplotlib.pyplot as plt
 
-from bench_lib.models import BenchmarkMetrics, filename_from_key
+from bench_lib.models import (
+    BenchmarkMetrics,
+    filename_from_key,
+    find_implementation_by_name,
+)
 from bench_lib.plotting import (
     create_format_comparison_plot,
     create_implementation_comparison_plots,
@@ -123,14 +127,16 @@ def generate_summary(
 
             buffer.write("## Summary\n\n")
             buffer.write(
-                "| Implementation | Mean (ms) | Std Dev (ms) | 95% CI (ms) | Min (ms) | Max (ms) |\n"
+                "| Implementation | Lang | Mean (ms) | Std Dev (ms) | 95% CI (ms) | Min (ms) | Max (ms) |\n"
             )
             buffer.write(
-                "|---------------|-----------|--------------|-------------|----------|----------|\n"
+                "|---------------|------|-----------|--------------|-------------|----------|----------|\n"
             )
 
             for result in data.get("results", []):
                 name = result.get("command", "unknown")
+                impl = find_implementation_by_name(name.split(" (")[0])
+                lang = impl.lang if impl else "?"
                 mean = (result.get("mean") or 0) * 1000  # Convert to ms
                 stddev = (result.get("stddev") or 0) * 1000
                 min_time = (result.get("min") or 0) * 1000
@@ -146,7 +152,7 @@ def generate_summary(
                 ci_str = f"{ci_lower:.2f}–{ci_upper:.2f}"
 
                 buffer.write(
-                    f"| {name} | {mean:.2f} | {stddev:.2f} | {ci_str} | {min_time:.2f} | {max_time:.2f} |\n"
+                    f"| {name} | {lang} | {mean:.2f} | {stddev:.2f} | {ci_str} | {min_time:.2f} | {max_time:.2f} |\n"
                 )
 
             buffer.write("\n## Detailed Results\n")
@@ -234,13 +240,15 @@ def generate_summary(
             # Metrics table
             buffer.write("\n## Metrics\n\n")
             buffer.write(
-                "| Implementation | Quality | Input File | File Size | bpp | SSIMULACRA 2 | Status |\n"
+                "| Implementation | Lang | Build | Quality | Input File | File Size | bpp | SSIMULACRA 2 | Status |\n"
             )
             buffer.write(
-                "|----------------|---------|------------|-----------|-----|--------------|--------|\n"
+                "|----------------|------|-------|---------|------------|-----------|-----|--------------|--------|\n"
             )
             for m in metrics:
                 impl_name = m["impl"]
+                impl_lang = m.get("lang", "?")
+                impl_build = m.get("build", "?")
                 quality = m["quality"]
                 input_file = os.path.basename(m["input_path"])
                 filesize = (
@@ -252,7 +260,7 @@ def generate_summary(
                 ssim_score = m["ssimulacra2"]
                 status = "✗ " + m["error"][:30] + "..." if m.get("error") else "✓"
                 buffer.write(
-                    f"| {impl_name} | {quality} | {input_file} | {filesize} | {bpp} | {ssim_score} | {status} |\n"
+                    f"| {impl_name} | {impl_lang} | {impl_build} | {quality} | {input_file} | {filesize} | {bpp} | {ssim_score} | {status} |\n"
                 )
 
         # Write buffer to file

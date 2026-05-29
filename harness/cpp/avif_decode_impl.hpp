@@ -1,4 +1,4 @@
-// Shared AVIF decode implementation for libavif (aom) and dav1d.
+// Shared AVIF decode base for libavif backends (aom, dav1d, rav1d, libgav1).
 // The codec backend is selected via the constructor parameter.
 #pragma once
 
