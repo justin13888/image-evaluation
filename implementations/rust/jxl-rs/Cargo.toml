@@ -1,0 +1,13 @@
+[package]
+name = "bench-jxl-rs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-jxl-rs-decode"
+path = "src/decode.rs"
+
+[dependencies]
+benchmark-harness = { path = "../../../harness/rust" }
+jxl = { path = "../../../vendor/jxl-rs/jxl" }
+anyhow = "1.0"

@@ -27,7 +27,7 @@ This repository contains benchmarks for various image format implementations, co
   brew install clang-format cmake ccache nasm meson ninja pkg-config imagemagick hyperfine wget unzip
   ```
 
-All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d) and ssimulacra2 are vendored as git submodules and built automatically. No system dev packages for these libraries are required.
+All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs) and ssimulacra2 are vendored as git submodules and built automatically. No system dev packages for these libraries are required.
 
 > **CMake version:** CMake ≥ 3.5 is required. CMake 4.x is supported — `vendor/build_vendor.py` passes `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` automatically for older vendored projects (e.g. mozjpeg) that declare a lower minimum.
 
@@ -400,6 +400,7 @@ We include modern formats and their most competitive implementations.
 | :-------------- | :------- | :----------------------- |
 | **libjxl**      | C++      | Reference implementation |
 | **jxl-oxide**   | Rust     | Pure Rust decoder        |
+| **jxl-rs**      | Rust     | libjxl's official Rust decoder (vendored submodule) |
 | **zune-jpegxl** | Rust     | Optimized Rust encoder   |
 
 ## Limitations and Caveats

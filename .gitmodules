@@ -43,3 +43,6 @@
 [submodule "vendor/rav1d"]
 	path = vendor/rav1d
 	url = https://github.com/memorysafety/rav1d.git
+[submodule "vendor/jxl-rs"]
+	path = vendor/jxl-rs
+	url = https://github.com/libjxl/jxl-rs.git

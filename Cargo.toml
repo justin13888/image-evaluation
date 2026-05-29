@@ -1,5 +1,9 @@
 [workspace]
 members = ["harness/rust", "implementations/rust/*"]
+# Vendored Rust crates (rav1d, ssimulacra2, jxl-rs) declare their own workspaces;
+# exclude them so cargo resolves their workspace-inherited settings against their
+# own roots rather than this one.
+exclude = ["vendor"]
 resolver = "2"
 
 [profile.release]

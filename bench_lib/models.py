@@ -424,6 +424,14 @@ IMPLEMENTATIONS: list[Implementation] = [
         format=ImageFormat.JXL,
     ),
     Implementation(
+        name="jxl-rs-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-jxl-rs-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.JXL,
+    ),
+    Implementation(
         name="zune-jpegxl-encode",
         build="rust",
         lang="rust",
