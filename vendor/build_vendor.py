@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build all vendored C/C++ libraries from source to local install prefixes."""
 
+import glob
 import os
 import shutil
 import stat
@@ -529,25 +530,89 @@ def build_libjxl():
     sentinel = os.path.join(INSTALL_COMMON, "lib", "libjxl.a")
     if not is_built(sentinel):
         sentinel = os.path.join(INSTALL_COMMON, "lib64", "libjxl.a")
-    if is_built(sentinel):
-        print(f"  [{label}] Already built, skipping.")
+    # jpegli ships inside libjxl. Its jpegli-static target is EXCLUDE_FROM_ALL
+    # and has no install rule, so we build it explicitly and stage it. Treat the
+    # staged jpegli archive as a second sentinel so an existing libjxl install
+    # (built before jpegli support) is upgraded.
+    jpegli_lib_dst = os.path.join(INSTALL_COMMON, "lib64", "libjpegli-static.a")
+    if is_built(sentinel) and is_built(jpegli_lib_dst):
+        print(f"  [{label}] Already built (incl. jpegli), skipping.")
         return
     src = os.path.join(VENDOR_DIR, "libjxl")
-    cmake_build(
-        src,
-        "libjxl",
-        INSTALL_COMMON,
-        cmake_args=[
-            "-DBUILD_TESTING=OFF",
-            "-DJPEGXL_ENABLE_TOOLS=OFF",
-            "-DJPEGXL_ENABLE_MANPAGES=OFF",
-            "-DJPEGXL_ENABLE_BENCHMARK=OFF",
-            "-DJPEGXL_ENABLE_EXAMPLES=OFF",
-            # libjxl's third_party/sjpeg requires CMake 2.8.7; CMake ≥4.x dropped compat < 3.5
-            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-        ],
-        label=label,
-    )
+    if not is_built(sentinel):
+        cmake_build(
+            src,
+            "libjxl",
+            INSTALL_COMMON,
+            cmake_args=[
+                "-DBUILD_TESTING=OFF",
+                "-DJPEGXL_ENABLE_TOOLS=OFF",
+                "-DJPEGXL_ENABLE_MANPAGES=OFF",
+                "-DJPEGXL_ENABLE_BENCHMARK=OFF",
+                "-DJPEGXL_ENABLE_EXAMPLES=OFF",
+                # libjxl's third_party/sjpeg requires CMake 2.8.7; CMake ≥4.x dropped compat < 3.5
+                "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+            ],
+            label=label,
+        )
+    else:
+        # libjxl is already built; only jpegli still needs staging. Avoid a
+        # reconfigure (it can trip over a stale cached compiler path) and just
+        # build the jpegli target in the existing, already-configured build dir.
+        print(f"  [{label}] Already built; building + staging jpegli only.")
+    _build_and_stage_jpegli(label)
+
+
+def _build_and_stage_jpegli(label):
+    """Build the jpegli-static target and stage it into INSTALL_COMMON.
+
+    jpegli (Google's perceptually-tuned JPEG codec) lives in the libjxl source
+    tree but is an EXCLUDE_FROM_ALL target with no install() rule, so it must be
+    built explicitly and copied into the install prefix by hand (the same
+    approach used for rav1d/ssimulacra2). The generated <jpeglib.h> headers are
+    staged alongside so the jpegli benchmark can compile against the API.
+    """
+    build_dir = os.path.join(BUILD_DIR, "libjxl")
+
+    def _find_jpegli_lib():
+        candidate = os.path.join(build_dir, "lib", "libjpegli-static.a")
+        if os.path.exists(candidate):
+            return candidate
+        matches = glob.glob(
+            os.path.join(build_dir, "**", "libjpegli-static.a"), recursive=True
+        )
+        return matches[0] if matches else None
+
+    # jpegli-static is EXCLUDE_FROM_ALL. On Linux the default build already
+    # produces it (the jpegli libjpeg.so target depends on it); elsewhere build
+    # it explicitly. Reuse an existing artifact rather than rebuilding so this
+    # stays idempotent even when the build dir is stale.
+    src_lib = _find_jpegli_lib()
+    if src_lib is None:
+        run(
+            ["cmake", "--build", ".", "--target", "jpegli-static", "--parallel"],
+            cwd=build_dir,
+            env=os.environ.copy(),
+            label=label,
+        )
+        src_lib = _find_jpegli_lib()
+    if src_lib is None:
+        print("ERROR: jpegli-static built but libjpegli-static.a not found")
+        sys.exit(1)
+
+    lib_dst_dir = os.path.join(INSTALL_COMMON, "lib64")
+    os.makedirs(lib_dst_dir, exist_ok=True)
+    shutil.copy2(src_lib, os.path.join(lib_dst_dir, "libjpegli-static.a"))
+
+    inc_src_dir = os.path.join(build_dir, "lib", "include", "jpegli")
+    inc_dst_dir = os.path.join(INSTALL_COMMON, "include", "jpegli")
+    os.makedirs(inc_dst_dir, exist_ok=True)
+    for header in ("jconfig.h", "jpeglib.h", "jmorecfg.h"):
+        shutil.copy2(
+            os.path.join(inc_src_dir, header),
+            os.path.join(inc_dst_dir, header),
+        )
+    print(f"  [{label}] Staged jpegli-static + headers into {INSTALL_COMMON}")
 
 
 def build_libwebp():

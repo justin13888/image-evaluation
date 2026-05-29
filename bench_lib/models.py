@@ -251,6 +251,14 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.JPEG,
     ),
+    Implementation(
+        name="jpegli-encode",
+        build="cpp",
+        lang="c++",
+        bin="implementations/cpp/jpegli/build/bench-jpegli-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.JPEG,
+    ),
     # PNG
     Implementation(
         name="image-png-decode",
