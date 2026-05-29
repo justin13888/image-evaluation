@@ -155,6 +155,9 @@ def get_library_versions() -> Dict[str, str]:
     pc = _find_pc_file(VENDOR_MOZJPEG, "libjpeg")
     libraries["mozjpeg"] = _parse_pc_version(pc) if pc else "unknown"
 
+    # jpegli ships inside libjxl and shares its version (no separate .pc).
+    libraries["jpegli"] = libraries.get("libjxl", "unknown")
+
     libraries["mimalloc"] = _detect_mimalloc_version()
     libraries["hyperfine"] = "unknown"
 
