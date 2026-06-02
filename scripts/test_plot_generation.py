@@ -36,25 +36,28 @@ from bench_lib.summary import generate_summary  # noqa: E402
 
 
 def main():
-    # Minimal hyperfine JSON structure
+    # Minimal hyperfine JSON structure. Command names use the 5-field form
+    # produced by BenchmarkTask.name(): "impl (fmt, type, quality, tN, basename)".
+    # Two quality tiers and both thread modes exercise the swept aggregation key
+    # (grouped single-vs-parallel bars + a per-quality chart).
+    def result(command, mean, stddev):
+        return {
+            "command": command,
+            "mean": mean,
+            "stddev": stddev,
+            "min": mean - stddev,
+            "max": mean + stddev,
+            "times": [mean, mean + stddev, mean - stddev],
+        }
+
     data = {
         "results": [
-            {
-                "command": "implA (jpeg, decode, file.jpg)",
-                "mean": 0.05,
-                "stddev": 0.005,
-                "min": 0.04,
-                "max": 0.06,
-                "times": [0.05, 0.052, 0.048],
-            },
-            {
-                "command": "implB (jpeg, decode, file.jpg)",
-                "mean": 0.08,
-                "stddev": 0.008,
-                "min": 0.07,
-                "max": 0.09,
-                "times": [0.08, 0.081, 0.079],
-            },
+            result("implA (jpeg, decode, web-low, t1, file.jpg)", 0.050, 0.005),
+            result("implA (jpeg, decode, web-low, t0, file.jpg)", 0.030, 0.004),
+            result("implB (jpeg, decode, web-low, t1, file.jpg)", 0.080, 0.008),
+            result("implB (jpeg, decode, web-low, t0, file.jpg)", 0.045, 0.006),
+            result("implA (jpeg, decode, archival, t0, file.jpg)", 0.060, 0.005),
+            result("implB (jpeg, decode, archival, t0, file.jpg)", 0.095, 0.009),
         ]
     }
 

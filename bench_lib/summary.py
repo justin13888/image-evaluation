@@ -21,6 +21,38 @@ from bench_lib.plotting import (
     create_quality_vs_bpp_plots,
 )
 
+# Quality tiers ordered low -> high for stable, readable sorting.
+_TIER_ORDER = {"web-low": 0, "web-high": 1, "archival": 2}
+
+
+def _parse_command_name(name: str) -> Optional[dict]:
+    """Parse a hyperfine command name produced by ``BenchmarkTask.name()``.
+
+    Expected form: ``"impl-name (fmt, type, quality, tN, basename)"``. The
+    basename is kept whole even if it contains ", " (it is the last field).
+    Returns ``None`` for names not in this decorated 5-field form.
+    """
+    if " (" not in name or not name.endswith(")"):
+        return None
+    base_name, _, rest = name.partition(" (")
+    rest = rest[:-1]  # strip trailing ")"
+    meta = rest.split(", ", 4)  # maxsplit keeps a comma-containing basename intact
+    if len(meta) < 5:
+        return None
+    fmt, bench_type, quality, threads_tok, basename = meta
+    try:
+        threads = int(threads_tok.lstrip("t"))
+    except ValueError:
+        return None
+    return {
+        "impl": base_name,
+        "format": fmt,
+        "type": bench_type,
+        "quality": quality,
+        "threads": threads,
+        "basename": basename,
+    }
+
 
 def generate_summary(
     result_dir: str,
@@ -48,72 +80,79 @@ def generate_summary(
                 print(f"Warning: Could not generate summary: {e}")
                 return
 
-            # Parse and aggregate results
-            aggregated_results = {"encode": {}, "decode": {}}
+            # Parse and aggregate results across images, keyed by every swept
+            # dimension. A single run now sweeps quality x threads, so the key
+            # MUST include both — otherwise web-low/archival and single/parallel
+            # timings would be averaged into one meaningless bar.
+            # aggregated[bench_type][fmt][quality][impl][threads] -> running stats
+            aggregated_results: dict = {"encode": {}, "decode": {}}
 
             for result in data.get("results", []):
-                name = result.get("command", "unknown")
-                # Format: "impl_name (fmt, type, input)"
-                try:
-                    # Extract info from name
-                    if "(" in name and ")" in name:
-                        base_name = name.split(" (")[0]
-                        meta = name.split(" (")[1].rstrip(")").split(", ")
-                        if len(meta) >= 2:
-                            fmt = meta[0]
-                            bench_type = meta[1]
-
-                            if bench_type in aggregated_results:
-                                if fmt not in aggregated_results[bench_type]:
-                                    aggregated_results[bench_type][fmt] = {}
-
-                                if base_name not in aggregated_results[bench_type][fmt]:
-                                    aggregated_results[bench_type][fmt][base_name] = {
-                                        "mean_sum": 0.0,
-                                        "mean_sq_sum": 0.0,
-                                        "var_sum": 0.0,
-                                        "count": 0,
-                                    }
-
-                                mean_ms = (result.get("mean") or 0) * 1000
-                                stddev_ms = (result.get("stddev") or 0) * 1000
-
-                                agg = aggregated_results[bench_type][fmt][base_name]
-                                agg["mean_sum"] += mean_ms
-                                agg["mean_sq_sum"] += mean_ms**2
-                                agg["var_sum"] += stddev_ms**2
-                                agg["count"] += 1
-                except Exception:
+                parsed = _parse_command_name(result.get("command", ""))
+                if parsed is None:
                     continue
+                bench_type = parsed["type"]
+                fmt = parsed["format"]
+                if bench_type not in aggregated_results or fmt == "null":
+                    continue  # null implementations have no format, skip
 
-            # Convert to expected format for plotting
-            parsed_results = {}
-            for b_type, formats in aggregated_results.items():
+                cell = (
+                    aggregated_results[bench_type]
+                    .setdefault(fmt, {})
+                    .setdefault(parsed["quality"], {})
+                    .setdefault(parsed["impl"], {})
+                    .setdefault(
+                        parsed["threads"],
+                        {
+                            "mean_sum": 0.0,
+                            "mean_sq_sum": 0.0,
+                            "var_sum": 0.0,
+                            "count": 0,
+                        },
+                    )
+                )
+                mean_ms = (result.get("mean") or 0) * 1000
+                stddev_ms = (result.get("stddev") or 0) * 1000
+                cell["mean_sum"] += mean_ms
+                cell["mean_sq_sum"] += mean_ms**2
+                cell["var_sum"] += stddev_ms**2
+                cell["count"] += 1
+
+            def _finalize(cell: dict) -> Tuple[float, float]:
+                n = cell["count"]
+                grand_mean = cell["mean_sum"] / n
+                # Pooled within-group variance (average of per-image variances)
+                within_var = cell["var_sum"] / n
+                # Between-group variance (variance of per-image means)
+                between_var = cell["mean_sq_sum"] / n - grand_mean**2
+                return grand_mean, (within_var + max(between_var, 0.0)) ** 0.5
+
+            # Convert to plotting format:
+            # parsed[bench_type][fmt][quality] -> [{name, threads, mean, stddev}]
+            parsed_results: dict = {}
+            for b_type, fmts in aggregated_results.items():
                 parsed_results[b_type] = {}
-                for fmt, impls in formats.items():
-                    if fmt == "null":
-                        continue  # null implementations have no format, skip
-                    parsed_results[b_type][fmt] = []
-                    for impl_name, agg in impls.items():
-                        n = agg["count"]
-                        grand_mean = agg["mean_sum"] / n
-                        # Pooled within-group variance (average of per-image variances)
-                        within_var = agg["var_sum"] / n
-                        # Between-group variance (variance of per-image means)
-                        between_var = agg["mean_sq_sum"] / n - grand_mean**2
-                        combined_stddev = (within_var + max(between_var, 0.0)) ** 0.5
-                        parsed_results[b_type][fmt].append(
-                            {
-                                "name": impl_name,
-                                "mean": grand_mean,
-                                "stddev": combined_stddev,
-                            }
-                        )
+                for fmt, qualities in fmts.items():
+                    parsed_results[b_type][fmt] = {}
+                    for quality, impls in qualities.items():
+                        entries = []
+                        for impl_name, by_threads in impls.items():
+                            for threads, cell in by_threads.items():
+                                mean, stddev = _finalize(cell)
+                                entries.append(
+                                    {
+                                        "name": impl_name,
+                                        "threads": threads,
+                                        "mean": mean,
+                                        "stddev": stddev,
+                                    }
+                                )
+                        parsed_results[b_type][fmt][quality] = entries
 
             # Generate plots and export them individually
             plot_files: list[
-                Tuple[str, str, str]
-            ] = []  # (bench_type, bench_format, filename)
+                Tuple[str, str, str, str]
+            ] = []  # (bench_type, bench_format, quality, filename)
             plots = create_plots_from_parsed_results(parsed_results)
 
             for key, fig in plots:
@@ -121,21 +160,30 @@ def generate_summary(
                 filepath = os.path.join(result_dir, filename)
                 fig.savefig(filepath)
                 plt.close(fig)
-                bench_type_str = key[1].value
-                bench_format_str = key[0].value
-                plot_files.append((bench_type_str, bench_format_str, filename))
+                plot_files.append((key[1].value, key[0].value, key[2].value, filename))
 
             buffer.write("## Summary\n\n")
             buffer.write(
-                "| Implementation | Lang | Mean (ms) | Std Dev (ms) | 95% CI (ms) | Min (ms) | Max (ms) |\n"
+                "Each row is one implementation aggregated over the dataset, for a "
+                "given quality tier and threading mode (single = `--threads 1`, "
+                "all = `--threads 0`).\n\n"
             )
             buffer.write(
-                "|---------------|------|-----------|--------------|-------------|----------|----------|\n"
+                "| Implementation | Quality | Threads | Lang | Mean (ms) | Std Dev (ms) | 95% CI (ms) | Min (ms) | Max (ms) |\n"
+            )
+            buffer.write(
+                "|----------------|---------|---------|------|-----------|--------------|-------------|----------|----------|\n"
             )
 
             for result in data.get("results", []):
                 name = result.get("command", "unknown")
-                impl = find_implementation_by_name(name.split(" (")[0])
+                parsed = _parse_command_name(name)
+                impl_name = parsed["impl"] if parsed else name.split(" (")[0]
+                quality = parsed["quality"] if parsed else "?"
+                threads_label = (
+                    ("single" if parsed["threads"] == 1 else "all") if parsed else "?"
+                )
+                impl = find_implementation_by_name(impl_name)
                 lang = impl.lang if impl else "?"
                 mean = (result.get("mean") or 0) * 1000  # Convert to ms
                 stddev = (result.get("stddev") or 0) * 1000
@@ -152,15 +200,23 @@ def generate_summary(
                 ci_str = f"{ci_lower:.2f}–{ci_upper:.2f}"
 
                 buffer.write(
-                    f"| {name} | {lang} | {mean:.2f} | {stddev:.2f} | {ci_str} | {min_time:.2f} | {max_time:.2f} |\n"
+                    f"| {impl_name} | {quality} | {threads_label} | {lang} | {mean:.2f} | {stddev:.2f} | {ci_str} | {min_time:.2f} | {max_time:.2f} |\n"
                 )
 
             buffer.write("\n## Detailed Results\n")
+            buffer.write(
+                "\nOne chart per (format, operation, quality tier); bars are "
+                "grouped per implementation showing single-threaded vs all-cores.\n"
+            )
 
             if plot_files:
-                for bench_type, bench_format, filename in plot_files:
+                for bench_type, bench_format, quality, filename in sorted(
+                    plot_files,
+                    key=lambda p: (p[0], p[1], _TIER_ORDER.get(p[2], 99), p[3]),
+                ):
                     buffer.write(
-                        f"\n### {bench_type.capitalize()} {bench_format.upper()}\n\n![{bench_type.capitalize()} {bench_format.lower()} results]({filename})\n"
+                        f"\n### {bench_type.capitalize()} {bench_format.upper()} — {quality}\n\n"
+                        f"![{bench_type} {bench_format} {quality} results]({filename})\n"
                     )
             else:
                 buffer.write("No plots generated.\n")
@@ -176,7 +232,7 @@ def generate_summary(
                 key=lambda m: (
                     type_priority(m["type"]),
                     m["format"],
-                    m["quality"],
+                    _TIER_ORDER.get(m["quality"], 99),  # low -> high, not alphabetical
                     os.path.basename(m["input_path"]),
                 )
             )
@@ -189,7 +245,9 @@ def generate_summary(
             if quality_bpp_plots:
                 buffer.write("\n### Quality vs Compression Efficiency\n\n")
                 buffer.write(
-                    "Higher SSIMULACRA2 score and lower bpp (top-left) indicates better compression efficiency.\n\n"
+                    "Each point is one image encoded at one quality tier; the per-implementation "
+                    "spread traces its quality-vs-bpp curve. Higher SSIMULACRA2 score and lower "
+                    "bpp (top-left) indicates better compression efficiency.\n\n"
                 )
                 for filename, fig in quality_bpp_plots:
                     filepath = os.path.join(result_dir, filename)
@@ -213,7 +271,8 @@ def generate_summary(
                 plt.close(fig)
                 buffer.write("\n### Format Comparison\n\n")
                 buffer.write(
-                    "Aggregate comparison of formats across all implementations and images.\n\n"
+                    "Aggregate comparison of formats across all implementations, images, "
+                    "and quality tiers.\n\n"
                 )
                 buffer.write(f"![Format Comparison]({filename})\n\n")
 
@@ -222,7 +281,8 @@ def generate_summary(
             if impl_comparison_plots:
                 buffer.write("\n### Implementation Comparison\n\n")
                 buffer.write(
-                    "Box plots showing distribution of quality and compression across images per implementation.\n\n"
+                    "Box plots showing distribution of quality and compression across images "
+                    "and quality tiers per implementation.\n\n"
                 )
                 for filename, fig in impl_comparison_plots:
                     filepath = os.path.join(result_dir, filename)

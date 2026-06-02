@@ -23,11 +23,13 @@ from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
 from bench_lib.models import (
+    ALL_QUALITY_TIERS,
     DATASETS,
     FORMAT_EXT_MAP,
     IMPLEMENTATIONS,
     NULL_IMPLEMENTATIONS,
     REFERENCE_ENCODERS,
+    THREAD_MODES,
     BenchList,
     BenchmarkMetrics,
     BenchmarkMode,
@@ -202,9 +204,11 @@ def build_bench_list(
     format: ImageFormat,
     dataset: DatasetId,
     quality: QualityTier,
+    threads: int,
     args: RunArgs,
 ) -> BenchList:
-    """Construct list of benchmark commands to run."""
+    """Construct list of benchmark commands to run for one (type, format,
+    quality, threads) cell of the swept experiment matrix."""
     from itertools import chain
 
     # Construct list of implementations to run
@@ -246,8 +250,11 @@ def build_bench_list(
                 source_path=source_file,
                 iterations=args.iterations,
                 warmup=args.warmup,
-                threads=args.threads,
-                discard_output=args.discard_output,
+                threads=threads,
+                # Timing runs are always compute-only (issue #9): discarding the
+                # output removes filesystem-write variance as a confound. The
+                # metric-collection path overrides this to write a real file.
+                discard_output=True,
                 measure_memory=args.measure_memory,
                 pin_cores=args.pin_cores,
             )
@@ -286,10 +293,14 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
 
             # Obtain metric
             try:
-                # Run implementation once (no warmup) to get the output file
+                # Run implementation once (no warmup) to get the output file.
+                # Force discard=False so the binary writes a real file even
+                # though timing runs are always compute-only (--discard).
                 start_time = time.time()
                 subprocess.run(
-                    shlex.split(task.cmd(output_path, iterations=1, warmup=0)),
+                    shlex.split(
+                        task.cmd(output_path, iterations=1, warmup=0, discard=False)
+                    ),
                     check=True,
                 )
                 end_time = time.time()
@@ -516,6 +527,17 @@ def run(args: RunArgs):
     """Execute benchmarks using hyperfine."""
     formats = args.formats
 
+    # Determine the swept experiment matrix. A normal run sweeps every quality
+    # tier and both threading modes so a single `./bench run -d <dataset>`
+    # yields a complete, self-comparable dataset (issue #9). --quick collapses
+    # the sweep to one fast cell for smoke tests.
+    if args.quick:
+        quality_tiers = [QualityTier.WEB_LOW]
+        thread_modes = [0]
+    else:
+        quality_tiers = list(ALL_QUALITY_TIERS)
+        thread_modes = list(THREAD_MODES)
+
     # Build projects
     if not args.skip_build:
         build_projects(formats)
@@ -539,15 +561,21 @@ def run(args: RunArgs):
         "libraries": get_library_versions(),
         "allocator": f"mimalloc {_detect_mimalloc_version()}",
         "benchmark_config": {
+            # The only true experiment variable.
+            "dataset": args.dataset,
+            # Subset filters (default = everything).
             "formats": formats,
             "mode": args.mode,
-            "dataset": args.dataset,
-            "threads": args.threads,
+            # Swept every run; timing/memory vary across these, metrics do not.
+            "quality_tiers": quality_tiers,
+            "thread_modes": thread_modes,
+            # Fixed: timing is always compute-only.
+            "discard_output": True,
+            # Measurement tuning (do not change the experimental condition).
             "iterations": args.iterations,
             "warmup": args.warmup,
-            "quality": args.quality,
-            "discard_output": args.discard_output,
             "pin_cores": args.pin_cores,
+            "quick": args.quick,
         },
     }
 
@@ -557,16 +585,21 @@ def run(args: RunArgs):
     print(f"\n✓ Manifest written to {result_dir}/manifest.json")
 
     benches: BenchList = []
-    quality = args.get_quality()
 
     types_to_run = []
     if args.mode in (BenchmarkMode.ENCODE, BenchmarkMode.BOTH):
         types_to_run.append(BenchmarkType.ENCODE)
     if args.mode in (BenchmarkMode.DECODE, BenchmarkMode.BOTH):
         types_to_run.append(BenchmarkType.DECODE)
+
+    # Sweep the full matrix: (type, format) x quality x threads.
     for bench_type in types_to_run:
         for format in formats:
-            benches += build_bench_list(bench_type, format, args.dataset, quality, args)
+            for quality in quality_tiers:
+                for threads in thread_modes:
+                    benches += build_bench_list(
+                        bench_type, format, args.dataset, quality, threads, args
+                    )
 
     if not benches:
         print("\nError: No benchmarks to run!")
@@ -630,7 +663,25 @@ def run(args: RunArgs):
     # Collect metrics
     metrics = None
     if not args.no_metrics:
-        metrics = generate_metrics(benches, result_dir)
+        # File size and SSIMULACRA2 depend only on (impl, format, type, quality,
+        # image) — the encoded/decoded bytes are identical across thread modes.
+        # Deduplicate so each tuple is measured (and ssimulacra2'd) exactly once.
+        seen_metric_keys: Set[tuple] = set()
+        metrics_benches: BenchList = []
+        for task in benches:
+            key = (
+                task.impl.name,
+                task.format_as_str(),
+                task.impl.type.value,
+                task.quality.value,
+                os.path.basename(task.input_path),
+            )
+            if key in seen_metric_keys:
+                continue
+            seen_metric_keys.add(key)
+            metrics_benches.append(task)
+
+        metrics = generate_metrics(metrics_benches, result_dir)
         # Save metrics
         metrics_path = f"{result_dir}/metrics.json"
         with open(metrics_path, "w") as f:
