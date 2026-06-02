@@ -481,6 +481,18 @@ REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
 }
 
 
+# Fixed experiment protocol (issue #9): every `./bench run` sweeps these
+# internally instead of exposing them as CLI knobs, so a single run produces a
+# complete, self-comparable dataset. Only `--dataset` remains a true variable.
+#
+# Quality tiers are swept low -> high (the natural quality-vs-bpp curve order).
+ALL_QUALITY_TIERS: list[QualityTier] = list(QualityTier)
+# Threading configurations: single-threaded (per-core efficiency) then all-cores
+# (real-world throughput). Output bytes are identical across these, so metrics
+# are collected for only one of them; only timing/memory vary by thread count.
+THREAD_MODES: list[int] = [1, 0]
+
+
 class RunArgs(BaseModel):
     formats: Annotated[
         list[ImageFormat],
@@ -498,13 +510,8 @@ class RunArgs(BaseModel):
         BenchmarkMode,
         tyro.conf.EnumChoicesFromValues,
         tyro.conf.arg(aliases=["-m"]),
-        Field(description="Benchmark mode"),
+        Field(description="Benchmark mode (subset filter; default runs both)"),
     ] = BenchmarkMode.BOTH
-    threads: Annotated[
-        int,
-        tyro.conf.arg(aliases=["-t"]),
-        Field(ge=0, description="Number of threads (0 = all cores)"),
-    ] = 0
     iterations: Annotated[
         int,
         tyro.conf.arg(aliases=["-i"]),
@@ -515,12 +522,6 @@ class RunArgs(BaseModel):
         tyro.conf.arg(aliases=["-w"]),
         Field(description="Warmup iterations"),
     ] = 2
-    quality: Annotated[
-        Optional[QualityTier],
-        tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-q"]),
-        Field(description="Quality tier"),
-    ] = None
     sample: Annotated[
         Optional[int],
         Field(
@@ -528,13 +529,7 @@ class RunArgs(BaseModel):
         ),
     ] = None
 
-    # Booleans automatically become flags: --discard-output / --no-discard-output
-    discard_output: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Discard output (compute-only)"),
-    ] = False
-
+    # Booleans automatically become flags.
     pin_cores: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
@@ -568,12 +563,6 @@ class RunArgs(BaseModel):
         tyro.conf.FlagCreatePairsOff,
         Field(description="Enable debug mode (more verbose output)"),
     ] = False
-
-    def get_quality(self) -> QualityTier:
-        """Get the quality tier, defaulting based on quick mode."""
-        if self.quality is not None:
-            return self.quality
-        return QualityTier.WEB_LOW if self.quick else QualityTier.WEB_HIGH
 
 
 class CleanArgs(BaseModel):
@@ -650,7 +639,14 @@ class BenchmarkTask(BaseModel):
         return self.impl.format.value if self.impl.format else "null"
 
     def name(self) -> str:
-        return f"{self.impl.name} ({self.format_as_str()}, {self.impl.type.value}, {os.path.basename(self.input_path)})"
+        # Quality tier and thread mode are part of the label because a single
+        # run now sweeps both — they keep hyperfine command names unique and let
+        # the summary parser recover each dimension. The basename is kept last so
+        # a comma in a filename can never shift the earlier fields.
+        return (
+            f"{self.impl.name} ({self.format_as_str()}, {self.impl.type.value}, "
+            f"{self.quality.value}, t{self.threads}, {os.path.basename(self.input_path)})"
+        )
 
     def identifier(self) -> str:
         """
@@ -672,15 +668,19 @@ class BenchmarkTask(BaseModel):
         output_path: str,
         iterations: Optional[int] = None,
         warmup: Optional[int] = None,
+        discard: Optional[bool] = None,
     ) -> str:
         """
         Generate command based on output path.
 
         Optional `iterations` and `warmup` override the task's stored values,
-        useful for one-shot metric collection runs.
+        useful for one-shot metric collection runs. `discard` overrides the
+        task's discard policy — metric collection passes `discard=False` so the
+        binary actually writes an output file to measure/score.
         """
 
         binary = self.impl.bin
+        use_discard = self.discard_output if discard is None else discard
 
         # Build command
         cmd_parts = [
@@ -699,7 +699,7 @@ class BenchmarkTask(BaseModel):
             str(self.threads),
         ]
 
-        if self.discard_output:
+        if use_discard:
             cmd_parts.append("--discard")
 
         # Wrap with taskset for core pinning (pin to cores 0-3 for consistency)
@@ -714,7 +714,9 @@ class BenchmarkTask(BaseModel):
 # Build list is list[BenchmarkTask]
 BenchList = list[BenchmarkTask]
 
-BenchmarkKey = Tuple[ImageFormat, BenchmarkType]
+# A timing chart is produced per (format, type, quality); the two thread modes
+# are grouped *within* a chart, so threads are not part of the key.
+BenchmarkKey = Tuple[ImageFormat, BenchmarkType, QualityTier]
 
 
 def filename_from_key(key: BenchmarkKey) -> str:
@@ -723,8 +725,8 @@ def filename_from_key(key: BenchmarkKey) -> str:
 
     Does not include file extension.
     """
-    format, bench_type = key
-    return f"{format.value}_{bench_type.value}_results"
+    format, bench_type, quality = key
+    return f"{format.value}_{bench_type.value}_{quality.value}_results"
 
 
 class BenchmarkMetrics(TypedDict):

@@ -9,7 +9,17 @@ from bench_lib.models import (
     BenchmarkMetrics,
     BenchmarkType,
     ImageFormat,
+    QualityTier,
 )
+
+# Quality tiers ordered low -> high (enum definition order).
+_TIER_ORDER = {t.value: i for i, t in enumerate(QualityTier)}
+
+# Threading modes -> (legend label, bar colour). 1 = single-threaded, 0 = all cores.
+_THREAD_STYLES = {
+    1: ("single-threaded", "#4C72B0"),
+    0: ("all-cores", "#DD8452"),
+}
 
 
 def _filter_valid_encode_metrics(
@@ -38,12 +48,16 @@ def _group_by(items: list, key_fn: Callable) -> Dict:
 
 
 def create_plots_from_parsed_results(
-    parsed: Dict[str, Dict[str, list[Dict[str, Any]]]],
+    parsed: Dict[str, Dict[str, Dict[str, list[Dict[str, Any]]]]],
 ) -> list[Tuple[BenchmarkKey, Any]]:
-    """Create matplotlib figures from parsed results.
+    """Create timing figures, one per (format, operation, quality tier).
 
-    Returns a list of tuples (key, Figure).
-    The caller is responsible for saving and closing the figures.
+    ``parsed`` is nested ``[bench_type][fmt][quality] -> [{name, threads, mean,
+    stddev}]``. Within each chart, implementations are drawn as horizontal bar
+    groups with one bar per threading mode (single-threaded vs all-cores) so the
+    two configurations are directly comparable. Returns ``(key, Figure)`` tuples
+    keyed by ``(ImageFormat, BenchmarkType, QualityTier)``; the caller saves and
+    closes the figures.
     """
 
     plots: list[Tuple[BenchmarkKey, Any]] = []
@@ -52,38 +66,84 @@ def create_plots_from_parsed_results(
         if not codecs:
             continue
 
-        sorted_codecs = sorted(codecs.keys())
+        for fmt in sorted(codecs.keys()):
+            qualities = codecs[fmt]
+            for quality in sorted(
+                qualities.keys(), key=lambda q: _TIER_ORDER.get(q, 99)
+            ):
+                entries = qualities[quality]
+                if not entries:
+                    continue
 
-        for fmt in sorted_codecs:
-            results = codecs[fmt]
-            # Sort by mean time
-            results.sort(key=lambda x: x["mean"])
+                # Group entries by implementation, indexed by thread count.
+                by_impl: Dict[str, Dict[int, Dict[str, Any]]] = {}
+                for e in entries:
+                    by_impl.setdefault(e["name"], {})[e["threads"]] = e
 
-            names = [r["name"] for r in results]
-            means = [r["mean"] for r in results]
-            stddevs = [r["stddev"] for r in results]
+                def _rep_mean(impl_entries: Dict[int, Dict[str, Any]]) -> float:
+                    # Prefer the all-cores number for ordering; else any present.
+                    if 0 in impl_entries:
+                        return impl_entries[0]["mean"]
+                    return min(v["mean"] for v in impl_entries.values())
 
-            y_pos = np.arange(len(names))
+                impl_names = sorted(by_impl.keys(), key=lambda n: _rep_mean(by_impl[n]))
+                # Thread modes actually present, in stable single->all order.
+                present_threads = [
+                    t for t in (1, 0) if any(t in by_impl[n] for n in impl_names)
+                ]
+                if not present_threads:
+                    continue
 
-            fig, ax = plt.subplots(
-                figsize=(10, 0.5 * max(4, len(names))), constrained_layout=True
-            )
-            fig.suptitle(
-                f"{bench_type.capitalize()} - {fmt.upper()} Benchmarks", fontsize=14
-            )
-            ax.barh(y_pos, means, xerr=stddevs, align="center", alpha=0.8, capsize=5)
-            ax.set_yticks(y_pos)
-            ax.set_yticklabels(names)
-            ax.invert_yaxis()  # labels read top-to-bottom
-            ax.set_xlabel("Time (ms)")
-            ax.set_title(f"{fmt.upper()}")
+                n_groups = len(impl_names)
+                n_series = len(present_threads)
+                bar_h = 0.8 / n_series
+                y_base = np.arange(n_groups)
 
-            # Add value labels
-            for j, v in enumerate(means):
-                ax.text(v, j, f" {v:.2f} ms", va="center")
+                fig, ax = plt.subplots(
+                    figsize=(10, 0.6 * max(4, n_groups) + 1),
+                    constrained_layout=True,
+                )
+                fig.suptitle(
+                    f"{bench_type.capitalize()} — {fmt.upper()} — {quality}",
+                    fontsize=14,
+                )
 
-            key = (ImageFormat(fmt), BenchmarkType(bench_type.lower()))
-            plots.append((key, fig))
+                for s_idx, t in enumerate(present_threads):
+                    means = [by_impl[n].get(t, {}).get("mean", 0.0) for n in impl_names]
+                    stds = [
+                        by_impl[n].get(t, {}).get("stddev", 0.0) for n in impl_names
+                    ]
+                    offsets = y_base + (s_idx - (n_series - 1) / 2) * bar_h
+                    label, color = _THREAD_STYLES.get(t, (f"threads={t}", None))
+                    ax.barh(
+                        offsets,
+                        means,
+                        height=bar_h,
+                        xerr=stds,
+                        align="center",
+                        alpha=0.85,
+                        capsize=3,
+                        label=label,
+                        color=color,
+                    )
+                    for off, v in zip(offsets, means):
+                        if v > 0:
+                            ax.text(v, off, f" {v:.2f}", va="center", fontsize=7)
+
+                ax.set_yticks(y_base)
+                ax.set_yticklabels(impl_names)
+                ax.invert_yaxis()  # labels read top-to-bottom
+                ax.set_xlabel("Time (ms)")
+                ax.set_xlim(left=0)
+                if n_series > 1:
+                    ax.legend(loc="lower right", fontsize="small")
+
+                key = (
+                    ImageFormat(fmt),
+                    BenchmarkType(bench_type.lower()),
+                    QualityTier(quality),
+                )
+                plots.append((key, fig))
 
     return plots
 

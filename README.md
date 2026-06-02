@@ -82,15 +82,17 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
 
 ### Running Benchmarks
 
-Use `./bench run` with a dataset. Always specify `--dataset` (default `test` has minimal coverage):
+**The dataset is the only experiment variable.** A single `./bench run --dataset <id>` produces a complete, self-comparable result set: it sweeps **every quality tier** (`web-low`, `web-high`, `archival`) and **both threading modes** (single-threaded and all-cores) internally, for all formats and both encode + decode. Timing runs are always compute-only (output discarded). You no longer pick a quality tier, thread count, or discard mode on the command line — those were removed so results from different runs are always directly comparable (see [issue #9](https://github.com/justin13888/image-implementation-benchmark/issues/9)).
+
+`--formats` and `--mode` remain as optional **subset filters** (default = everything); restricting them never changes how anything is measured, it just narrows coverage for faster iteration.
 
 ```bash
-# Quick test (minimal sample, single iteration)
+# Quick smoke test (collapses the sweep to one tier + all-cores, single iteration)
 ./bench run --dataset kodak --sample 3 --quick
 
 # =====
 
-# Recommended if you have time: KODAK dataset (24 images, cache-resident)
+# Recommended if you have time: full KODAK sweep (24 images, cache-resident)
 ./bench run --dataset kodak
 
 # High-resolution testing (20 diverse 2K/4K images)
@@ -99,22 +101,16 @@ Use `./bench run` with a dataset. Always specify `--dataset` (default `test` has
 # Pathological/stress testing (4 synthetic images)
 ./bench run --dataset pathological
 
-# Test on sample of 3 images from KODAK dataset
+# Sample 3 images from KODAK (still sweeps all tiers + both thread modes)
 ./bench run --dataset kodak --sample 3
 
-# Run specific formats
-./bench run --dataset kodak --formats jpeg,avif
+# Subset filter: only some formats (space-separated)
+./bench run --dataset kodak --formats jpeg avif
 
-# Decode-only benchmarks
+# Subset filter: decode only
 ./bench run --dataset kodak --mode decode
 
-# Parallel benchmarks (all CPU cores)
-./bench run --dataset kodak --threads 0
-
-# Discard output I/O (pure compute)
-./bench run --dataset kodak --discard-output
-
-# Measure memory usage
+# Measure peak memory usage (per tier + thread mode)
 ./bench run --dataset div2k --measure-memory
 
 # Compile all benchmarks
@@ -133,6 +129,8 @@ Use `./bench run` with a dataset. Always specify `--dataset` (default `test` has
 ./bench run --dataset kodak --no-metrics
 ```
 
+> **Runtime note:** sweeping 3 quality tiers × 2 threading modes makes a full timing run ~6× longer than a single fixed-condition run (metrics ~3×, since file size and quality are thread-invariant and collected once per tier). Use `--sample N` (caps images — the dominant factor), `--formats`/`--mode` (narrow scope), or `--quick` (collapse the sweep) to keep development cycles fast.
+
 ### Cleanup
 
 ```bash
@@ -143,10 +141,14 @@ Use `./bench run` with a dataset. Always specify `--dataset` (default `test` has
 
 Results are in `./results/<timestamp>/`:
 
-* `summary.md` - Human-readable tables
-* `raw.json` - Full Hyperfine output
-* `manifest.json` - Reproducibility manifest
-* `memory.csv` - Peak RSS (if `--measure-memory` used)
+| Artifact | Contents |
+| :------- | :------- |
+| `summary.md` | Human-readable report. Timing table (columns: Implementation, Quality, Threads, Lang, Mean/Std Dev/95% CI/Min/Max ms); grouped single-vs-all-cores timing charts, one per (format, operation, quality tier); compression-analysis plots. |
+| `raw.json` | Full Hyperfine output — per command: `mean/median/stddev/min/max/user/system`, `times[]`, `exit_codes[]`. One command per (impl, format, operation, quality tier, thread mode, image). |
+| `metrics.json` | Per (impl, format, operation, quality tier, image): `filesize`, `ssimulacra2`, `bpp`, `width/height/megapixels`, plus `impl/lang/build/quality/format/type`. Thread-invariant, so collected once per tier (not per thread mode). |
+| `manifest.json` | Reproducibility manifest (system, compiler & library versions, allocator, `benchmark_config`). |
+| `*.png` | Plots referenced by `summary.md`: `{fmt}_{op}_{tier}_results.png` (timing), `quality_vs_bpp_{fmt}.png`, `format_comparison.png`, `impl_comparison_{fmt}.png`. |
+| `memory.csv` | Peak RSS per task — `name, peak_rss_mb, peak_rss_kb` (only if `--measure-memory`). |
 
 ## Methodology
 
@@ -194,7 +196,7 @@ Choose your dataset based on your benchmarking goals:
 
 ### Quality Tiers
 
-We benchmark against three distinct use cases. The CLI accepts tier names directly (`--quality web-low`), and each binary maps these to format-specific arguments internally.
+We benchmark against three distinct use cases. **Every run sweeps all three tiers** so a single run yields a full quality-vs-bpp curve per implementation; each binary maps a tier name (passed as `--quality` to the binary) to format-specific arguments internally.
 
 | Tier         | Intent            | JPEG                | AVIF                       | JXL               | WEBP           |
 | :----------- | :---------------- | :------------------ | :------------------------- | :---------------- | :------------- |
@@ -216,7 +218,7 @@ To ensure statistically significant results and eliminate "Cold Start" bias (OS 
 
 #### Binary Interface
 
-Every encoder/decoder implementation is compiled into a standalone binary implementing this CLI:
+Every encoder/decoder implementation is compiled into a standalone binary implementing this CLI. This per-binary interface is **unchanged** — the orchestrator (`./bench run`) is what now *sweeps* `--quality` and `--threads` across invocations and always sets `--discard` for timing runs:
 
 ```bash
 ./<binary> \
@@ -255,6 +257,8 @@ The [benchmark harness](./bench) measures the visual similarity of the decoded o
 
 #### Discard Checksum
 
+**Timing runs are always compute-only:** `./bench run` invokes every binary with `--discard`, removing filesystem-write variance as a confound. (The separate metric-collection pass re-runs each binary *without* `--discard` so it writes a real file to size and score.)
+
 When `--discard` is set, output bytes are fed through a CRC32 checksum to prevent compiler elimination of the encode/decode work. The C/C++ harness uses zlib's `crc32()` function; the Rust harness uses `crc32fast::Hasher`. Both libraries select hardware-accelerated implementations (e.g. SSE4.2, ARM CRC32) where available at compile time.
 
 #### Baseline Measurement
@@ -269,12 +273,12 @@ This establishes the I/O and measurement floor, allowing you to isolate codec ov
 
 ### Threading Model
 
-All benchmarks are run in two configurations:
+Every run automatically sweeps **both** threading configurations (you do not select one — they appear side-by-side in the timing charts):
 
 1. **Single-threaded (`--threads 1`):** Measures per-core efficiency and is useful for comparing instruction-level optimization.
 2. **Parallel (`--threads 0`):** Uses all available cores. Measures real-world throughput for batch processing.
 
-Binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
+With `--pin-cores`, binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
 
 ### Statistical Reporting
 
@@ -326,28 +330,42 @@ Every benchmark run generates a `manifest.json` containing:
 ```json
 {
   "timestamp": "2025-01-15T10:30:00Z",
-  "cpu": "Apple M3 Max",
-  "cores": 14,
   "os": "macOS 15.2",
   "kernel": "Darwin 24.2.0",
+  "cpu": "Apple M3 Max",
+  "cores": 14,
   "compiler": {
+    "rustc": "1.84.0",
     "clang": "17.0.6",
-    "rustc": "1.84.0"
+    "cmake": "3.31.2"
   },
   "libraries": {
     "libjpeg-turbo": "3.1.0",
-    "mozjpeg": "4.1.5 (commit abc1234)",
+    "mozjpeg": "4.1.5",
     "libavif": "1.2.0",
     "dav1d": "1.5.0",
     "libjxl": "0.11.1",
-    "...": "..."
+    "...": "...",
+    "mimalloc": "2.1.2",
+    "hyperfine": "1.18.0"
   },
   "allocator": "mimalloc 2.1.2",
-  "hyperfine": "1.18.0"
+  "benchmark_config": {
+    "dataset": "kodak",
+    "formats": ["jpeg", "png", "webp", "avif", "jxl"],
+    "mode": "both",
+    "quality_tiers": ["web-low", "web-high", "archival"],
+    "thread_modes": [1, 0],
+    "discard_output": true,
+    "iterations": 10,
+    "warmup": 2,
+    "pin_cores": false,
+    "quick": false
+  }
 }
 ```
 
-This manifest is committed alongside results for full reproducibility.
+The `benchmark_config` block records the swept protocol: `dataset` is the only experiment variable, `formats`/`mode` are the active subset filters, and `quality_tiers`/`thread_modes` are the dimensions swept every run. This manifest is committed alongside results for full reproducibility.
 
 ## Image Format Implementations
 
