@@ -9,10 +9,6 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fstrict-aliasing -fomit-frame-pointer -march=n
 add_link_options(-no-pie)
 set(CMAKE_BUILD_TYPE Release)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fwhole-program-vtables")
-endif()
-
 include_directories(../../../harness/cpp)
 
 find_package(PNG REQUIRED)

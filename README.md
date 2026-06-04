@@ -329,10 +329,10 @@ Built with `RUSTFLAGS="-C target-cpu=native"`.
 We use Clang for consistency. Each implementation's `CMakeLists.txt` builds with:
 
 ```bash
-clang/clang++ -O3 -fwhole-program-vtables -fstrict-aliasing -fomit-frame-pointer -march=native -DNDEBUG
+clang/clang++ -O3 -fstrict-aliasing -fomit-frame-pointer -march=native -DNDEBUG
 ```
 
-Note that `-fno-exceptions` and `-fno-rtti` are intentionally **not** used because the implementations use C++ exceptions for error handling. LTO is not applied per-binary (the build is still fast due to ccache).
+Note that `-fno-exceptions` and `-fno-rtti` are intentionally **not** used because the implementations use C++ exceptions for error handling. LTO is not applied per-binary (the build is still fast due to ccache); whole-program vtable optimization (`-fwhole-program-vtables`) is therefore omitted as it requires LTO.
 
 **Note:** `-march=native` makes binaries specific to the host machine. Results are not portable across architectures.
 
