@@ -1,8 +1,12 @@
 """Self-contained HTML report for a results bundle.
 
-Bundles a run's summarized graphs (and the BD-rate table) into a single
-``report.html`` with every image embedded as a base64 data URI, so the whole
-result set is one openable, shareable file with no external assets.
+Bundles a run into a single ``report.html`` with no external assets. The
+performance suite's charts are embedded as base64 PNGs. The quality suite is
+**interactive**: its raw ``metrics.json`` (plus small derived summaries — BD-rate
+and the Pareto front) is embedded inline as JSON, and the rate-distortion curves
+are drawn client-side by ``assets/report.js`` from that data. The embedded raw
+data is the single source of truth, so anything in the quality view can be
+recomputed from the report alone.
 """
 
 import base64
@@ -10,9 +14,25 @@ import glob
 import html
 import json
 import os
-from typing import Optional
+from typing import Any, Optional
 
-from bench_lib.plotting import compute_bd_rate_table
+from bench_lib.plotting import compute_bd_rate_table, pareto_front_encoders
+
+_ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+
+
+def _asset(name: str) -> str:
+    """Read a bundled asset (CSS/JS) to inline into the report."""
+    with open(os.path.join(_ASSET_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def _json_script(elem_id: str, obj: Any) -> str:
+    """Embed ``obj`` as a compact ``<script type=application/json>`` block. ``<``
+    is escaped to ``\\u003c`` (valid inside a JSON string) so no string value can
+    close the script element or open a comment."""
+    payload = json.dumps(obj, separators=(",", ":")).replace("<", "\\u003c")
+    return f'<script id="{elem_id}" type="application/json">{payload}</script>'
 
 
 def _img_tag(png_path: str) -> str:
@@ -35,7 +55,7 @@ def _embed_pngs(section_dir: str) -> str:
     return "\n".join(_img_tag(p) for p in pngs)
 
 
-def _load_json(path: str) -> Optional[dict]:
+def _load_json(path: str) -> Optional[Any]:
     try:
         with open(path) as f:
             return json.load(f)
@@ -67,30 +87,52 @@ def _manifest_summary(bundle_dir: str) -> str:
     return ""
 
 
-def _bd_rate_table_html(bundle_dir: str) -> str:
-    """BD-rate table (vs each format's reference encoder) from the quality
-    suite's metrics.json, if present."""
-    metrics = _load_json(os.path.join(bundle_dir, "quality", "metrics.json"))
+def _quality_section(qual_dir: str) -> list[str]:
+    """Build the interactive quality section: embed the raw metrics + derived
+    summaries as JSON, drop in the chart mount points, and inline the chart JS.
+    Returns the HTML fragments (empty if there is nothing to show)."""
+    metrics = _load_json(os.path.join(qual_dir, "metrics.json"))
+    parts = ["<h2>Quality (rate-distortion)</h2>"]
     if not metrics:
-        return ""
-    table = compute_bd_rate_table(metrics)
-    if not table:
-        return ""
-    rows = ["<tr><th>Format</th><th>Implementation</th><th>BD-rate vs ref</th></tr>"]
-    for fmt in sorted(table):
-        for impl in sorted(table[fmt]):
-            bd = table[fmt][impl]
-            bd_str = f"{bd:+.1f}%" if bd is not None else "N/A"
-            rows.append(
-                f"<tr><td>{html.escape(fmt.upper())}</td>"
-                f"<td>{html.escape(impl)}</td><td>{bd_str}</td></tr>"
-            )
-    return (
-        "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
-        "<p>Negative = fewer bits for equal quality (better). "
-        "<code>N/A</code> = non-overlapping quality ranges.</p>"
-        "<table>" + "".join(rows) + "</table>"
+        parts.append("<p><em>No quality metrics.</em></p>")
+        return parts
+
+    qmanifest = _load_json(os.path.join(qual_dir, "manifest.json"))
+    parts.append(
+        "<p class='muted'>Interactive — rendered in your browser from the raw "
+        "measurements embedded below. Hover a point for details; click a legend "
+        "entry to toggle a series; switch metric or x-axis scale up top.</p>"
     )
+    # Embedded data (source of truth). Charts recompute from #quality-metrics; the
+    # BD-rate and Pareto summaries are precomputed here (numpy / dominance) and
+    # embedded so the browser need not reimplement them.
+    parts.append(_json_script("quality-metrics", metrics))
+    if qmanifest:
+        parts.append(_json_script("quality-manifest", qmanifest))
+    parts.append(_json_script("quality-bdrate", compute_bd_rate_table(metrics)))
+    parts.append(_json_script("quality-pareto", pareto_front_encoders(metrics)))
+
+    parts.append(
+        "<div id='quality-app'>"
+        "<div id='q-controls'></div>"
+        "<h3>Cross-format Pareto front — best encoders of each format</h3>"
+        "<p class='q-note'>Each curve is a format's Pareto-optimal encoder(s) "
+        "(non-dominated in bpp vs quality), coloured by format. Up and to the "
+        "left is better.</p>"
+        "<div id='q-combined'></div>"
+        "<h3>Rate-distortion by format</h3>"
+        "<p class='q-note'>One chart per format, every encoder's quality sweep "
+        "aggregated to a clean mean curve across the dataset.</p>"
+        "<div id='q-charts'></div>"
+        "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
+        "<p class='q-note'>Negative = fewer bits for equal quality (better). "
+        "Computed per image then averaged; <code>N/A</code> = non-overlapping "
+        "quality ranges. Click a header to sort.</p>"
+        "<div id='q-bdrate'></div>"
+        "</div>"
+    )
+    parts.append(f"<script>{_asset('report.js')}</script>")
+    return parts
 
 
 _CSS = """
@@ -109,9 +151,8 @@ th { background: #f3f3f3; }
 
 
 def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) -> str:
-    """Write ``<bundle_dir>/report.html`` bundling the performance and quality
-    charts (whichever subfolders exist) plus the BD-rate table. Returns the path.
-    """
+    """Write ``<bundle_dir>/report.html`` bundling the performance charts and the
+    interactive quality view (whichever subfolders exist). Returns the path."""
     perf_dir = os.path.join(bundle_dir, "performance")
     qual_dir = os.path.join(bundle_dir, "quality")
 
@@ -119,7 +160,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         "<title>Benchmark Report</title>",
-        f"<style>{_CSS}</style></head><body>",
+        f"<style>{_CSS}\n{_asset('report.css')}</style></head><body>",
         "<h1>Image Implementation Benchmark — Report</h1>",
     ]
     if generated_at:
@@ -135,14 +176,11 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         parts.append(_embed_pngs(perf_dir))
 
     if os.path.isdir(qual_dir):
-        parts.append("<h2>Quality (rate-distortion)</h2>")
-        bd = _bd_rate_table_html(bundle_dir)
-        if bd:
-            parts.append(bd)
-        parts.append(_embed_pngs(qual_dir))
+        parts.extend(_quality_section(qual_dir))
 
     parts.append(
-        "<p class='muted'>Raw data lives alongside this file: "
+        "<p class='muted'>Raw data is embedded above "
+        "(<code>#quality-metrics</code>) and also on disk alongside this file: "
         "<code>performance/raw.json</code>, <code>quality/metrics.json</code>, "
         "and per-suite <code>summary.md</code>.</p>"
     )

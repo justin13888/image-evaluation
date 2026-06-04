@@ -140,18 +140,18 @@ Every run writes a **bundle** to `./results/<timestamp>/` containing a `performa
 
 ```
 results/<timestamp>/
-├── report.html        # self-contained: every chart embedded (base64), opens offline
+├── report.html        # self-contained, opens offline (perf charts + interactive quality)
 ├── summary.md         # index linking the per-suite summaries
 ├── manifest.json      # bundle metadata (which suites ran)
 ├── performance/       # (perf / all) raw.json, summary.md, timing charts, memory.csv
-└── quality/           # (quality / all) metrics.json, summary.md, R-D + BD-rate charts
+└── quality/           # (quality / all) metrics.json, summary.md (tables), manifest.json
 ```
 
 **`performance/`** — `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`), and `memory.csv` (with `--measure-memory`).
 
-**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, dimensions, the swept `quality_axis`/`quality_value`), `summary.md` (rate-distortion analysis + BD-rate table + per-step metrics table), `rd_curve_{fmt}.png` / `format_comparison.png` / `impl_comparison_{fmt}.png`, and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`).
+**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, dimensions, the swept `quality_axis`/`quality_value`) is the raw data everything else is recomputed from; `summary.md` (BD-rate table + Pareto best-of-format table + per-step metrics table, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`). The quality suite renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
 
-**`report.html`** bundles all of a run's charts (and the BD-rate table) into one file with images embedded as base64 — no external assets, so it can be archived or shared as a single artifact.
+**`report.html`** is a single offline-friendly file. Performance charts are embedded as base64 PNGs. The **quality** view is interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR) and linear/log-x toggles, hover tooltips, and a sortable BD-rate table. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
 
 ## Methodology
 

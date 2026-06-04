@@ -16,10 +16,8 @@ from bench_lib.models import (
 )
 from bench_lib.plotting import (
     compute_bd_rate_table,
-    create_format_comparison_plot,
-    create_implementation_comparison_plots,
     create_plots_from_parsed_results,
-    create_rd_curve_plots,
+    pareto_front_encoders,
 )
 
 
@@ -237,30 +235,18 @@ def generate_summary(
                 )
             )
 
-            # Generate new visualization plots
+            # Compression analysis. The rate-distortion curves are interactive in
+            # report.html (drawn client-side from the embedded raw metrics); the
+            # summary.md keeps the numeric tables that are awkward to read off a
+            # chart.
             buffer.write("\n## Compression Analysis\n")
+            buffer.write(
+                "\nInteractive rate-distortion curves — per format and a combined "
+                "cross-format Pareto view — are in "
+                "[`../report.html`](../report.html).\n"
+            )
 
-            # 1. Rate-distortion curves (the dense quality-sweep view, issue #8)
-            rd_plots = create_rd_curve_plots(metrics)
-            if rd_plots:
-                buffer.write("\n### Rate-Distortion Curves\n\n")
-                buffer.write(
-                    "Each line is one implementation's quality sweep (points sorted by "
-                    "bpp): SSIMULACRA2-vs-bpp and PSNR-vs-bpp. Up and to the left "
-                    "(higher quality at lower bpp) is better.\n\n"
-                )
-                for filename, fig in rd_plots:
-                    filepath = os.path.join(result_dir, filename)
-                    fig.savefig(filepath, dpi=150)
-                    plt.close(fig)
-                    fmt_name = (
-                        filename.replace("rd_curve_", "").replace(".png", "").upper()
-                    )
-                    buffer.write(
-                        f"#### {fmt_name}\n\n![Rate-distortion for {fmt_name}]({filename})\n\n"
-                    )
-
-            # 2. BD-rate table (Bjøntegaard delta-rate vs each format's reference)
+            # BD-rate table (Bjøntegaard delta-rate vs each format's reference)
             bd_table = compute_bd_rate_table(metrics)
             if bd_table:
                 buffer.write("\n### BD-rate (vs reference encoder)\n\n")
@@ -278,40 +264,20 @@ def generate_summary(
                         buffer.write(f"| {fmt.upper()} | {impl} | {bd_str} |\n")
                 buffer.write("\n")
 
-            # 3. Format comparison plot
-            format_comparison = create_format_comparison_plot(metrics)
-            if format_comparison:
-                filename, fig = format_comparison
-                filepath = os.path.join(result_dir, filename)
-                fig.savefig(filepath, dpi=150)
-                plt.close(fig)
-                buffer.write("\n### Format Comparison\n\n")
+            # Pareto front: the best (non-dominated) encoder(s) of each format —
+            # the curves overlaid on the combined chart in report.html.
+            pareto = pareto_front_encoders(metrics)
+            if pareto:
+                buffer.write("\n### Best encoders per format (Pareto front)\n\n")
                 buffer.write(
-                    "Aggregate comparison of formats across all implementations, images, "
-                    "and quality-sweep points.\n\n"
+                    "Encoders that are not dominated on the bpp-vs-SSIMULACRA2 "
+                    "tradeoff (mean curve across the dataset).\n\n"
                 )
-                buffer.write(f"![Format Comparison]({filename})\n\n")
-
-            # 4. Implementation comparison plots
-            impl_comparison_plots = create_implementation_comparison_plots(metrics)
-            if impl_comparison_plots:
-                buffer.write("\n### Implementation Comparison\n\n")
-                buffer.write(
-                    "Box plots showing distribution of quality and compression across images "
-                    "and quality-sweep points per implementation.\n\n"
-                )
-                for filename, fig in impl_comparison_plots:
-                    filepath = os.path.join(result_dir, filename)
-                    fig.savefig(filepath, dpi=150)
-                    plt.close(fig)
-                    fmt_name = (
-                        filename.replace("impl_comparison_", "")
-                        .replace(".png", "")
-                        .upper()
-                    )
-                    buffer.write(
-                        f"#### {fmt_name}\n\n![Implementation comparison for {fmt_name}]({filename})\n\n"
-                    )
+                buffer.write("| Format | Pareto-optimal encoders |\n")
+                buffer.write("|--------|-------------------------|\n")
+                for fmt in sorted(pareto):
+                    buffer.write(f"| {fmt.upper()} | {', '.join(pareto[fmt])} |\n")
+                buffer.write("\n")
 
             # Metrics table
             buffer.write("\n## Metrics\n\n")

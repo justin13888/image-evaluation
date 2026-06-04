@@ -1,0 +1,58 @@
+/* Quality report — interactive rate-distortion charts (rendered client-side from
+   the embedded raw metrics). Kept small and dependency-free. */
+
+#quality-app { margin-top: 1rem; }
+
+.q-controls {
+  display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: center;
+  margin: 1rem 0 1.5rem; font-size: .85rem;
+}
+.q-controls .q-label { color: #555; margin-right: .4rem; }
+.q-group { display: inline-flex; border: 1px solid #bbb; border-radius: 6px; overflow: hidden; }
+.q-group button {
+  border: 0; background: #fff; color: #333; padding: .3rem .7rem; cursor: pointer;
+  font: inherit; line-height: 1.4;
+}
+.q-group button + button { border-left: 1px solid #ddd; }
+.q-group button:hover { background: #f2f2f2; }
+.q-group button.active { background: #1a1a1a; color: #fff; }
+.q-controls a.q-dl { color: #2563eb; text-decoration: none; }
+.q-controls a.q-dl:hover { text-decoration: underline; }
+
+.q-chart-title { margin: 1.4rem 0 .2rem; font-size: 1rem; }
+.q-chart { position: relative; margin: .3rem 0 1.2rem; }
+.q-chart svg { width: 100%; height: auto; display: block; }
+.q-chart .q-plot { border: 1px solid #e6e6e6; border-radius: 6px; background: #fff; }
+
+.q-grid { stroke: #ececec; stroke-width: 1; }
+.q-axis { stroke: #999; stroke-width: 1; }
+.q-tick { fill: #666; font-size: 12px; }
+.q-axis-title { fill: #444; font-size: 13px; }
+.q-line { fill: none; stroke-width: 2.6; stroke-linejoin: round; stroke-linecap: round; }
+.q-pt { stroke: #fff; stroke-width: 1; }
+.q-hl { fill: none; stroke-width: 2.5; }
+
+.q-legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; margin: .5rem .2rem 0; }
+.q-chip {
+  display: inline-flex; align-items: center; gap: .35rem; cursor: pointer;
+  font-size: .82rem; color: #222; user-select: none; padding: .1rem .15rem;
+}
+.q-chip .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
+.q-chip.off { opacity: .35; text-decoration: line-through; }
+
+.q-tooltip {
+  position: absolute; pointer-events: none; z-index: 5; max-width: 260px;
+  background: rgba(20,20,20,.93); color: #fff; padding: .4rem .55rem;
+  border-radius: 5px; font-size: .78rem; line-height: 1.35; box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.q-tooltip b { font-weight: 600; }
+.q-tooltip .k { color: #bbb; }
+
+table.q-table { border-collapse: collapse; margin: .6rem 0 1.5rem; }
+table.q-table th, table.q-table td { border: 1px solid #ccc; padding: .3rem .6rem; text-align: left; }
+table.q-table th { background: #f3f3f3; cursor: pointer; white-space: nowrap; }
+table.q-table th .arrow { color: #999; font-size: .8em; }
+table.q-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.q-table td.good { color: #157f3b; }
+table.q-table td.bad { color: #b3261e; }
+.q-note { color: #666; font-size: .85rem; margin: .2rem 0 .8rem; }

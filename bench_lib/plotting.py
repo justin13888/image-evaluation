@@ -1,4 +1,12 @@
-"""Matplotlib figure creation for benchmark results."""
+"""Matplotlib figure creation for the performance suite, plus rate-distortion
+analysis helpers (BD-rate, Pareto front) for the quality suite.
+
+The quality suite no longer renders charts to PNG: report.html embeds the raw
+metrics and draws interactive SVG rate-distortion curves client-side (see
+``bench_lib/assets/report.js``). The numeric summaries that are awkward to
+recompute in the browser — BD-rate (numpy polyfit/polyint) and the Pareto front —
+are computed here and embedded as small JSON blobs.
+"""
 
 import os
 
@@ -35,6 +43,26 @@ def _filter_valid_encode_metrics(
     ]
 
 
+def _finite_encode_metrics(
+    metrics: list[BenchmarkMetrics],
+) -> list[BenchmarkMetrics]:
+    """Encode metrics with positive bpp and a *finite* SSIMULACRA2, with no error.
+
+    Unlike :func:`_filter_valid_encode_metrics` this keeps negative scores: a
+    SSIMULACRA2 below zero is the legitimate low-quality tail of a rate-distortion
+    curve, not an error, and dropping it truncates the curve. Used for the
+    rate-distortion views (the Pareto front here, and the client-side charts,
+    which apply the same rule)."""
+    out: list[BenchmarkMetrics] = []
+    for m in metrics:
+        if m["type"] != "encode" or m.get("error"):
+            continue
+        s = m["ssimulacra2"]
+        if m["bpp"] > 0 and s is not None and np.isfinite(s):
+            out.append(m)
+    return out
+
+
 def _group_by(items: list, key_fn: Callable) -> Dict:
     """Group a list of items by a key function into a dict of lists."""
     groups: Dict = {}
@@ -44,6 +72,48 @@ def _group_by(items: list, key_fn: Callable) -> Dict:
             groups[k] = []
         groups[k].append(item)
     return groups
+
+
+def pareto_front_encoders(
+    metrics: list[BenchmarkMetrics],
+) -> Dict[str, list[str]]:
+    """Per format, the encoders on the Pareto front of (bpp down, SSIMULACRA2 up).
+
+    Each encoder's curve is first aggregated to one mean point per quality-sweep
+    step (bpp and score averaged across images). An encoder is on the front if it
+    owns at least one point that no *other* encoder dominates (another point with
+    bpp <= and score >=, at least one strict). Returns ``{format: [impl, ...]}``
+    sorted by name. This mirrors the report's combined cross-format chart so
+    report.html and summary.md agree on the "best encoders of each format"."""
+    result: Dict[str, list[str]] = {}
+    by_fmt = _group_by(_finite_encode_metrics(metrics), lambda m: m["format"])
+    for fmt, fmt_metrics in by_fmt.items():
+        # (impl, label) -> mean (bpp, score) across images: one point per sweep step.
+        agg: Dict[Tuple[str, str], list] = {}
+        for m in fmt_metrics:
+            agg.setdefault((m["impl"], m["label"]), []).append(
+                (m["bpp"], m["ssimulacra2"])
+            )
+        points = []  # (impl, mean_bpp, mean_score)
+        for (impl, _label), pts in agg.items():
+            n = len(pts)
+            points.append(
+                (impl, sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n)
+            )
+        front: set = set()
+        for impl, bpp, score in points:
+            dominated = any(
+                o_impl != impl
+                and o_bpp <= bpp
+                and o_score >= score
+                and (o_bpp < bpp or o_score > score)
+                for o_impl, o_bpp, o_score in points
+            )
+            if not dominated:
+                front.add(impl)
+        if front:
+            result[fmt] = sorted(front)
+    return result
 
 
 def create_plots_from_parsed_results(
@@ -141,205 +211,6 @@ def create_plots_from_parsed_results(
                     quality,
                 )
                 plots.append((key, fig))
-
-    return plots
-
-
-def create_format_comparison_plot(
-    metrics: list[BenchmarkMetrics],
-) -> Optional[Tuple[str, Any]]:
-    """Create grouped bar chart comparing formats.
-
-    Shows average SSIMULACRA2 score and average bpp per format,
-    aggregated across all implementations and images.
-
-    Returns a tuple (filename, Figure) or None if no valid data.
-    """
-
-    encode_metrics = _filter_valid_encode_metrics(metrics)
-
-    if not encode_metrics:
-        return None
-
-    # Aggregate by format
-    format_stats: Dict[str, Dict[str, list[float]]] = {}
-    for m in encode_metrics:
-        fmt = m["format"]
-        if fmt not in format_stats:
-            format_stats[fmt] = {"bpp": [], "score": []}
-        format_stats[fmt]["bpp"].append(m["bpp"])
-        format_stats[fmt]["score"].append(m["ssimulacra2"])
-
-    # Calculate averages
-    formats_sorted = sorted(format_stats.keys())
-    avg_bpp = [
-        sum(format_stats[f]["bpp"]) / len(format_stats[f]["bpp"])
-        for f in formats_sorted
-    ]
-    avg_score = [
-        sum(format_stats[f]["score"]) / len(format_stats[f]["score"])
-        for f in formats_sorted
-    ]
-
-    # Create grouped bar chart
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
-
-    x = np.arange(len(formats_sorted))
-    width = 0.6
-
-    # Plot average bpp
-    axes[0].bar(x, avg_bpp, width, color="steelblue", alpha=0.8)
-    axes[0].set_xlabel("Format")
-    axes[0].set_ylabel("Average Bits per Pixel")
-    axes[0].set_title("Compression Efficiency (lower is better)")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels([f.upper() for f in formats_sorted])
-    axes[0].set_ylim(bottom=0)
-    for i, v in enumerate(avg_bpp):
-        axes[0].text(i, v + 0.05, f"{v:.2f}", ha="center", fontsize=9)
-
-    # Plot average score
-    axes[1].bar(x, avg_score, width, color="forestgreen", alpha=0.8)
-    axes[1].set_xlabel("Format")
-    axes[1].set_ylabel("Average SSIMULACRA2 Score")
-    axes[1].set_title("Visual Quality (higher is better)")
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels([f.upper() for f in formats_sorted])
-    axes[1].set_ylim(bottom=0)
-    for i, v in enumerate(avg_score):
-        axes[1].text(i, v + 0.5, f"{v:.1f}", ha="center", fontsize=9)
-
-    fig.suptitle("Format Comparison", fontsize=14)
-
-    return ("format_comparison.png", fig)
-
-
-def create_implementation_comparison_plots(
-    metrics: list[BenchmarkMetrics],
-) -> list[Tuple[str, Any]]:
-    """Box plots comparing implementations within each format.
-
-    Shows distribution of quality scores and bpp per implementation,
-    helping identify which implementations are most consistent.
-
-    Returns a list of tuples (filename, Figure).
-    """
-
-    plots: list[Tuple[str, Any]] = []
-
-    encode_metrics = _filter_valid_encode_metrics(metrics)
-
-    if not encode_metrics:
-        return plots
-
-    formats = _group_by(encode_metrics, lambda m: m["format"])
-
-    # Create one plot per format
-    for fmt, fmt_metrics in sorted(formats.items()):
-        impls = _group_by(fmt_metrics, lambda m: m["impl"])
-
-        if len(impls) < 2:
-            continue  # Skip if only one implementation
-
-        impl_names = sorted(impls.keys())
-
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
-
-        # Prepare data for box plots
-        bpp_data = [sorted([m["bpp"] for m in impls[impl]]) for impl in impl_names]
-        score_data = [
-            sorted([m["ssimulacra2"] for m in impls[impl]]) for impl in impl_names
-        ]
-
-        # Box plot for bpp
-        bp1 = axes[0].boxplot(bpp_data, tick_labels=impl_names, patch_artist=True)
-        axes[0].set_ylabel("Bits per Pixel")
-        axes[0].set_title("Compression Efficiency Distribution")
-        axes[0].tick_params(axis="x", rotation=45)
-        axes[0].set_ylim(bottom=0)
-        for patch in bp1["boxes"]:
-            patch.set_facecolor("steelblue")
-            patch.set_alpha(0.7)
-
-        # Box plot for score
-        bp2 = axes[1].boxplot(score_data, tick_labels=impl_names, patch_artist=True)
-        axes[1].set_ylabel("SSIMULACRA2 Score")
-        axes[1].set_title("Visual Quality Distribution")
-        axes[1].tick_params(axis="x", rotation=45)
-        axes[1].set_ylim(bottom=0)
-        for patch in bp2["boxes"]:
-            patch.set_facecolor("forestgreen")
-            patch.set_alpha(0.7)
-
-        fig.suptitle(f"{fmt.upper()} - Implementation Comparison", fontsize=14)
-
-        filename = f"impl_comparison_{fmt}.png"
-        plots.append((filename, fig))
-
-    return plots
-
-
-def create_rd_curve_plots(
-    metrics: list[BenchmarkMetrics],
-) -> list[Tuple[str, Any]]:
-    """Rate-distortion curves per format: SSIMULACRA2-vs-bpp and PSNR-vs-bpp, one
-    connected line per implementation (points sorted by bpp). This is the dense,
-    curve form of the quality-vs-bpp scatter — with many quality-sweep points it
-    traces each codec's size/quality tradeoff (issue #8).
-
-    Returns a list of (filename, Figure).
-    """
-    plots: list[Tuple[str, Any]] = []
-    encode_metrics = _filter_valid_encode_metrics(metrics)
-    if not encode_metrics:
-        return plots
-
-    formats = _group_by(encode_metrics, lambda m: m["format"])
-    for fmt, fmt_metrics in sorted(formats.items()):
-        impls = _group_by(fmt_metrics, lambda m: m["impl"])
-        colors = plt.cm.tab10.colors
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
-        has_psnr = False
-        for idx, (impl_name, im) in enumerate(sorted(impls.items())):
-            color = colors[idx % len(colors)]
-            pts = sorted(im, key=lambda m: m["bpp"])
-            bpps = [m["bpp"] for m in pts]
-            scores = [m["ssimulacra2"] for m in pts]
-            axes[0].plot(
-                bpps, scores, marker="o", ms=4, alpha=0.85, label=impl_name, color=color
-            )
-            # PSNR panel: drop points with no finite PSNR (e.g. lossless).
-            ppts = [m for m in pts if m.get("psnr") is not None and m["psnr"] > 0]
-            if ppts:
-                has_psnr = True
-                axes[1].plot(
-                    [m["bpp"] for m in ppts],
-                    [m["psnr"] for m in ppts],
-                    marker="o",
-                    ms=4,
-                    alpha=0.85,
-                    label=impl_name,
-                    color=color,
-                )
-
-        axes[0].set_xlabel("Bits per Pixel (bpp)")
-        axes[0].set_ylabel("SSIMULACRA2 (higher is better)")
-        axes[0].set_title("SSIMULACRA2 vs bpp")
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_xlim(left=0)
-        axes[0].legend(loc="lower right", fontsize="small")
-
-        axes[1].set_xlabel("Bits per Pixel (bpp)")
-        axes[1].set_ylabel("PSNR dB (higher is better)")
-        axes[1].set_title("PSNR vs bpp" if has_psnr else "PSNR vs bpp (no finite data)")
-        axes[1].grid(True, alpha=0.3)
-        axes[1].set_xlim(left=0)
-        if has_psnr:
-            axes[1].legend(loc="lower right", fontsize="small")
-
-        fig.suptitle(f"{fmt.upper()} — Rate-Distortion", fontsize=14)
-        plots.append((f"rd_curve_{fmt}.png", fig))
 
     return plots
 
