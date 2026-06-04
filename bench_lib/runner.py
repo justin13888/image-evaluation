@@ -27,6 +27,7 @@ from bench_lib.models import (
     FORMAT_EXT_MAP,
     IMPLEMENTATIONS,
     NULL_IMPLEMENTATIONS,
+    REFERENCE_DECODERS,
     REFERENCE_ENCODERS,
     THREAD_MODES,
     BenchList,
@@ -54,6 +55,10 @@ from bench_lib.system_info import (
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# iqa-cli: in-repo Rust binary computing IQA metrics (SSIMULACRA2 + PSNR) via the
+# iqa-rs crate. Built as part of the Rust workspace (cargo build --release).
+IQA_CLI_BIN = os.path.join(PROJECT_ROOT, "target", "release", "iqa-cli")
 
 DATASET_FILES_CHECKED: Set[str] = set()
 
@@ -282,6 +287,64 @@ def _task_metric_fields(task: BenchmarkTask) -> Dict[str, str]:
     }
 
 
+def _decode_to_ppm(task: BenchmarkTask, encoded_path: str, ppm_path: str) -> None:
+    """Decode an encoded output back to PPM using the format's reference decoder,
+    so iqa-cli can compare raw pixels (iqa-rs does not decode codec formats)."""
+    ref_name = REFERENCE_DECODERS.get(task.impl.format)
+    if not ref_name:
+        raise RuntimeError(f"No reference decoder defined for {task.impl.format}")
+    ref_dec = find_implementation_by_name(ref_name)
+    if not ref_dec:
+        raise RuntimeError(f"Reference decoder {ref_name} not found")
+    if not os.path.exists(ref_dec.bin):
+        build_project(ref_dec)
+    subprocess.run(
+        [
+            ref_dec.bin,
+            "--input",
+            encoded_path,
+            "--output",
+            ppm_path,
+            "--iterations",
+            "1",
+            "--warmup",
+            "0",
+            "--threads",
+            "0",
+        ],
+        check=True,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _run_iqa(reference_path: str, distorted_path: str) -> tuple[float, Optional[float]]:
+    """Run iqa-cli on two images, returning (ssimulacra2, psnr). SSIMULACRA2 is
+    -1.0 if missing; PSNR is None when non-finite/unavailable."""
+    res = subprocess.run(
+        [
+            IQA_CLI_BIN,
+            "--reference",
+            reference_path,
+            "--distorted",
+            distorted_path,
+            "--metric",
+            "ssimulacra2,psnr",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(res.stdout.strip())
+    ss = data.get("ssimulacra2")
+    psnr = data.get("psnr")
+    return (
+        float(ss) if ss is not None else -1.0,
+        float(psnr) if psnr is not None else None,
+    )
+
+
 def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetrics]:
     """Generate file size and visual quality metrics."""
     print(f"{Fore.BLUE}{'=' * 70}\nCOLLECTING METRICS\n{'=' * 70}\n")
@@ -337,30 +400,16 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                 except Exception:
                     filesize = 0
 
-                # 2. Run (modified) ssimulacra2_rs binary.
-                score = -1.0
-                ssimulacra2_bin = os.path.join(
-                    PROJECT_ROOT,
-                    "vendor",
-                    "build",
-                    "ssimulacra2",
-                    "release",
-                    "ssimulacra2_rs",
-                )
-                res = subprocess.run(
-                    [ssimulacra2_bin, "image", task.source_path, output_path],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                out_str = res.stdout.strip()  # Output is like "Score: 87.432321"
-
-                if re.fullmatch(r"^Score: -?\d+\.\d+$", out_str):
-                    score = float(out_str.split(": ")[1])
+                # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR, from iqa-rs).
+                # iqa-rs consumes raw pixels, so an encoded output is first
+                # decoded to PPM with the format's reference decoder; decode tasks
+                # already produce a PPM. The reference is the original source.
+                if task.impl.type == BenchmarkType.ENCODE:
+                    distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
+                    _decode_to_ppm(task, output_path, distorted_ppm)
                 else:
-                    raise ValueError(
-                        f"Unable to parse SSIMULACRA 2 output: `{out_str}`"
-                    )
+                    distorted_ppm = output_path
+                score, psnr = _run_iqa(task.source_path, distorted_ppm)
 
                 # 3. Get image dimensions from source file
                 width, height, megapixels, bpp = 0, 0, 0.0, 0.0
@@ -375,8 +424,11 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                         f"{Fore.YELLOW}Warning: Could not get dimensions: {img_err}{Style.RESET_ALL}"
                     )
 
+                psnr_str = f"{psnr:.2f}" if psnr is not None else "∞/NA"
                 print(
-                    f"{Fore.GREEN}✓ Size: {humanize.naturalsize(filesize, binary=True)}, Score: {score:.2f}, bpp: {bpp:.3f} {Style.RESET_ALL}(took {elapsed_time:.1f} s)"
+                    f"{Fore.GREEN}✓ Size: {humanize.naturalsize(filesize, binary=True)}, "
+                    f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, bpp: {bpp:.3f} "
+                    f"{Style.RESET_ALL}(took {elapsed_time:.1f} s)"
                 )
 
                 metrics.append(
@@ -390,6 +442,7 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                         source_path=task.source_path,
                         filesize=filesize,
                         ssimulacra2=score,
+                        psnr=psnr,
                         error=None,
                         type=task.impl.type.value,
                         format=task.impl.format.value,
@@ -420,6 +473,7 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                         source_path=task.source_path,
                         filesize=0,
                         ssimulacra2=-1.0,
+                        psnr=None,
                         error=str(e),
                         type=task.impl.type.value,
                         format=task.impl.format.value,

@@ -1,5 +1,5 @@
 [workspace]
-members = ["harness/rust", "implementations/rust/*"]
+members = ["harness/rust", "implementations/rust/*", "tools/iqa-cli"]
 # Vendored Rust crates (rav1d, ssimulacra2, jxl-rs) declare their own workspaces;
 # exclude them so cargo resolves their workspace-inherited settings against their
 # own roots rather than this one.

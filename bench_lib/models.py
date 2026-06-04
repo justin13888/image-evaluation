@@ -526,6 +526,17 @@ REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
     PPMImageFormat.PPM: "null-cpp-encode",
 }
 
+# Reference decoders, used to turn an encoded output back into a PPM so iqa-cli
+# (which does not decode codec formats) can compare raw pixels against the
+# source. One trusted decoder per format.
+REFERENCE_DECODERS: Dict[ImageFormats, str] = {
+    ImageFormat.JPEG: "libjpeg-turbo-decode",
+    ImageFormat.PNG: "libpng-decode",
+    ImageFormat.WEBP: "libwebp-decode",
+    ImageFormat.AVIF: "libavif-decode",
+    ImageFormat.JXL: "libjxl-decode",
+}
+
 
 # Threading configurations: single-threaded (per-core efficiency) then all-cores
 # (real-world throughput). Output bytes are identical across these, so metrics
@@ -998,7 +1009,11 @@ class BenchmarkMetrics(TypedDict):
     input_path: str
     source_path: str
     filesize: int
+    # IQA scores from iqa-rs (via the iqa-cli binary). ssimulacra2: 100 = identical,
+    # -1.0 on error. psnr in dB; None when non-finite (pixel-identical -> +inf) or
+    # unavailable. TODO: butteraugli + ssim once iqa-rs/iqa-cli expose them.
     ssimulacra2: float
+    psnr: Optional[float]
     error: Optional[str]
     type: str
     format: str

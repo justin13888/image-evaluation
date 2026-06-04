@@ -639,39 +639,6 @@ def build_libwebp():
     )
 
 
-def build_ssimulacra2():
-    label = "ssimulacra2"
-    binary = os.path.join(BUILD_DIR, "ssimulacra2", "release", "ssimulacra2_rs")
-    if os.path.exists(binary):
-        print(f"  [{label}] Already built, skipping.")
-        return
-
-    manifest = os.path.join(VENDOR_DIR, "ssimulacra2", "ssimulacra2_bin", "Cargo.toml")
-    target_dir = os.path.join(BUILD_DIR, "ssimulacra2")
-    os.makedirs(target_dir, exist_ok=True)
-
-    env = os.environ.copy()
-    env["RUSTFLAGS"] = "-C target-cpu=native"
-
-    print(f"  [{label}] Building ssimulacra2_rs...")
-    run(
-        [
-            "cargo",
-            "build",
-            "--release",
-            "--no-default-features",
-            "--features",
-            "avif",
-            "--manifest-path",
-            manifest,
-            "--target-dir",
-            target_dir,
-        ],
-        env=env,
-        label=label,
-    )
-
-
 def main():
     print("=" * 70)
     print("BUILDING VENDORED DEPENDENCIES")
@@ -692,7 +659,8 @@ def main():
         ("libavif", build_libavif),
         ("libjxl", build_libjxl),
         ("libwebp", build_libwebp),
-        ("ssimulacra2", build_ssimulacra2),
+        # Image-quality metrics now come from the iqa-rs crate, built as part of
+        # the Rust workspace (tools/iqa-cli); no vendored ssimulacra2 binary.
     ]
 
     for name, fn in steps:
