@@ -117,6 +117,10 @@ The suite is split into **two distinctly separate benchmarks**, each its own sub
 # Fewer, evenly-sampled points per encoder (e.g. 5)
 ./bench quality --dataset kodak --quality-steps 5 --formats jpeg jxl
 
+# --- Both suites in one bundle ---
+# Runs perf + quality into a single results bundle with a self-contained report.html
+./bench all --dataset kodak
+
 # --- Shared ---
 ./bench compile          # build vendored libs + all implementations + iqa-cli
 ./bench clean            # remove build artifacts and results
@@ -132,28 +136,22 @@ The suite is split into **two distinctly separate benchmarks**, each its own sub
 
 ### Results
 
-Each run writes to its own `./results/<timestamp>/` directory.
+Every run writes a **bundle** to `./results/<timestamp>/` containing a `performance/` and/or `quality/` subfolder (both for `./bench all`), plus a top-level index and a self-contained report:
 
-**`./bench perf`** produces:
+```
+results/<timestamp>/
+├── report.html        # self-contained: every chart embedded (base64), opens offline
+├── summary.md         # index linking the per-suite summaries
+├── manifest.json      # bundle metadata (which suites ran)
+├── performance/       # (perf / all) raw.json, summary.md, timing charts, memory.csv
+└── quality/           # (quality / all) metrics.json, summary.md, R-D + BD-rate charts
+```
 
-| Artifact | Contents |
-| :------- | :------- |
-| `summary.md` | Timing table (Implementation, Operating point, Threads, Lang, Mean/Std Dev/95% CI/Min/Max ms) + grouped single-vs-all-cores charts, one per (format, operation). |
-| `raw.json` | Full Hyperfine output — per command: `mean/median/stddev/min/max/user/system`, `times[]`, `exit_codes[]`. |
-| `manifest.json` | Reproducibility manifest (system, compiler & library versions, allocator, `benchmark_config` with `suite: performance`). |
-| `*.png` | Timing charts referenced by `summary.md`. |
-| `memory.csv` | Peak RSS per task (only with `--measure-memory`). |
+**`performance/`** — `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`), and `memory.csv` (with `--measure-memory`).
 
-**`./bench quality`** produces:
+**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, dimensions, the swept `quality_axis`/`quality_value`), `summary.md` (rate-distortion analysis + BD-rate table + per-step metrics table), `rd_curve_{fmt}.png` / `format_comparison.png` / `impl_comparison_{fmt}.png`, and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`).
 
-| Artifact | Contents |
-| :------- | :------- |
-| `summary.md` | Rate-distortion analysis (SSIMULACRA2/PSNR vs bpp) + per-step metrics table (with PSNR column). |
-| `metrics.json` | Per (impl, format, operating point, image): `filesize`, `bpp`, `ssimulacra2`, `psnr`, `width/height/megapixels`, the swept `quality_axis`/`quality_value`, plus `impl/lang/build/format/type`. |
-| `manifest.json` | Reproducibility manifest with `suite: quality` and the exact per-encoder `quality_sweeps`. |
-| `*.png` | `quality_vs_bpp_{fmt}.png`, `format_comparison.png`, `impl_comparison_{fmt}.png`. |
-
-> A future change bundles a `perf` + `quality` pair into a single result set with a self-contained `report.html`.
+**`report.html`** bundles all of a run's charts (and the BD-rate table) into one file with images embedded as base64 — no external assets, so it can be archived or shared as a single artifact.
 
 ## Methodology
 
