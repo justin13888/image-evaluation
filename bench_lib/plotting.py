@@ -1,10 +1,13 @@
 """Matplotlib figure creation for benchmark results."""
 
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
-from typing import Callable, Dict, Any, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple
 
 from bench_lib.models import (
+    REFERENCE_ENCODERS,
     BenchmarkKey,
     BenchmarkMetrics,
     BenchmarkType,
@@ -142,65 +145,6 @@ def create_plots_from_parsed_results(
     return plots
 
 
-def create_quality_vs_bpp_plots(
-    metrics: list[BenchmarkMetrics],
-) -> list[Tuple[str, Any]]:
-    """Create scatter plots of SSIMULACRA2 score vs bits-per-pixel per format.
-
-    Groups by format, each point is one image encoded by one implementation.
-    Shows which implementations achieve better quality at lower file sizes.
-
-    Returns a list of tuples (filename, Figure).
-    """
-
-    plots: list[Tuple[str, Any]] = []
-
-    encode_metrics = _filter_valid_encode_metrics(metrics)
-
-    if not encode_metrics:
-        return plots
-
-    formats = _group_by(encode_metrics, lambda m: m["format"])
-
-    # Create one plot per format
-    for fmt, fmt_metrics in sorted(formats.items()):
-        impls = _group_by(fmt_metrics, lambda m: m["impl"])
-
-        fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
-
-        # Use a colormap
-        colors = plt.cm.tab10.colors
-        for idx, (impl_name, impl_metrics) in enumerate(sorted(impls.items())):
-            bpps = [m["bpp"] for m in impl_metrics]
-            scores = [m["ssimulacra2"] for m in impl_metrics]
-            color = colors[idx % len(colors)]
-            ax.scatter(bpps, scores, label=impl_name, alpha=0.7, s=50, c=[color])
-
-        ax.set_xlabel("Bits per Pixel (bpp)")
-        ax.set_ylabel("SSIMULACRA2 Score")
-        ax.set_title(f"{fmt.upper()} - Quality vs Compression Efficiency")
-        ax.legend(loc="lower right", fontsize="small")
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
-
-        # Higher score and lower bpp is better (top-left corner)
-        ax.annotate(
-            "← Better",
-            xy=(0.02, 0.98),
-            xycoords="axes fraction",
-            fontsize=9,
-            color="green",
-            ha="left",
-            va="top",
-        )
-
-        filename = f"quality_vs_bpp_{fmt}.png"
-        plots.append((filename, fig))
-
-    return plots
-
-
 def create_format_comparison_plot(
     metrics: list[BenchmarkMetrics],
 ) -> Optional[Tuple[str, Any]]:
@@ -333,3 +277,169 @@ def create_implementation_comparison_plots(
         plots.append((filename, fig))
 
     return plots
+
+
+def create_rd_curve_plots(
+    metrics: list[BenchmarkMetrics],
+) -> list[Tuple[str, Any]]:
+    """Rate-distortion curves per format: SSIMULACRA2-vs-bpp and PSNR-vs-bpp, one
+    connected line per implementation (points sorted by bpp). This is the dense,
+    curve form of the quality-vs-bpp scatter — with many quality-sweep points it
+    traces each codec's size/quality tradeoff (issue #8).
+
+    Returns a list of (filename, Figure).
+    """
+    plots: list[Tuple[str, Any]] = []
+    encode_metrics = _filter_valid_encode_metrics(metrics)
+    if not encode_metrics:
+        return plots
+
+    formats = _group_by(encode_metrics, lambda m: m["format"])
+    for fmt, fmt_metrics in sorted(formats.items()):
+        impls = _group_by(fmt_metrics, lambda m: m["impl"])
+        colors = plt.cm.tab10.colors
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+        has_psnr = False
+        for idx, (impl_name, im) in enumerate(sorted(impls.items())):
+            color = colors[idx % len(colors)]
+            pts = sorted(im, key=lambda m: m["bpp"])
+            bpps = [m["bpp"] for m in pts]
+            scores = [m["ssimulacra2"] for m in pts]
+            axes[0].plot(
+                bpps, scores, marker="o", ms=4, alpha=0.85, label=impl_name, color=color
+            )
+            # PSNR panel: drop points with no finite PSNR (e.g. lossless).
+            ppts = [m for m in pts if m.get("psnr") is not None and m["psnr"] > 0]
+            if ppts:
+                has_psnr = True
+                axes[1].plot(
+                    [m["bpp"] for m in ppts],
+                    [m["psnr"] for m in ppts],
+                    marker="o",
+                    ms=4,
+                    alpha=0.85,
+                    label=impl_name,
+                    color=color,
+                )
+
+        axes[0].set_xlabel("Bits per Pixel (bpp)")
+        axes[0].set_ylabel("SSIMULACRA2 (higher is better)")
+        axes[0].set_title("SSIMULACRA2 vs bpp")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].set_xlim(left=0)
+        axes[0].legend(loc="lower right", fontsize="small")
+
+        axes[1].set_xlabel("Bits per Pixel (bpp)")
+        axes[1].set_ylabel("PSNR dB (higher is better)")
+        axes[1].set_title("PSNR vs bpp" if has_psnr else "PSNR vs bpp (no finite data)")
+        axes[1].grid(True, alpha=0.3)
+        axes[1].set_xlim(left=0)
+        if has_psnr:
+            axes[1].legend(loc="lower right", fontsize="small")
+
+        fig.suptitle(f"{fmt.upper()} — Rate-Distortion", fontsize=14)
+        plots.append((f"rd_curve_{fmt}.png", fig))
+
+    return plots
+
+
+def compute_bd_rate(
+    rate_ref: List[float],
+    metric_ref: List[float],
+    rate_test: List[float],
+    metric_test: List[float],
+) -> Optional[float]:
+    """Bjøntegaard delta-rate (%) of `test` relative to `ref`, using `metric`
+    (e.g. SSIMULACRA2) as the quality axis and log(rate=bpp). Negative means the
+    test codec needs *less* rate for the same quality (better). Returns ``None``
+    when it cannot be computed (too few points, no overlap, or a numerical
+    failure)."""
+    try:
+        if len(rate_ref) < 2 or len(rate_test) < 2:
+            return None
+        lr_ref = np.log(np.asarray(rate_ref, dtype=float))
+        lr_test = np.log(np.asarray(rate_test, dtype=float))
+        m_ref = np.asarray(metric_ref, dtype=float)
+        m_test = np.asarray(metric_test, dtype=float)
+
+        lo = max(m_ref.min(), m_test.min())
+        hi = min(m_ref.max(), m_test.max())
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return None
+
+        deg = min(3, len(m_ref) - 1, len(m_test) - 1)
+        if deg < 1:
+            return None
+        p_ref = np.polyfit(m_ref, lr_ref, deg)
+        p_test = np.polyfit(m_test, lr_test, deg)
+        ip_ref = np.polyint(p_ref)
+        ip_test = np.polyint(p_test)
+        int_ref = np.polyval(ip_ref, hi) - np.polyval(ip_ref, lo)
+        int_test = np.polyval(ip_test, hi) - np.polyval(ip_test, lo)
+        avg = (int_test - int_ref) / (hi - lo)
+        result = (np.exp(avg) - 1.0) * 100.0
+        return float(result) if np.isfinite(result) else None
+    except Exception:
+        return None
+
+
+def compute_bd_rate_table(
+    metrics: list[BenchmarkMetrics],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Per-format BD-rate of each lossy encoder versus that format's reference
+    encoder, using SSIMULACRA2. BD-rate is computed per image (each image is its
+    own rate-distortion curve) and averaged across the dataset.
+
+    Returns ``{format: {impl: bd_rate_percent_or_None}}`` (excludes the anchor).
+    """
+    table: Dict[str, Dict[str, Optional[float]]] = {}
+    encode_metrics = _filter_valid_encode_metrics(metrics)
+    if not encode_metrics:
+        return table
+
+    by_fmt = _group_by(encode_metrics, lambda m: m["format"])
+    for fmt, fmt_metrics in by_fmt.items():
+        try:
+            anchor = REFERENCE_ENCODERS.get(ImageFormat(fmt))
+        except ValueError:
+            anchor = None
+        if anchor is None:
+            continue
+
+        # (impl, image) -> sorted [(bpp, ssimulacra2)]
+        curves: Dict[Tuple[str, str], list] = {}
+        for m in fmt_metrics:
+            key = (m["impl"], os.path.basename(m["input_path"]))
+            curves.setdefault(key, []).append((m["bpp"], m["ssimulacra2"]))
+
+        impls = sorted({m["impl"] for m in fmt_metrics})
+        images = sorted({os.path.basename(m["input_path"]) for m in fmt_metrics})
+        if anchor not in impls:
+            continue
+
+        fmt_table: Dict[str, Optional[float]] = {}
+        for impl in impls:
+            if impl == anchor:
+                continue
+            rates: list = []
+            for img in images:
+                ref = curves.get((anchor, img))
+                test = curves.get((impl, img))
+                if not ref or not test:
+                    continue
+                ref_s = sorted(ref)
+                test_s = sorted(test)
+                bd = compute_bd_rate(
+                    [p[0] for p in ref_s],
+                    [p[1] for p in ref_s],
+                    [p[0] for p in test_s],
+                    [p[1] for p in test_s],
+                )
+                if bd is not None:
+                    rates.append(bd)
+            fmt_table[impl] = (sum(rates) / len(rates)) if rates else None
+        if fmt_table:
+            table[fmt] = fmt_table
+
+    return table

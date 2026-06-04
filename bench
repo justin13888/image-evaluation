@@ -13,6 +13,7 @@ import tyro
 from colorama import init
 
 from bench_lib.models import (
+    AllArgs,
     CliEntry,
     CleanArgs,
     CompileArgs,
@@ -21,6 +22,7 @@ from bench_lib.models import (
     SetupArgs,
 )
 from bench_lib.runner import (
+    run_all,
     run_clean,
     run_compile,
     run_perf,
@@ -44,6 +46,9 @@ if __name__ == "__main__":
 
         elif isinstance(args, QualityArgs):
             run_quality(args)
+
+        elif isinstance(args, AllArgs):
+            run_all(args)
 
         elif isinstance(args, SetupArgs):
             run_setup(args)

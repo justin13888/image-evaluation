@@ -23,6 +23,7 @@ from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
 from bench_lib.models import (
+    AllArgs,
     DATASETS,
     FORMAT_EXT_MAP,
     IMPLEMENTATIONS,
@@ -49,6 +50,7 @@ from bench_lib.models import (
     schema_for,
     select_sweep,
 )
+from bench_lib.report import generate_report_html
 from bench_lib.summary import generate_summary
 from bench_lib.system_info import (
     _detect_mimalloc_version,
@@ -669,21 +671,15 @@ def _base_manifest() -> dict:
     }
 
 
-def run_perf(args: PerfArgs):
-    """Performance suite: hyperfine timing of encode + decode at each
+def _run_perf_suite(args: PerfArgs, result_dir: str):
+    """Performance suite body: hyperfine timing of encode + decode at each
     implementation's fixed preset, swept across both threading modes. Timing is
     always compute-only (--discard); no size/quality metrics are collected here
-    (that is the quality suite's job)."""
+    (that is the quality suite's job). Writes its artifacts into `result_dir`;
+    the caller handles building and bundle finalization."""
     formats = args.formats
     # Both threading modes; --quick collapses to all-cores only.
     thread_modes = [0] if args.quick else list(THREAD_MODES)
-
-    if not args.skip_build:
-        build_projects(formats)
-    else:
-        print("Skipping build step (--skip-build)...")
-
-    result_dir = _new_result_dir()
 
     print("=" * 70)
     print("PERFORMANCE SUITE")
@@ -782,30 +778,14 @@ def run_perf(args: PerfArgs):
         mem_names = [task.name() for task in benches]
         measure_memory(result_dir, mem_commands, mem_names)
 
-    print("\n" + "=" * 70)
-    print("RESULTS")
-    print("=" * 70)
-    print(f"\nResults saved to: {result_dir}/")
-    print("  - manifest.json  : Reproducibility metadata")
-    print("  - raw.json       : Full hyperfine output")
-    print("  - summary.md     : Human-readable timing tables + charts")
-    if args.measure_memory:
-        print("  - memory.csv     : Peak RSS measurements")
-    print()
 
-
-def run_quality(args: QualityArgs):
-    """Quality suite: sweep each lossy encoder's quality axis over many steps and
-    measure file size + IQA (SSIMULACRA2, PSNR) per step, tracing a
-    rate-distortion curve (issue #8). Encoders only; no timing, no thread sweep."""
+def _run_quality_suite(args: QualityArgs, result_dir: str):
+    """Quality suite body: sweep each lossy encoder's quality axis over many
+    steps and measure file size + IQA (SSIMULACRA2, PSNR) per step, tracing a
+    rate-distortion curve (issue #8). Encoders only; no timing, no thread sweep.
+    Writes its artifacts into `result_dir`; the caller handles building and
+    bundle finalization."""
     formats = args.formats
-
-    if not args.skip_build:
-        build_projects(formats)
-    else:
-        print("Skipping build step (--skip-build)...")
-
-    result_dir = _new_result_dir()
 
     print("=" * 70)
     print("QUALITY SUITE")
@@ -854,14 +834,120 @@ def run_quality(args: QualityArgs):
     # IQA/size-only summary (rate-distortion plots, no timing in this suite).
     generate_summary(result_dir, None, metrics)
 
+
+def _finalize_bundle(bundle_dir: str, suites: list[str]):
+    """Write the bundle's top-level manifest, an index summary.md linking the
+    per-suite reports, and a self-contained report.html embedding every chart."""
+    manifest = {
+        **_base_manifest(),
+        "bundle": True,
+        "suites": suites,
+    }
+    with open(os.path.join(bundle_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    lines = ["# Benchmark Bundle\n"]
+    if "performance" in suites:
+        lines.append(
+            "- Performance (timing): [`performance/summary.md`](performance/summary.md)"
+        )
+    if "quality" in suites:
+        lines.append(
+            "- Quality (rate-distortion): [`quality/summary.md`](quality/summary.md)"
+        )
+    lines.append(
+        "\nOpen [`report.html`](report.html) for a single self-contained view.\n"
+    )
+    with open(os.path.join(bundle_dir, "summary.md"), "w") as f:
+        f.write("\n".join(lines))
+
+    generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    report_path = generate_report_html(bundle_dir, generated_at=generated_at)
+    print(f"\n✓ Bundle report written to {report_path}")
+
+
+def _print_bundle(bundle_dir: str, suites: list[str]):
     print("\n" + "=" * 70)
     print("RESULTS")
     print("=" * 70)
-    print(f"\nResults saved to: {result_dir}/")
-    print("  - manifest.json  : Reproducibility metadata + per-encoder sweeps")
-    print("  - metrics.json   : File sizes, bpp, SSIMULACRA2 + PSNR per step")
-    print("  - summary.md     : Rate-distortion analysis + metrics table")
+    print(f"\nBundle saved to: {bundle_dir}/")
+    if "performance" in suites:
+        print("  - performance/   : raw.json, summary.md, timing charts, memory.csv")
+    if "quality" in suites:
+        print("  - quality/       : metrics.json, summary.md, rate-distortion charts")
+    print("  - manifest.json  : bundle metadata")
+    print("  - summary.md     : index")
+    print("  - report.html    : self-contained report (all charts embedded)")
     print()
+
+
+def run_perf(args: PerfArgs):
+    """Run the performance suite into a fresh bundle (performance/ subfolder)."""
+    if not args.skip_build:
+        build_projects(args.formats)
+    else:
+        print("Skipping build step (--skip-build)...")
+    bundle = _new_result_dir()
+    perf_dir = os.path.join(bundle, "performance")
+    os.makedirs(perf_dir, exist_ok=True)
+    _run_perf_suite(args, perf_dir)
+    _finalize_bundle(bundle, ["performance"])
+    _print_bundle(bundle, ["performance"])
+
+
+def run_quality(args: QualityArgs):
+    """Run the quality suite into a fresh bundle (quality/ subfolder)."""
+    if not args.skip_build:
+        build_projects(args.formats)
+    else:
+        print("Skipping build step (--skip-build)...")
+    bundle = _new_result_dir()
+    qual_dir = os.path.join(bundle, "quality")
+    os.makedirs(qual_dir, exist_ok=True)
+    _run_quality_suite(args, qual_dir)
+    _finalize_bundle(bundle, ["quality"])
+    _print_bundle(bundle, ["quality"])
+
+
+def run_all(args: AllArgs):
+    """Run both suites into one bundle (performance/ + quality/ subfolders)."""
+    if not args.skip_build:
+        build_projects(args.formats)
+    else:
+        print("Skipping build step (--skip-build)...")
+    bundle = _new_result_dir()
+    perf_dir = os.path.join(bundle, "performance")
+    qual_dir = os.path.join(bundle, "quality")
+    os.makedirs(perf_dir, exist_ok=True)
+    os.makedirs(qual_dir, exist_ok=True)
+
+    # Suites skip their own build (done once above) via skip_build=True.
+    perf_args = PerfArgs(
+        formats=args.formats,
+        dataset=args.dataset,
+        mode=args.mode,
+        iterations=args.iterations,
+        warmup=args.warmup,
+        sample=args.sample,
+        pin_cores=args.pin_cores,
+        quick=args.quick,
+        measure_memory=args.measure_memory,
+        skip_build=True,
+        debug=args.debug,
+    )
+    quality_args = QualityArgs(
+        formats=args.formats,
+        dataset=args.dataset,
+        sample=args.sample,
+        quality_steps=args.quality_steps,
+        quick=args.quick,
+        skip_build=True,
+        debug=args.debug,
+    )
+    _run_perf_suite(perf_args, perf_dir)
+    _run_quality_suite(quality_args, qual_dir)
+    _finalize_bundle(bundle, ["performance", "quality"])
+    _print_bundle(bundle, ["performance", "quality"])
 
 
 def run_compile(args: CompileArgs):

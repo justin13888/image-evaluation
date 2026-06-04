@@ -874,6 +874,74 @@ class QualityArgs(BaseModel):
     ] = False
 
 
+class AllArgs(BaseModel):
+    """Run both suites into a single bundle (performance/ + quality/ + a
+    self-contained report.html). Combines the options of both suites."""
+
+    formats: Annotated[
+        list[ImageFormat],
+        tyro.conf.EnumChoicesFromValues,
+        tyro.conf.arg(aliases=["-f"]),
+        Field(description="List of formats to test."),
+    ] = list(ImageFormat)
+    dataset: Annotated[
+        DatasetId,
+        tyro.conf.EnumChoicesFromValues,
+        tyro.conf.arg(aliases=["-d"]),
+        Field(description="Dataset to benchmark"),
+    ] = DatasetId.TEST
+    mode: Annotated[
+        BenchmarkMode,
+        tyro.conf.EnumChoicesFromValues,
+        tyro.conf.arg(aliases=["-m"]),
+        Field(description="Performance-suite mode (subset filter; default both)"),
+    ] = BenchmarkMode.BOTH
+    iterations: Annotated[
+        int,
+        tyro.conf.arg(aliases=["-i"]),
+        Field(description="Iterations per timing benchmark"),
+    ] = 10
+    warmup: Annotated[
+        int,
+        tyro.conf.arg(aliases=["-w"]),
+        Field(description="Warmup iterations"),
+    ] = 2
+    sample: Annotated[
+        Optional[int],
+        Field(
+            description="Limit the maximum number of files from dataset to sample randomly"
+        ),
+    ] = None
+    quality_steps: Annotated[
+        Optional[int],
+        tyro.conf.arg(aliases=["-q"]),
+        Field(description="Number of quality-axis points per encoder (default: all)"),
+    ] = None
+    pin_cores: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(description="Pin performance benchmarks to specific CPU cores"),
+    ] = False
+    quick: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(description="Quick mode for both suites"),
+    ] = False
+    measure_memory: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(description="Measure peak memory usage (performance suite)"),
+    ] = False
+    skip_build: Annotated[
+        bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
+    ] = False
+    debug: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(description="Enable debug mode (more verbose output)"),
+    ] = False
+
+
 class CleanArgs(BaseModel):
     """Clean build artifacts."""
 
@@ -920,6 +988,7 @@ class SetupArgs(BaseModel):
 CliEntry = Union[
     Annotated[PerfArgs, tyro.conf.subcommand(name="perf")],
     Annotated[QualityArgs, tyro.conf.subcommand(name="quality")],
+    Annotated[AllArgs, tyro.conf.subcommand(name="all")],
     Annotated[CleanArgs, tyro.conf.subcommand(name="clean")],
     Annotated[CompileArgs, tyro.conf.subcommand(name="compile")],
     Annotated[SetupArgs, tyro.conf.subcommand(name="setup")],

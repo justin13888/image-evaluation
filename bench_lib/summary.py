@@ -15,10 +15,11 @@ from bench_lib.models import (
     find_implementation_by_name,
 )
 from bench_lib.plotting import (
+    compute_bd_rate_table,
     create_format_comparison_plot,
     create_implementation_comparison_plots,
     create_plots_from_parsed_results,
-    create_quality_vs_bpp_plots,
+    create_rd_curve_plots,
 )
 
 
@@ -239,29 +240,45 @@ def generate_summary(
             # Generate new visualization plots
             buffer.write("\n## Compression Analysis\n")
 
-            # 1. Quality vs BPP plots
-            quality_bpp_plots = create_quality_vs_bpp_plots(metrics)
-            if quality_bpp_plots:
-                buffer.write("\n### Quality vs Compression Efficiency\n\n")
+            # 1. Rate-distortion curves (the dense quality-sweep view, issue #8)
+            rd_plots = create_rd_curve_plots(metrics)
+            if rd_plots:
+                buffer.write("\n### Rate-Distortion Curves\n\n")
                 buffer.write(
-                    "Each point is one image encoded at one quality tier; the per-implementation "
-                    "spread traces its quality-vs-bpp curve. Higher SSIMULACRA2 score and lower "
-                    "bpp (top-left) indicates better compression efficiency.\n\n"
+                    "Each line is one implementation's quality sweep (points sorted by "
+                    "bpp): SSIMULACRA2-vs-bpp and PSNR-vs-bpp. Up and to the left "
+                    "(higher quality at lower bpp) is better.\n\n"
                 )
-                for filename, fig in quality_bpp_plots:
+                for filename, fig in rd_plots:
                     filepath = os.path.join(result_dir, filename)
                     fig.savefig(filepath, dpi=150)
                     plt.close(fig)
                     fmt_name = (
-                        filename.replace("quality_vs_bpp_", "")
-                        .replace(".png", "")
-                        .upper()
+                        filename.replace("rd_curve_", "").replace(".png", "").upper()
                     )
                     buffer.write(
-                        f"#### {fmt_name}\n\n![Quality vs BPP for {fmt_name}]({filename})\n\n"
+                        f"#### {fmt_name}\n\n![Rate-distortion for {fmt_name}]({filename})\n\n"
                     )
 
-            # 2. Format comparison plot
+            # 2. BD-rate table (Bjøntegaard delta-rate vs each format's reference)
+            bd_table = compute_bd_rate_table(metrics)
+            if bd_table:
+                buffer.write("\n### BD-rate (vs reference encoder)\n\n")
+                buffer.write(
+                    "Bjøntegaard delta-rate over SSIMULACRA2, per image then averaged. "
+                    "Negative = fewer bits for equal quality than the format's reference "
+                    "encoder (better); `N/A` = non-overlapping quality ranges.\n\n"
+                )
+                buffer.write("| Format | Implementation | BD-rate vs ref |\n")
+                buffer.write("|--------|----------------|----------------|\n")
+                for fmt in sorted(bd_table):
+                    for impl in sorted(bd_table[fmt]):
+                        bd = bd_table[fmt][impl]
+                        bd_str = f"{bd:+.1f}%" if bd is not None else "N/A"
+                        buffer.write(f"| {fmt.upper()} | {impl} | {bd_str} |\n")
+                buffer.write("\n")
+
+            # 3. Format comparison plot
             format_comparison = create_format_comparison_plot(metrics)
             if format_comparison:
                 filename, fig = format_comparison
@@ -271,17 +288,17 @@ def generate_summary(
                 buffer.write("\n### Format Comparison\n\n")
                 buffer.write(
                     "Aggregate comparison of formats across all implementations, images, "
-                    "and quality tiers.\n\n"
+                    "and quality-sweep points.\n\n"
                 )
                 buffer.write(f"![Format Comparison]({filename})\n\n")
 
-            # 3. Implementation comparison plots
+            # 4. Implementation comparison plots
             impl_comparison_plots = create_implementation_comparison_plots(metrics)
             if impl_comparison_plots:
                 buffer.write("\n### Implementation Comparison\n\n")
                 buffer.write(
                     "Box plots showing distribution of quality and compression across images "
-                    "and quality tiers per implementation.\n\n"
+                    "and quality-sweep points per implementation.\n\n"
                 )
                 for filename, fig in impl_comparison_plots:
                     filepath = os.path.join(result_dir, filename)
