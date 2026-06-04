@@ -431,38 +431,6 @@ def _libavif_cache_is_current(build_dir):
     return all(w in text for w in wanted)
 
 
-def _patch_libavif_for_svt4(src):
-    """Make libavif's codec_svt.c build against the pinned SVT-AV1 >=4.x.
-
-    libavif 1.2.1 sets the SVT config field `enable_adaptive_quantization`, which
-    SVT-AV1 4.x renamed to `aq_mode` (identical semantics: 2 = CRF). Patch the
-    vendored source in place so the SVT codec compiles. Idempotent: a no-op once
-    already patched (or if a future libavif/SVT pin no longer needs it).
-    """
-    path = os.path.join(src, "src", "codec_svt.c")
-    old = "svt_config->enable_adaptive_quantization = 2;"
-    new = "svt_config->aq_mode = 2;  // SVT-AV1 >=4.x renamed enable_adaptive_quantization"
-    with open(path) as f:
-        text = f.read()
-    if old in text:
-        with open(path, "w") as f:
-            f.write(text.replace(old, new))
-        print("  [libavif] Patched codec_svt.c for SVT-AV1 >=4.x (aq_mode).")
-
-
-def _restore_libavif_svt(src):
-    """Restore codec_svt.c after building so the (submodule) working tree stays
-    clean. The patch above is reapplied on each rebuild, so this is safe."""
-    try:
-        subprocess.run(
-            ["git", "-C", src, "checkout", "--", "src/codec_svt.c"],
-            check=False,
-            capture_output=True,
-        )
-    except Exception:
-        pass
-
-
 def build_libavif():
     label = "libavif"
     build_dir = os.path.join(BUILD_DIR, "libavif")
@@ -485,7 +453,6 @@ def build_libavif():
             if os.path.exists(cand):
                 os.remove(cand)
     src = os.path.join(VENDOR_DIR, "libavif")
-    _patch_libavif_for_svt4(src)
 
     # Build pkg-config paths to find vendored dav1d and aom
     pkg_lib_dirs = [
@@ -522,7 +489,6 @@ def build_libavif():
         label=label,
         extra_env={"PKG_CONFIG_PATH": pkg_config_path},
     )
-    _restore_libavif_svt(src)
 
 
 def build_libjxl():
