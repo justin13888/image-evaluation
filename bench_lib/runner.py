@@ -156,6 +156,15 @@ def get_input_files(
                         stderr=subprocess.DEVNULL,
                     )
 
+                # If the requested format is PPM itself, the converted P6
+                # intermediate IS the target. Running the reference "encoder"
+                # (null-cpp-encode) over it would overwrite the valid P6 file
+                # with headerless raw RGB (it writes img.data, not a PPM), so
+                # skip the encode step entirely.
+                if format == PPMImageFormat.PPM:
+                    input_files.append((intermediate_ppm, f))
+                    continue
+
                 # 2. Encode using reference encoder
                 ref_impl_name = REFERENCE_ENCODERS.get(format)
                 if not ref_impl_name:
