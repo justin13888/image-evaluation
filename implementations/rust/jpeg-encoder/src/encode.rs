@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use benchmark_harness::{Args, BenchmarkImplementation, Quality};
+use benchmark_harness::{Args, BenchmarkImplementation};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 
 struct JpegEncoderBench;
@@ -20,11 +20,12 @@ impl BenchmarkImplementation for JpegEncoderBench {
 
     fn prepare(&self, args: &Args) -> Result<Box<dyn std::any::Any>> {
         let (width, height, rgb8_img) = benchmark_harness::decode_ppm_rgb8(&args.input)?;
-        let (quality, is_progressive, sampling_factor) = match args.quality {
-            Quality::WebLow => (50u8, false, SamplingFactor::R_4_2_0),
-            Quality::WebHigh => (80u8, true, SamplingFactor::R_4_2_0),
-            Quality::Archival => (95u8, false, SamplingFactor::R_4_4_4),
-        };
+        let (quality, is_progressive, sampling_factor) =
+            match args.param_str("quality-tier", "web-high").as_str() {
+                "web-low" => (50u8, false, SamplingFactor::R_4_2_0),
+                "archival" => (95u8, false, SamplingFactor::R_4_4_4),
+                _ => (80u8, true, SamplingFactor::R_4_2_0),
+            };
         Ok(Box::new(BenchContext {
             quality,
             is_progressive,

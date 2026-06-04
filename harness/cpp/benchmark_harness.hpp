@@ -3,11 +3,13 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -18,12 +20,61 @@
 struct Args {
   std::string input;
   std::string output;
+  // Generic encoder/decoder tunables (key -> value). The orchestrator passes
+  // these via repeated `--param key=value`. Which keys an implementation reads
+  // depends on the implementation; unknown keys are ignored, so a superset can
+  // be passed safely.
+  std::map<std::string, std::string> params;
+  // DEPRECATED back-compat shim: a named quality preset folded into
+  // params["quality-tier"] (unless given explicitly). Removed once the
+  // orchestrator emits `--param quality-tier=<tier>` directly.
   std::string quality;
   int iterations = 10;
   int warmup = 2;
   int threads = 0;
   bool discard = false;
 };
+
+/// Look up a tunable by key, returning `def` if absent.
+inline std::string param_str(const Args& args, const std::string& key,
+                             const std::string& def) {
+  auto it = args.params.find(key);
+  return it != args.params.end() ? it->second : def;
+}
+
+/// Tunable as an int, or `def` if absent/unparseable.
+inline int param_int(const Args& args, const std::string& key, int def) {
+  auto it = args.params.find(key);
+  if (it == args.params.end()) return def;
+  try {
+    return std::stoi(it->second);
+  } catch (...) {
+    return def;
+  }
+}
+
+/// Tunable as a double, or `def` if absent/unparseable.
+inline double param_double(const Args& args, const std::string& key,
+                           double def) {
+  auto it = args.params.find(key);
+  if (it == args.params.end()) return def;
+  try {
+    return std::stod(it->second);
+  } catch (...) {
+    return def;
+  }
+}
+
+/// Tunable as a boolean. Truthy values: 1/true/yes/on (case-insensitive).
+/// Absent keys return `def`.
+inline bool param_bool(const Args& args, const std::string& key, bool def) {
+  auto it = args.params.find(key);
+  if (it == args.params.end()) return def;
+  std::string v = it->second;
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return v == "1" || v == "true" || v == "yes" || v == "on";
+}
 
 class BenchmarkImplementation {
  public:
@@ -183,7 +234,14 @@ inline Args parse_args(int argc, char** argv) {
       args.output = argv[++i];
     else if (arg == "--quality" && i + 1 < argc)
       args.quality = argv[++i];
-    else if (arg == "--iterations" && i + 1 < argc)
+    else if (arg == "--param" && i + 1 < argc) {
+      // Split on the first '=' only, so values may contain '='.
+      std::string kv = argv[++i];
+      size_t eq = kv.find('=');
+      if (eq != std::string::npos && eq > 0) {
+        args.params[kv.substr(0, eq)] = kv.substr(eq + 1);
+      }
+    } else if (arg == "--iterations" && i + 1 < argc)
       args.iterations = std::stoi(argv[++i]);
     else if (arg == "--warmup" && i + 1 < argc)
       args.warmup = std::stoi(argv[++i]);
@@ -197,6 +255,14 @@ inline Args parse_args(int argc, char** argv) {
 
 inline int run_benchmark(int argc, char** argv, BenchmarkImplementation& impl) {
   Args args = parse_args(argc, argv);
+
+  // Back-compat shim: fold the legacy `--quality <tier>` preset into params so
+  // implementations only ever read from params. Removed once the orchestrator
+  // emits `--param quality-tier=<tier>` directly.
+  if (!args.quality.empty() &&
+      args.params.find("quality-tier") == args.params.end()) {
+    args.params["quality-tier"] = args.quality;
+  }
 
   if (args.threads > 0) {
     // Set environment variable for OMP

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
@@ -10,11 +11,14 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
-pub enum Quality {
-    WebLow,
-    WebHigh,
-    Archival,
+/// Parse a `--param key=value` argument. Splits on the first `=` only, so values
+/// may themselves contain `=`. The error type is `String`, which clap accepts
+/// (`String: Into<Box<dyn Error + Send + Sync>>`).
+fn parse_kv(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
+        _ => Err(format!("invalid --param (expected key=value): {s}")),
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -26,8 +30,18 @@ pub struct Args {
     #[arg(long)]
     pub output: PathBuf,
 
-    #[arg(long, value_enum)]
-    pub quality: Quality,
+    /// Generic encoder/decoder tunable as `key=value`. Repeatable; the last
+    /// occurrence of a key wins. Which keys an implementation honours depends on
+    /// the implementation (see its schema in `bench_lib/models.py`). Unknown
+    /// keys are ignored, so the orchestrator can pass a superset safely.
+    #[arg(long = "param", value_parser = parse_kv)]
+    pub params: Vec<(String, String)>,
+
+    /// DEPRECATED back-compat shim: a named quality preset that is folded into
+    /// `params` as `quality-tier=<value>` (unless `quality-tier` is given
+    /// explicitly). Removed once the orchestrator emits `--param` directly.
+    #[arg(long)]
+    pub quality: Option<String>,
 
     #[arg(long, default_value_t = 10)]
     pub iterations: u32,
@@ -40,6 +54,57 @@ pub struct Args {
 
     #[arg(long)]
     pub discard: bool,
+}
+
+impl Args {
+    /// Look up a tunable by key. The last occurrence wins (last-write semantics
+    /// for a repeated `--param key=...`).
+    pub fn param(&self, key: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Tunable as a string, or `default` if absent.
+    pub fn param_str(&self, key: &str, default: &str) -> String {
+        self.param(key).unwrap_or(default).to_string()
+    }
+
+    /// Tunable parsed via `FromStr`, falling back to `default` if absent or
+    /// unparseable (a warning is printed to stderr in the latter case).
+    pub fn param_parsed<T: FromStr>(&self, key: &str, default: T) -> T {
+        match self.param(key) {
+            Some(raw) => raw.parse().unwrap_or_else(|_| {
+                eprintln!("warning: could not parse --param {key}={raw}; using default");
+                default
+            }),
+            None => default,
+        }
+    }
+
+    /// Tunable as `u32`, or `default` if absent/unparseable.
+    pub fn param_u32(&self, key: &str, default: u32) -> u32 {
+        self.param_parsed(key, default)
+    }
+
+    /// Tunable as `f32`, or `default` if absent/unparseable.
+    pub fn param_f32(&self, key: &str, default: f32) -> f32 {
+        self.param_parsed(key, default)
+    }
+
+    /// Tunable as a boolean. Present-but-non-truthy values are `false`; absent
+    /// keys return `default`. Truthy values: `1`, `true`, `yes`, `on`.
+    pub fn param_bool(&self, key: &str, default: bool) -> bool {
+        match self.param(key) {
+            Some(raw) => matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            None => default,
+        }
+    }
 }
 
 pub trait BenchmarkImplementation {
@@ -56,7 +121,16 @@ pub trait BenchmarkImplementation {
 }
 
 pub fn main<I: BenchmarkImplementation>(impl_: I) -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // Back-compat shim: fold the legacy `--quality <tier>` preset into `params`
+    // so implementations only ever read from `params`. Removed once the
+    // orchestrator emits `--param quality-tier=<tier>` directly.
+    if let Some(tier) = args.quality.clone() {
+        if args.param("quality-tier").is_none() {
+            args.params.push(("quality-tier".to_string(), tier));
+        }
+    }
 
     // Set thread count environment variables before any threads are spawned.
     if args.threads > 0 {

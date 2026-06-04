@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use benchmark_harness::{Args, BenchmarkImplementation, Quality};
+use benchmark_harness::{Args, BenchmarkImplementation};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::ImageEncoder;
 use std::io::BufWriter;
@@ -22,11 +22,11 @@ impl BenchmarkImplementation for ImagePngBench {
     fn prepare(&self, args: &Args) -> Result<Box<dyn std::any::Any>> {
         let (width, height, rgb_data) = benchmark_harness::decode_ppm_rgb8(&args.input)?;
 
-        // Map quality to compression
-        let (compression, filter) = match args.quality {
-            Quality::WebLow => (CompressionType::Fast, FilterType::Sub),
-            Quality::WebHigh => (CompressionType::Default, FilterType::Paeth),
-            Quality::Archival => (CompressionType::Best, FilterType::Adaptive),
+        // Map quality tier to compression
+        let (compression, filter) = match args.param_str("quality-tier", "web-high").as_str() {
+            "web-low" => (CompressionType::Fast, FilterType::Sub),
+            "archival" => (CompressionType::Best, FilterType::Adaptive),
+            _ => (CompressionType::Default, FilterType::Paeth),
         };
 
         Ok(Box::new(BenchContext {

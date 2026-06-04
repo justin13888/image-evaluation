@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use benchmark_harness::{Args, BenchmarkImplementation, Quality};
+use benchmark_harness::{Args, BenchmarkImplementation};
 use rav1e::prelude::*;
 
 struct Rav1eBench;
@@ -28,11 +28,12 @@ impl BenchmarkImplementation for Rav1eBench {
         // Q65 → (100-65)*255/100 ≈ 89; Q85 → (100-85)*255/100 ≈ 38
         // TODO: web-high should enable film grain synthesis (rav1e EncoderConfig::film_grain_params)
         // to match README spec; currently omitted as it requires calibrated noise parameters.
-        let (quantizer, speed, chroma_sampling) = match args.quality {
-            Quality::WebLow => (89, 6u8, ChromaSampling::Cs420),
-            Quality::WebHigh => (89, 6u8, ChromaSampling::Cs420),
-            Quality::Archival => (38, 4u8, ChromaSampling::Cs444),
-        };
+        let (quantizer, speed, chroma_sampling) =
+            match args.param_str("quality-tier", "web-high").as_str() {
+                "web-low" => (89, 6u8, ChromaSampling::Cs420),
+                "archival" => (38, 4u8, ChromaSampling::Cs444),
+                _ => (89, 6u8, ChromaSampling::Cs420),
+            };
 
         Ok(Box::new(BenchContext {
             width: width as usize,

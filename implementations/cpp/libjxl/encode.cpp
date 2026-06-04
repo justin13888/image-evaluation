@@ -26,11 +26,12 @@ class LibJxlEncodeBench : public BenchmarkImplementation {
     input_data = std::move(img.data);
 
     // Configure quality settings
-    if (args.quality == "web-low") {
+    const std::string tier = param_str(args, "quality-tier", "web-high");
+    if (tier == "web-low") {
       distance = 4.0f;
       effort = 7;
       lossless = false;
-    } else if (args.quality == "web-high") {
+    } else if (tier == "web-high") {
       distance = 1.0f;
       effort = 7;
       lossless = false;

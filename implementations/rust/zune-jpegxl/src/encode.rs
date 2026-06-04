@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use benchmark_harness::{Args, BenchmarkImplementation, Quality};
+use benchmark_harness::{Args, BenchmarkImplementation};
 use zune_core::bit_depth::BitDepth;
 use zune_core::colorspace::ColorSpace;
 use zune_core::options::EncoderOptions;
@@ -11,7 +11,8 @@ struct BenchContext {
     input_data: Vec<u8>,
     width: usize,
     height: usize,
-    quality: Quality,
+    quality: u8,
+    effort: u8,
 }
 
 impl BenchmarkImplementation for ZuneJxlBench {
@@ -26,11 +27,20 @@ impl BenchmarkImplementation for ZuneJxlBench {
         let height = h as usize;
         let input_data = rgb;
 
+        // TODO: see if zune exposes distance parameter as something not quality setting.
+        let (quality, effort): (u8, u8) = match args.param_str("quality-tier", "web-high").as_str()
+        {
+            "web-low" => (50, 7),   // Approximate d4.0
+            "archival" => (100, 9), // lossless
+            _ => (90, 7),           // web-high; approximate d1.0
+        };
+
         Ok(Box::new(BenchContext {
             input_data,
             width,
             height,
-            quality: args.quality,
+            quality,
+            effort,
         }))
     }
 
@@ -39,15 +49,9 @@ impl BenchmarkImplementation for ZuneJxlBench {
             .downcast_ref::<BenchContext>()
             .expect("Invalid context");
 
-        // TODO: see if zune exposes distance parameter as something not quality setting.
-        let (quality, effort) = match ctx.quality {
-            Quality::WebLow => (50, 7),    // Approximate d4.0
-            Quality::WebHigh => (90, 7),   // Approximate d1.0
-            Quality::Archival => (100, 9), // lossless
-        };
         let options = EncoderOptions::new(ctx.width, ctx.height, ColorSpace::RGB, BitDepth::Eight)
-            .set_effort(effort)
-            .set_quality(quality);
+            .set_effort(ctx.effort)
+            .set_quality(ctx.quality);
         let encoder = JxlSimpleEncoder::new(&ctx.input_data, options);
 
         // Create output buffer - estimate size needed
