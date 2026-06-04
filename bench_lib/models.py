@@ -74,12 +74,6 @@ class BenchmarkMode(str, Enum):
     BOTH = "both"
 
 
-class QualityTier(str, Enum):
-    WEB_LOW = "web-low"
-    WEB_HIGH = "web-high"
-    ARCHIVAL = "archival"
-
-
 class DatasetId(str, Enum):
     TEST = "test"
     KODAK = "kodak"
@@ -148,6 +142,58 @@ class Implementation(BaseModel):
     type: BenchmarkType
     # Image format supported. None implies any format (e.g., null implementation)
     format: Optional[ImageFormat]
+
+
+class Tunable(BaseModel):
+    """One knob an implementation exposes, sent to its binary via --param.
+
+    Values travel on the wire as strings (e.g. "80", "1.0", "true", "444"); the
+    binary's typed getter (param_u32/param_f32/param_bool/param_str) interprets
+    them. `kind`/`min`/`max`/`choices` are advisory metadata for the orchestrator
+    and reports, not enforced by the binary.
+    """
+
+    name: str
+    kind: Literal["int", "float", "bool", "enum", "str"]
+    default: str
+    min: Optional[float] = None
+    max: Optional[float] = None
+    choices: Optional[list[str]] = None
+    description: str = ""
+
+
+class TunableSchema(BaseModel):
+    """Declares the tunables an implementation honours, the single fixed
+    operating point used by the *performance* suite, and (for lossy encoders) the
+    knob + values swept by the *quality* suite to trace a rate-distortion curve.
+
+    Keeping this in the orchestrator lets the per-binary harness stay dumb: it
+    reads whatever --param keys it's handed and ignores the rest, while Python
+    decides which keys to send for each suite.
+    """
+
+    # Every knob this implementation reads. May be empty (decoders, spng).
+    params: list[Tunable] = []
+    # The knob swept to trace a size-vs-quality curve. None for decoders and
+    # lossless encoders (PNG, lossless-only WebP) which have no such tradeoff.
+    quality_axis: Optional[str] = None
+    # Concrete quality-axis values the quality suite sweeps (issue #8). Strings on
+    # the wire, ordered low-quality -> high-quality. Empty when quality_axis None.
+    quality_sweep: list[str] = []
+    # The single fixed operating point the performance suite uses. param -> value.
+    perf_preset: dict[str, str] = {}
+
+    def perf_params(self) -> Dict[str, str]:
+        """Concrete params for the performance suite (the fixed preset)."""
+        return dict(self.perf_preset)
+
+    def quality_params(self, axis_value: str) -> Dict[str, str]:
+        """Concrete params for one quality-suite operating point: the preset with
+        the quality axis overridden to `axis_value`."""
+        params = dict(self.perf_preset)
+        if self.quality_axis is not None:
+            params[self.quality_axis] = axis_value
+        return params
 
 
 NULL_IMPLEMENTATIONS: list[Implementation] = [
@@ -481,16 +527,211 @@ REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
 }
 
 
-# Fixed experiment protocol (issue #9): every `./bench run` sweeps these
-# internally instead of exposing them as CLI knobs, so a single run produces a
-# complete, self-comparable dataset. Only `--dataset` remains a true variable.
-#
-# Quality tiers are swept low -> high (the natural quality-vs-bpp curve order).
-ALL_QUALITY_TIERS: list[QualityTier] = list(QualityTier)
 # Threading configurations: single-threaded (per-core efficiency) then all-cores
 # (real-world throughput). Output bytes are identical across these, so metrics
 # are collected for only one of them; only timing/memory vary by thread count.
 THREAD_MODES: list[int] = [1, 0]
+
+
+# ---------------------------------------------------------------------------
+# Per-implementation tunable schemas.
+#
+# Each encoder declares the knobs it honours (sent to the binary via --param),
+# the single fixed operating point used by the performance suite (`perf_preset`),
+# and — for lossy encoders — the `quality_axis` knob plus the discrete
+# `quality_sweep` values traced by the quality suite to build a rate-distortion
+# curve (issue #8). Decoders, null binaries, and lossless-only encoders that
+# expose no knob fall back to an empty schema via `schema_for`.
+# ---------------------------------------------------------------------------
+
+# Shared quality-axis sweeps (ordered low-quality -> high-quality).
+_JPEG_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "85", "90", "95"]
+_WEBP_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "90", "95"]
+_AVIF_QUALITY_SWEEP = ["20", "30", "40", "50", "60", "70", "80", "90"]
+# JXL distance: higher distance = lower quality, so order high -> low distance.
+_JXL_DISTANCE_SWEEP = ["8.0", "6.0", "4.0", "3.0", "2.0", "1.5", "1.0", "0.5"]
+
+
+def _jpeg_full_schema() -> "TunableSchema":
+    """JPEG encoders exposing quality + progressive + chroma subsampling
+    (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder)."""
+    return TunableSchema(
+        params=[
+            Tunable(
+                name="quality",
+                kind="int",
+                default="80",
+                min=1,
+                max=100,
+                description="JPEG quality (1-100)",
+            ),
+            Tunable(
+                name="progressive",
+                kind="bool",
+                default="true",
+                description="Progressive (multi-scan) encoding",
+            ),
+            Tunable(
+                name="subsampling",
+                kind="enum",
+                default="420",
+                choices=["420", "444"],
+                description="Chroma subsampling",
+            ),
+        ],
+        quality_axis="quality",
+        quality_sweep=_JPEG_QUALITY_SWEEP,
+        perf_preset={"quality": "80", "progressive": "true", "subsampling": "420"},
+    )
+
+
+def _avif_schema() -> "TunableSchema":
+    """AVIF encoders via libavif (libavif, svt-av1) and rav1e share a 0-100
+    quality knob plus a speed preset and chroma format."""
+    return TunableSchema(
+        params=[
+            Tunable(
+                name="quality",
+                kind="int",
+                default="65",
+                min=0,
+                max=100,
+                description="AVIF quality (0-100)",
+            ),
+            Tunable(name="speed", kind="int", default="6", min=0, max=10),
+            Tunable(
+                name="yuv",
+                kind="enum",
+                default="420",
+                choices=["420", "444"],
+                description="Chroma subsampling (YUV format)",
+            ),
+        ],
+        quality_axis="quality",
+        quality_sweep=_AVIF_QUALITY_SWEEP,
+        perf_preset={"quality": "65", "speed": "6", "yuv": "420"},
+    )
+
+
+TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
+    # --- JPEG ---
+    "libjpeg-turbo-encode": _jpeg_full_schema(),
+    "mozjpeg-encode": _jpeg_full_schema(),
+    "jpegli-encode": _jpeg_full_schema(),
+    "jpeg-encoder-encode": _jpeg_full_schema(),
+    "image-jpeg-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="int", default="80", min=1, max=100),
+        ],
+        quality_axis="quality",
+        quality_sweep=_JPEG_QUALITY_SWEEP,
+        perf_preset={"quality": "80"},
+    ),
+    # --- WEBP --- (image-webp is lossless-only: empty schema via schema_for)
+    "libwebp-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="float", default="75", min=0, max=100),
+            Tunable(name="method", kind="int", default="4", min=0, max=6),
+            Tunable(name="lossless", kind="bool", default="false"),
+        ],
+        quality_axis="quality",
+        quality_sweep=_WEBP_QUALITY_SWEEP,
+        perf_preset={"quality": "75", "method": "4", "lossless": "false"},
+    ),
+    # --- AVIF ---
+    "rav1e-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="quality",
+                kind="int",
+                default="65",
+                min=0,
+                max=100,
+                description="AVIF quality 0-100 (mapped to rav1e quantizer)",
+            ),
+            Tunable(name="speed", kind="int", default="6", min=0, max=10),
+            Tunable(name="chroma", kind="enum", default="420", choices=["420", "444"]),
+        ],
+        quality_axis="quality",
+        quality_sweep=_AVIF_QUALITY_SWEEP,
+        perf_preset={"quality": "65", "speed": "6", "chroma": "420"},
+    ),
+    "libavif-encode": _avif_schema(),
+    "svt-av1-encode": _avif_schema(),
+    # --- JXL ---
+    "libjxl-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="distance",
+                kind="float",
+                default="1.0",
+                min=0.0,
+                max=25.0,
+                description="Butteraugli distance; 0 = lossless",
+            ),
+            Tunable(name="effort", kind="int", default="7", min=1, max=9),
+        ],
+        quality_axis="distance",
+        quality_sweep=_JXL_DISTANCE_SWEEP,
+        perf_preset={"distance": "1.0", "effort": "7"},
+    ),
+    "zune-jpegxl-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="int", default="90", min=0, max=100),
+            Tunable(name="effort", kind="int", default="7", min=1, max=9),
+        ],
+        quality_axis="quality",
+        quality_sweep=["40", "50", "60", "70", "80", "90", "95", "100"],
+        perf_preset={"quality": "90", "effort": "7"},
+    ),
+    # --- PNG (lossless: no quality axis, perf knob only) ---
+    "image-png-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="compression",
+                kind="enum",
+                default="default",
+                choices=["fast", "default", "best"],
+            ),
+            Tunable(
+                name="filter",
+                kind="enum",
+                default="adaptive",
+                choices=["none", "sub", "up", "avg", "paeth", "adaptive"],
+            ),
+        ],
+        perf_preset={"compression": "default", "filter": "adaptive"},
+    ),
+    "zune-png-encode": TunableSchema(
+        params=[Tunable(name="effort", kind="int", default="4", min=0, max=9)],
+        perf_preset={"effort": "4"},
+    ),
+    "libpng-encode": TunableSchema(
+        params=[Tunable(name="compression", kind="int", default="6", min=0, max=9)],
+        perf_preset={"compression": "6"},
+    ),
+    # spng-encode exposes no compression control -> empty schema (schema_for).
+}
+
+
+def schema_for(impl_name: str) -> "TunableSchema":
+    """Tunable schema for an implementation; an empty schema (no knobs, no
+    quality axis, empty preset) for decoders, null binaries, and encoders that
+    expose nothing to tune (spng, image-webp)."""
+    return TUNABLE_SCHEMAS.get(impl_name, TunableSchema())
+
+
+# Self-consistency: every declared schema must name a real implementation, and a
+# declared quality axis must appear in that schema's params + have sweep values.
+assert set(TUNABLE_SCHEMAS) <= {i.name for i in IMPLEMENTATIONS}, (
+    "TUNABLE_SCHEMAS names an unknown implementation"
+)
+for _name, _schema in TUNABLE_SCHEMAS.items():
+    if _schema.quality_axis is not None:
+        assert _schema.quality_axis in {p.name for p in _schema.params}, (
+            f"{_name}: quality_axis '{_schema.quality_axis}' not in params"
+        )
+        assert _schema.quality_sweep, f"{_name}: quality_axis set but empty sweep"
 
 
 class RunArgs(BaseModel):
@@ -622,7 +863,12 @@ class BenchmarkTask(BaseModel):
     """
 
     impl: Implementation
-    quality: QualityTier
+    # Concrete tunables passed to the binary as --param key=value.
+    params: Dict[str, str]
+    # Short, grammar-safe token for this operating point (no ',' or '='), e.g.
+    # "perf" for the performance preset or "q80"/"d1.0" for a quality-sweep step.
+    # Used in the hyperfine command name, identifiers, and plot keys.
+    label: str
     input_path: str
     source_path: str
     iterations: int
@@ -639,20 +885,21 @@ class BenchmarkTask(BaseModel):
         return self.impl.format.value if self.impl.format else "null"
 
     def name(self) -> str:
-        # Quality tier and thread mode are part of the label because a single
-        # run now sweeps both — they keep hyperfine command names unique and let
-        # the summary parser recover each dimension. The basename is kept last so
-        # a comma in a filename can never shift the earlier fields.
+        # The operating-point label and thread mode are part of the name so a
+        # single run can sweep both: they keep hyperfine command names unique and
+        # let the summary parser recover each dimension. The basename is kept last
+        # so a comma in a filename can never shift the earlier fields. The label
+        # never contains ", " (enforced where labels are minted).
         return (
             f"{self.impl.name} ({self.format_as_str()}, {self.impl.type.value}, "
-            f"{self.quality.value}, t{self.threads}, {os.path.basename(self.input_path)})"
+            f"{self.label}, t{self.threads}, {os.path.basename(self.input_path)})"
         )
 
     def identifier(self) -> str:
         """
         Unique identifier for this task.
         """
-        return f"{self.impl.name}_{self.format_as_str()}_{self.quality.value}_{os.path.basename(self.input_path)}_{generate_base32_string(8)}"
+        return f"{self.impl.name}_{self.format_as_str()}_{self.label}_{os.path.basename(self.input_path)}_{generate_base32_string(8)}"
 
     def output_ext(self) -> Optional[ImageFormats]:
         """
@@ -689,8 +936,6 @@ class BenchmarkTask(BaseModel):
             self.input_path,
             "--output",
             output_path,
-            "--quality",
-            self.quality.value,
             "--iterations",
             str(iterations if iterations is not None else self.iterations),
             "--warmup",
@@ -698,6 +943,11 @@ class BenchmarkTask(BaseModel):
             "--threads",
             str(self.threads),
         ]
+
+        # Emit tunables as repeated --param key=value (sorted for deterministic
+        # command strings). The binary reads only the keys it understands.
+        for key in sorted(self.params):
+            cmd_parts += ["--param", f"{key}={self.params[key]}"]
 
         if use_discard:
             cmd_parts.append("--discard")
@@ -714,9 +964,9 @@ class BenchmarkTask(BaseModel):
 # Build list is list[BenchmarkTask]
 BenchList = list[BenchmarkTask]
 
-# A timing chart is produced per (format, type, quality); the two thread modes
-# are grouped *within* a chart, so threads are not part of the key.
-BenchmarkKey = Tuple[ImageFormat, BenchmarkType, QualityTier]
+# A timing chart is produced per (format, type, operating-point label); the two
+# thread modes are grouped *within* a chart, so threads are not part of the key.
+BenchmarkKey = Tuple[ImageFormat, BenchmarkType, str]
 
 
 def filename_from_key(key: BenchmarkKey) -> str:
@@ -725,8 +975,8 @@ def filename_from_key(key: BenchmarkKey) -> str:
 
     Does not include file extension.
     """
-    format, bench_type, quality = key
-    return f"{format.value}_{bench_type.value}_{quality.value}_results"
+    format, bench_type, label = key
+    return f"{format.value}_{bench_type.value}_{label}_results"
 
 
 class BenchmarkMetrics(TypedDict):
@@ -737,7 +987,14 @@ class BenchmarkMetrics(TypedDict):
     # benchmarked through the C++ harness (lang="rust", build="cpp").
     lang: str
     build: str
-    quality: str
+    # Operating-point label (e.g. "perf", "q80", "d1.0").
+    label: str
+    # Serialized tunables for this point (e.g. "effort=7;quality=80").
+    params: str
+    # The swept quality knob name and its value for this point (empty strings for
+    # lossless/decode points). Used to order/annotate rate-distortion curves.
+    quality_axis: str
+    quality_value: str
     input_path: str
     source_path: str
     filesize: int

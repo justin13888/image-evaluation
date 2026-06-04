@@ -20,12 +20,13 @@ impl BenchmarkImplementation for JpegEncoderBench {
 
     fn prepare(&self, args: &Args) -> Result<Box<dyn std::any::Any>> {
         let (width, height, rgb8_img) = benchmark_harness::decode_ppm_rgb8(&args.input)?;
-        let (quality, is_progressive, sampling_factor) =
-            match args.param_str("quality-tier", "web-high").as_str() {
-                "web-low" => (50u8, false, SamplingFactor::R_4_2_0),
-                "archival" => (95u8, false, SamplingFactor::R_4_4_4),
-                _ => (80u8, true, SamplingFactor::R_4_2_0),
-            };
+        let quality = args.param_u32("quality", 80) as u8;
+        let is_progressive = args.param_bool("progressive", true);
+        let sampling_factor = if args.param_str("subsampling", "420") == "444" {
+            SamplingFactor::R_4_4_4
+        } else {
+            SamplingFactor::R_4_2_0
+        };
         Ok(Box::new(BenchContext {
             quality,
             is_progressive,

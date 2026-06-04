@@ -23,12 +23,8 @@ impl BenchmarkImplementation for ZunePngBench {
         let height = h as usize;
         let input_data = rgb;
 
-        // Map quality tier to zlib compression effort (0-9)
-        let effort: u8 = match args.param_str("quality-tier", "web-high").as_str() {
-            "web-low" => 1,
-            "archival" => 9,
-            _ => 5,
-        };
+        // zlib compression effort (0-9). PNG is lossless; no quality axis.
+        let effort = args.param_u32("effort", 4) as u8;
 
         Ok(Box::new(BenchContext {
             input_data,

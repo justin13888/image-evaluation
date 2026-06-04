@@ -15,21 +15,10 @@ class LibWebpEncodeBench : public BenchmarkImplementation {
     height = img.height;
     input_data = std::move(img.data);
 
-    // Configure quality settings
-    const std::string tier = param_str(args, "quality-tier", "web-high");
-    if (tier == "web-low") {
-      quality = 50.0f;
-      method = 4;
-      lossless = false;
-    } else if (tier == "web-high") {
-      quality = 75.0f;
-      method = 4;
-      lossless = false;
-    } else {  // archival
-      lossless = true;
-      method = 6;
-      quality = 100.0f;
-    }
+    // Tunables: quality (0-100), method/effort (0-6), lossless flag.
+    quality = static_cast<float>(param_double(args, "quality", 75.0));
+    method = param_int(args, "method", 4);
+    lossless = param_bool(args, "lossless", false);
   }
 
   std::vector<uint8_t> run(const Args &args) override {

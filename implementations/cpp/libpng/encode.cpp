@@ -17,15 +17,8 @@ class LibPngEncodeBench : public BenchmarkImplementation {
     height = img.height;
     input_data = std::move(img.data);
 
-    // PNG is lossless, compression level varies by quality tier
-    const std::string tier = param_str(args, "quality-tier", "web-high");
-    if (tier == "web-low") {
-      compression_level = Z_BEST_SPEED;
-    } else if (tier == "web-high") {
-      compression_level = Z_DEFAULT_COMPRESSION;
-    } else {  // archival
-      compression_level = Z_BEST_COMPRESSION;
-    }
+    // PNG is lossless; the only knob is the zlib compression level (0-9).
+    compression_level = param_int(args, "compression", 6);
   }
 
   std::vector<uint8_t> run(const Args &args) override {
