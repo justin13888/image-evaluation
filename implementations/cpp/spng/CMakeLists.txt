@@ -17,8 +17,8 @@ pkg_check_modules(SPNG spng REQUIRED IMPORTED_TARGET)
 
 # Decoder binary
 add_executable(bench-spng-decode decode.cpp)
-target_link_libraries(bench-spng-decode PkgConfig::SPNG ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-spng-decode PkgConfig::SPNG ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-spng-encode encode.cpp)
-target_link_libraries(bench-spng-encode PkgConfig::SPNG ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-spng-encode PkgConfig::SPNG ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

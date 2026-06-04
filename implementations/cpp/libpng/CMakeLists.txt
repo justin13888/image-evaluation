@@ -17,8 +17,8 @@ find_package(mimalloc REQUIRED)
 
 # Decoder binary
 add_executable(bench-libpng-decode decode.cpp)
-target_link_libraries(bench-libpng-decode PNG::PNG ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-libpng-decode PNG::PNG ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-libpng-encode encode.cpp)
-target_link_libraries(bench-libpng-encode PNG::PNG ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-libpng-encode PNG::PNG ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

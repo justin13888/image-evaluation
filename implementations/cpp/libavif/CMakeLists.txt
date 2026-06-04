@@ -27,7 +27,7 @@ find_package(mimalloc REQUIRED)
 
 set(AVIF_LINK_LIBS
     PkgConfig::AVIF PkgConfig::AOM PkgConfig::DAV1D PkgConfig::SVT_AV1 PkgConfig::LIBGAV1
-    ZLIB::ZLIB mimalloc-static pthread dl m)
+    ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>" pthread dl m)
 
 # Decoder binary
 add_executable(bench-libavif-decode decode.cpp)

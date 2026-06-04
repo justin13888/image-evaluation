@@ -35,4 +35,4 @@ find_package(Threads REQUIRED)
 # ${HWY_LIB} follows ${JPEGLI_LIB} for correct static link order.
 add_executable(bench-jpegli-encode encode.cpp)
 target_include_directories(bench-jpegli-encode PRIVATE ${LIBJXL_SRC} ${JPEGLI_GEN_INCLUDE})
-target_link_libraries(bench-jpegli-encode ${JPEGLI_LIB} ${HWY_LIB} Threads::Threads ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-jpegli-encode ${JPEGLI_LIB} ${HWY_LIB} Threads::Threads ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

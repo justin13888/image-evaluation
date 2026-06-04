@@ -27,8 +27,8 @@ find_library(BROTLICOMMON_LIBRARY NAMES brotlicommon
 
 # Decoder binary
 add_executable(bench-libjxl-decode decode.cpp)
-target_link_libraries(bench-libjxl-decode PkgConfig::JXL PkgConfig::JXL_THREADS ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,${BROTLICOMMON_LIBRARY}>" mimalloc-static)
+target_link_libraries(bench-libjxl-decode PkgConfig::JXL PkgConfig::JXL_THREADS ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,${BROTLICOMMON_LIBRARY}>" "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-libjxl-encode encode.cpp)
-target_link_libraries(bench-libjxl-encode PkgConfig::JXL PkgConfig::JXL_THREADS ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,${BROTLICOMMON_LIBRARY}>" mimalloc-static)
+target_link_libraries(bench-libjxl-encode PkgConfig::JXL PkgConfig::JXL_THREADS ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,${BROTLICOMMON_LIBRARY}>" "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
