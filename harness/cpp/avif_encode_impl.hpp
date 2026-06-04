@@ -20,11 +20,12 @@ class AvifEncodeBenchBase : public BenchmarkImplementation {
     input_data = std::move(img.data);
 
     // Configure quality settings per README spec
-    if (args.quality == "web-low") {
+    const std::string tier = param_str(args, "quality-tier", "web-high");
+    if (tier == "web-low") {
       quality = 65;
       speed = 6;
       yuv_format = AVIF_PIXEL_FORMAT_YUV420;
-    } else if (args.quality == "web-high") {
+    } else if (tier == "web-high") {
       quality = 65;
       speed = AVIF_SPEED_DEFAULT;
       yuv_format = AVIF_PIXEL_FORMAT_YUV420;

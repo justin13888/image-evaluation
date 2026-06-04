@@ -16,11 +16,12 @@ class LibWebpEncodeBench : public BenchmarkImplementation {
     input_data = std::move(img.data);
 
     // Configure quality settings
-    if (args.quality == "web-low") {
+    const std::string tier = param_str(args, "quality-tier", "web-high");
+    if (tier == "web-low") {
       quality = 50.0f;
       method = 4;
       lossless = false;
-    } else if (args.quality == "web-high") {
+    } else if (tier == "web-high") {
       quality = 75.0f;
       method = 4;
       lossless = false;

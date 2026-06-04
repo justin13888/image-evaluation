@@ -18,11 +18,12 @@ class JpegliEncodeBench : public BenchmarkImplementation {
 
     // Mirror the quality tiers used by libjpeg-turbo and mozjpeg so jpegli is
     // directly comparable within the JPEG group.
-    if (args.quality == "web-low") {
+    const std::string tier = param_str(args, "quality-tier", "web-high");
+    if (tier == "web-low") {
       quality = 50;
       progressive = false;
       use_444 = false;
-    } else if (args.quality == "web-high") {
+    } else if (tier == "web-high") {
       quality = 80;
       progressive = true;
       use_444 = false;

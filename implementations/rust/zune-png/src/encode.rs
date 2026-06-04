@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use benchmark_harness::{Args, BenchmarkImplementation, Quality};
+use benchmark_harness::{Args, BenchmarkImplementation};
 use zune_png::PngEncoder;
 
 struct ZunePngBench;
@@ -24,10 +24,10 @@ impl BenchmarkImplementation for ZunePngBench {
         let input_data = rgb;
 
         // Map quality tier to zlib compression effort (0-9)
-        let effort = match args.quality {
-            Quality::WebLow => 1,
-            Quality::WebHigh => 5,
-            Quality::Archival => 9,
+        let effort: u8 = match args.param_str("quality-tier", "web-high").as_str() {
+            "web-low" => 1,
+            "archival" => 9,
+            _ => 5,
         };
 
         Ok(Box::new(BenchContext {
