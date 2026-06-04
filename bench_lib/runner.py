@@ -779,12 +779,16 @@ def _run_perf_suite(args: PerfArgs, result_dir: str):
         measure_memory(result_dir, mem_commands, mem_names)
 
 
-def _run_quality_suite(args: QualityArgs, result_dir: str):
+def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
     """Quality suite body: sweep each lossy encoder's quality axis over many
     steps and measure file size + IQA (SSIMULACRA2, PSNR) per step, tracing a
     rate-distortion curve (issue #8). Encoders only; no timing, no thread sweep.
     Writes its artifacts into `result_dir`; the caller handles building and
-    bundle finalization."""
+    bundle finalization.
+
+    Returns the names of any runs that failed (empty if all succeeded). On
+    failure the per-suite summary is skipped — the sweep has holes, so the
+    caller must abort without finalizing the bundle."""
     formats = args.formats
 
     print("=" * 70)
@@ -831,8 +835,17 @@ def _run_quality_suite(args: QualityArgs, result_dir: str):
         json.dump(metrics, f, indent=2)
     print(f"\n✓ Metrics saved to {metrics_path}")
 
+    # A failed run leaves a hole in the rate-distortion sweep, so the summary and
+    # report would be incomplete/misleading. Keep the raw metrics.json (error
+    # rows included for debugging) but skip report generation and signal failure
+    # to the caller, which aborts before finalizing the bundle.
+    failures = [m["name"] for m in metrics if m["error"] is not None]
+    if failures:
+        return failures
+
     # IQA/size-only summary (rate-distortion plots, no timing in this suite).
     generate_summary(result_dir, None, metrics)
+    return []
 
 
 def _finalize_bundle(bundle_dir: str, suites: list[str]):
@@ -895,6 +908,24 @@ def run_perf(args: PerfArgs):
     _print_bundle(bundle, ["performance"])
 
 
+def _abort_on_quality_failures(failures: list[str], bundle: str):
+    """Print which quality runs failed and exit non-zero. Called instead of
+    finalizing the bundle when the rate-distortion sweep has holes."""
+    print(f"\n{Fore.RED}{'=' * 70}")
+    print(f"QUALITY SUITE FAILED — {len(failures)} run(s) errored")
+    print(f"{'=' * 70}{Style.RESET_ALL}")
+    print(
+        "\nThe rate-distortion sweep is incomplete, so no summary or report was "
+        "generated. Raw measurements (including error rows) were kept at:"
+    )
+    print(f"  {bundle}/quality/metrics.json\n")
+    print("Failed run(s):")
+    for name in failures:
+        print(f"  {Fore.RED}✗{Style.RESET_ALL} {name}")
+    print()
+    sys.exit(1)
+
+
 def run_quality(args: QualityArgs):
     """Run the quality suite into a fresh bundle (quality/ subfolder)."""
     if not args.skip_build:
@@ -904,7 +935,9 @@ def run_quality(args: QualityArgs):
     bundle = _new_result_dir()
     qual_dir = os.path.join(bundle, "quality")
     os.makedirs(qual_dir, exist_ok=True)
-    _run_quality_suite(args, qual_dir)
+    failures = _run_quality_suite(args, qual_dir)
+    if failures:
+        _abort_on_quality_failures(failures, bundle)
     _finalize_bundle(bundle, ["quality"])
     _print_bundle(bundle, ["quality"])
 
@@ -945,7 +978,9 @@ def run_all(args: AllArgs):
         debug=args.debug,
     )
     _run_perf_suite(perf_args, perf_dir)
-    _run_quality_suite(quality_args, qual_dir)
+    failures = _run_quality_suite(quality_args, qual_dir)
+    if failures:
+        _abort_on_quality_failures(failures, bundle)
     _finalize_bundle(bundle, ["performance", "quality"])
     _print_bundle(bundle, ["performance", "quality"])
 
