@@ -25,21 +25,10 @@ class LibJxlEncodeBench : public BenchmarkImplementation {
     height = img.height;
     input_data = std::move(img.data);
 
-    // Configure quality settings
-    const std::string tier = param_str(args, "quality-tier", "web-high");
-    if (tier == "web-low") {
-      distance = 4.0f;
-      effort = 7;
-      lossless = false;
-    } else if (tier == "web-high") {
-      distance = 1.0f;
-      effort = 7;
-      lossless = false;
-    } else {  // archival
-      distance = 0.0f;
-      effort = 9;
-      lossless = true;
-    }
+    // Tunables: Butteraugli distance (0 = lossless) and effort (1-9).
+    distance = static_cast<float>(param_double(args, "distance", 1.0));
+    effort = param_int(args, "effort", 7);
+    lossless = (distance <= 0.0f);
   }
 
   std::vector<uint8_t> run(const Args &args) override {

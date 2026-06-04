@@ -25,10 +25,6 @@ struct Args {
   // depends on the implementation; unknown keys are ignored, so a superset can
   // be passed safely.
   std::map<std::string, std::string> params;
-  // DEPRECATED back-compat shim: a named quality preset folded into
-  // params["quality-tier"] (unless given explicitly). Removed once the
-  // orchestrator emits `--param quality-tier=<tier>` directly.
-  std::string quality;
   int iterations = 10;
   int warmup = 2;
   int threads = 0;
@@ -232,8 +228,6 @@ inline Args parse_args(int argc, char** argv) {
       args.input = argv[++i];
     else if (arg == "--output" && i + 1 < argc)
       args.output = argv[++i];
-    else if (arg == "--quality" && i + 1 < argc)
-      args.quality = argv[++i];
     else if (arg == "--param" && i + 1 < argc) {
       // Split on the first '=' only, so values may contain '='.
       std::string kv = argv[++i];
@@ -255,14 +249,6 @@ inline Args parse_args(int argc, char** argv) {
 
 inline int run_benchmark(int argc, char** argv, BenchmarkImplementation& impl) {
   Args args = parse_args(argc, argv);
-
-  // Back-compat shim: fold the legacy `--quality <tier>` preset into params so
-  // implementations only ever read from params. Removed once the orchestrator
-  // emits `--param quality-tier=<tier>` directly.
-  if (!args.quality.empty() &&
-      args.params.find("quality-tier") == args.params.end()) {
-    args.params["quality-tier"] = args.quality;
-  }
 
   if (args.threads > 0) {
     // Set environment variable for OMP

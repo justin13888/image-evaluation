@@ -19,22 +19,12 @@ class AvifEncodeBenchBase : public BenchmarkImplementation {
     height = img.height;
     input_data = std::move(img.data);
 
-    // Configure quality settings per README spec
-    const std::string tier = param_str(args, "quality-tier", "web-high");
-    if (tier == "web-low") {
-      quality = 65;
-      speed = 6;
-      yuv_format = AVIF_PIXEL_FORMAT_YUV420;
-    } else if (tier == "web-high") {
-      quality = 65;
-      speed = AVIF_SPEED_DEFAULT;
-      yuv_format = AVIF_PIXEL_FORMAT_YUV420;
-      // TODO: grain synthesis for web-high not yet implemented (see README)
-    } else {  // archival
-      quality = 85;
-      speed = AVIF_SPEED_DEFAULT;
-      yuv_format = AVIF_PIXEL_FORMAT_YUV444;
-    }
+    // Tunables: quality (0-100), speed preset, chroma subsampling (YUV format).
+    quality = param_int(args, "quality", 65);
+    speed = param_int(args, "speed", 6);
+    yuv_format = (param_str(args, "yuv", "420") == "444")
+                     ? AVIF_PIXEL_FORMAT_YUV444
+                     : AVIF_PIXEL_FORMAT_YUV420;
   }
 
   std::vector<uint8_t> run(const Args &args) override {

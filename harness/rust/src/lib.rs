@@ -37,12 +37,6 @@ pub struct Args {
     #[arg(long = "param", value_parser = parse_kv)]
     pub params: Vec<(String, String)>,
 
-    /// DEPRECATED back-compat shim: a named quality preset that is folded into
-    /// `params` as `quality-tier=<value>` (unless `quality-tier` is given
-    /// explicitly). Removed once the orchestrator emits `--param` directly.
-    #[arg(long)]
-    pub quality: Option<String>,
-
     #[arg(long, default_value_t = 10)]
     pub iterations: u32,
 
@@ -121,16 +115,7 @@ pub trait BenchmarkImplementation {
 }
 
 pub fn main<I: BenchmarkImplementation>(impl_: I) -> Result<()> {
-    let mut args = Args::parse();
-
-    // Back-compat shim: fold the legacy `--quality <tier>` preset into `params`
-    // so implementations only ever read from `params`. Removed once the
-    // orchestrator emits `--param quality-tier=<tier>` directly.
-    if let Some(tier) = args.quality.clone() {
-        if args.param("quality-tier").is_none() {
-            args.params.push(("quality-tier".to_string(), tier));
-        }
-    }
+    let args = Args::parse();
 
     // Set thread count environment variables before any threads are spawned.
     if args.threads > 0 {

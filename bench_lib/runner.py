@@ -23,7 +23,6 @@ from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
 from bench_lib.models import (
-    ALL_QUALITY_TIERS,
     DATASETS,
     FORMAT_EXT_MAP,
     IMPLEMENTATIONS,
@@ -41,11 +40,10 @@ from bench_lib.models import (
     ImageFormat,
     ImageFormats,
     PPMImageFormat,
-    QualityTier,
     RunArgs,
     SetupArgs,
     find_implementation_by_name,
-    is_format_lossless,
+    schema_for,
 )
 from bench_lib.summary import generate_summary
 from bench_lib.system_info import (
@@ -61,7 +59,7 @@ DATASET_FILES_CHECKED: Set[str] = set()
 
 # Cache input file list for re-use
 INPUT_FILES_CACHE: Dict[
-    tuple[DatasetId, ImageFormats, QualityTier, Optional[int]],
+    tuple[DatasetId, ImageFormats, Optional[int]],
     Sequence[tuple[str, str]],
 ] = {}
 
@@ -87,7 +85,6 @@ def get_dataset_files(dataset_name: DatasetId) -> list[str]:
 def get_input_files(
     dataset_name: DatasetId,
     format: ImageFormats,
-    quality: QualityTier,
     limit: Optional[int] = None,
 ) -> Sequence[tuple[str, str]]:
     """
@@ -97,11 +94,13 @@ def get_input_files(
     - input_path: Path to the input file for the benchmark.
     - source_path: Path to the original source file (for quality comparison).
 
-    Pre-generates input files for benchmark type if necessary.
+    Pre-generates input files for benchmark type if necessary. Decode inputs are
+    produced by encoding each source with the format's reference encoder at that
+    encoder's fixed performance preset (one file per source per format).
     """
 
-    if (dataset_name, format, quality, limit) in INPUT_FILES_CACHE:
-        return INPUT_FILES_CACHE[(dataset_name, format, quality, limit)]
+    if (dataset_name, format, limit) in INPUT_FILES_CACHE:
+        return INPUT_FILES_CACHE[(dataset_name, format, limit)]
 
     # Get all files for the dataset
     dataset_files = get_dataset_files(dataset_name)
@@ -123,12 +122,10 @@ def get_input_files(
             # Dataset file already in required format
             input_files.append((f, f))
         else:
-            # Determine target file name
+            # Determine target file name. A single reference preset is used per
+            # format, so one encoded file per source suffices (no quality suffix).
             base_path = os.path.splitext(f)[0]
-            if is_format_lossless(format):
-                target_file = f"{base_path}.{target_ext}"
-            else:
-                target_file = f"{base_path}_{quality.value}.{target_ext}"
+            target_file = f"{base_path}.{target_ext}"
 
             # If target file exists, we can use it
             if os.path.exists(target_file):
@@ -165,23 +162,26 @@ def get_input_files(
                     # Try to build it on demand?
                     build_project(ref_impl)
 
-                # Run encoder
+                # Run encoder at its fixed performance preset (--param k=v).
+                ref_cmd = [
+                    ref_impl.bin,
+                    "--input",
+                    intermediate_ppm,
+                    "--output",
+                    target_file,
+                    "--iterations",
+                    "1",
+                    "--warmup",
+                    "0",
+                    "--threads",
+                    "0",
+                ]
+                for key, value in sorted(
+                    schema_for(ref_impl.name).perf_params().items()
+                ):
+                    ref_cmd += ["--param", f"{key}={value}"]
                 subprocess.run(
-                    [
-                        ref_impl.bin,
-                        "--input",
-                        intermediate_ppm,
-                        "--output",
-                        target_file,
-                        "--quality",
-                        quality.value,
-                        "--iterations",
-                        "1",
-                        "--warmup",
-                        "0",
-                        "--threads",
-                        "0",
-                    ],
+                    ref_cmd,
                     check=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,  # Capture stderr to avoid spam, unless error
@@ -195,7 +195,7 @@ def get_input_files(
             f"Some input files not found {len(missing)} for '{dataset_name}': {','.join(missing[:5])}"
         )
 
-    INPUT_FILES_CACHE[(dataset_name, format, quality, limit)] = input_files
+    INPUT_FILES_CACHE[(dataset_name, format, limit)] = input_files
     return input_files
 
 
@@ -203,12 +203,12 @@ def build_bench_list(
     type: BenchmarkType,
     format: ImageFormat,
     dataset: DatasetId,
-    quality: QualityTier,
     threads: int,
     args: RunArgs,
 ) -> BenchList:
-    """Construct list of benchmark commands to run for one (type, format,
-    quality, threads) cell of the swept experiment matrix."""
+    """Construct benchmark tasks for one (type, format, threads) cell of the
+    swept matrix. Each implementation runs at its fixed performance preset
+    (``schema.perf_params()``), labelled ``perf``."""
     from itertools import chain
 
     # Construct list of implementations to run
@@ -238,14 +238,19 @@ def build_bench_list(
             case _:
                 raise ValueError(f"Unknown implementation type: {impl.type}")
 
+        # Fixed performance preset for this implementation (empty for decoders /
+        # null / knob-less encoders).
+        params = schema_for(impl.name).perf_params()
+
         for input_file, source_file in get_input_files(
-            dataset, input_format, quality, args.sample
+            dataset, input_format, args.sample
         ):
             input_path = input_file
 
             bench = BenchmarkTask(
                 impl=impl,
-                quality=quality,
+                params=params,
+                label="perf",
                 input_path=input_path,
                 source_path=source_file,
                 iterations=args.iterations,
@@ -261,6 +266,20 @@ def build_bench_list(
             benches.append(bench)
 
     return benches
+
+
+def _task_metric_fields(task: BenchmarkTask) -> Dict[str, str]:
+    """Derive the operating-point metadata stored on a metric row: the label,
+    the serialized params, and the swept quality knob name + value (empty for
+    lossless/decode points)."""
+    schema = schema_for(task.impl.name)
+    axis = schema.quality_axis or ""
+    return {
+        "label": task.label,
+        "params": ";".join(f"{k}={v}" for k, v in sorted(task.params.items())),
+        "quality_axis": axis,
+        "quality_value": task.params.get(axis, "") if axis else "",
+    }
 
 
 def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetrics]:
@@ -366,7 +385,7 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                         impl=task.impl.name,
                         lang=task.impl.lang,
                         build=task.impl.build,
-                        quality=task.quality.value,
+                        **_task_metric_fields(task),
                         input_path=task.input_path,
                         source_path=task.source_path,
                         filesize=filesize,
@@ -396,7 +415,7 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                         impl=task.impl.name,
                         lang=task.impl.lang,
                         build=task.impl.build,
-                        quality=task.quality.value,
+                        **_task_metric_fields(task),
                         input_path=task.input_path,
                         source_path=task.source_path,
                         filesize=0,
@@ -527,16 +546,11 @@ def run(args: RunArgs):
     """Execute benchmarks using hyperfine."""
     formats = args.formats
 
-    # Determine the swept experiment matrix. A normal run sweeps every quality
-    # tier and both threading modes so a single `./bench run -d <dataset>`
-    # yields a complete, self-comparable dataset (issue #9). --quick collapses
-    # the sweep to one fast cell for smoke tests.
-    if args.quick:
-        quality_tiers = [QualityTier.WEB_LOW]
-        thread_modes = [0]
-    else:
-        quality_tiers = list(ALL_QUALITY_TIERS)
-        thread_modes = list(THREAD_MODES)
+    # Each implementation runs at its fixed performance preset (one operating
+    # point), sweeping both threading modes. --quick collapses to all-cores only.
+    # (The dedicated quality suite, which sweeps the quality axis for dense
+    # rate-distortion curves, lands in a follow-up.)
+    thread_modes = [0] if args.quick else list(THREAD_MODES)
 
     # Build projects
     if not args.skip_build:
@@ -566,8 +580,9 @@ def run(args: RunArgs):
             # Subset filters (default = everything).
             "formats": formats,
             "mode": args.mode,
+            # Each implementation runs at its fixed performance preset.
+            "operating_point": "perf-preset",
             # Swept every run; timing/memory vary across these, metrics do not.
-            "quality_tiers": quality_tiers,
             "thread_modes": thread_modes,
             # Fixed: timing is always compute-only.
             "discard_output": True,
@@ -592,14 +607,13 @@ def run(args: RunArgs):
     if args.mode in (BenchmarkMode.DECODE, BenchmarkMode.BOTH):
         types_to_run.append(BenchmarkType.DECODE)
 
-    # Sweep the full matrix: (type, format) x quality x threads.
+    # Sweep the matrix: (type, format) x threads, at each impl's perf preset.
     for bench_type in types_to_run:
         for format in formats:
-            for quality in quality_tiers:
-                for threads in thread_modes:
-                    benches += build_bench_list(
-                        bench_type, format, args.dataset, quality, threads, args
-                    )
+            for threads in thread_modes:
+                benches += build_bench_list(
+                    bench_type, format, args.dataset, threads, args
+                )
 
     if not benches:
         print("\nError: No benchmarks to run!")
@@ -663,9 +677,9 @@ def run(args: RunArgs):
     # Collect metrics
     metrics = None
     if not args.no_metrics:
-        # File size and SSIMULACRA2 depend only on (impl, format, type, quality,
-        # image) — the encoded/decoded bytes are identical across thread modes.
-        # Deduplicate so each tuple is measured (and ssimulacra2'd) exactly once.
+        # File size and SSIMULACRA2 depend only on (impl, format, type, operating
+        # point, image) — the encoded/decoded bytes are identical across thread
+        # modes. Deduplicate so each tuple is measured (and scored) exactly once.
         seen_metric_keys: Set[tuple] = set()
         metrics_benches: BenchList = []
         for task in benches:
@@ -673,7 +687,7 @@ def run(args: RunArgs):
                 task.impl.name,
                 task.format_as_str(),
                 task.impl.type.value,
-                task.quality.value,
+                task.label,
                 os.path.basename(task.input_path),
             )
             if key in seen_metric_keys:

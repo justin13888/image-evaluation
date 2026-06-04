@@ -20,12 +20,8 @@ impl BenchmarkImplementation for ImageJpegBench {
     fn prepare(&self, args: &Args) -> Result<Box<dyn std::any::Any>> {
         let (width, height, rgb_data) = benchmark_harness::decode_ppm_rgb8(&args.input)?;
 
-        // Map quality tier to JPEG quality (1-100)
-        let quality: u8 = match args.param_str("quality-tier", "web-high").as_str() {
-            "web-low" => 50,
-            "archival" => 95,
-            _ => 80,
-        };
+        // JPEG quality (1-100). image-jpeg exposes no progressive/subsampling.
+        let quality = args.param_u32("quality", 80) as u8;
 
         Ok(Box::new(BenchContext {
             rgb_data,

@@ -21,16 +21,14 @@ from bench_lib.plotting import (
     create_quality_vs_bpp_plots,
 )
 
-# Quality tiers ordered low -> high for stable, readable sorting.
-_TIER_ORDER = {"web-low": 0, "web-high": 1, "archival": 2}
-
 
 def _parse_command_name(name: str) -> Optional[dict]:
     """Parse a hyperfine command name produced by ``BenchmarkTask.name()``.
 
-    Expected form: ``"impl-name (fmt, type, quality, tN, basename)"``. The
-    basename is kept whole even if it contains ", " (it is the last field).
-    Returns ``None`` for names not in this decorated 5-field form.
+    Expected form: ``"impl-name (fmt, type, label, tN, basename)"`` where
+    ``label`` is the operating-point token. The basename is kept whole even if
+    it contains ", " (it is the last field). Returns ``None`` for names not in
+    this decorated 5-field form.
     """
     if " (" not in name or not name.endswith(")"):
         return None
@@ -39,7 +37,7 @@ def _parse_command_name(name: str) -> Optional[dict]:
     meta = rest.split(", ", 4)  # maxsplit keeps a comma-containing basename intact
     if len(meta) < 5:
         return None
-    fmt, bench_type, quality, threads_tok, basename = meta
+    fmt, bench_type, label, threads_tok, basename = meta
     try:
         threads = int(threads_tok.lstrip("t"))
     except ValueError:
@@ -48,7 +46,7 @@ def _parse_command_name(name: str) -> Optional[dict]:
         "impl": base_name,
         "format": fmt,
         "type": bench_type,
-        "quality": quality,
+        "label": label,
         "threads": threads,
         "basename": basename,
     }
@@ -81,10 +79,10 @@ def generate_summary(
                 return
 
             # Parse and aggregate results across images, keyed by every swept
-            # dimension. A single run now sweeps quality x threads, so the key
-            # MUST include both — otherwise web-low/archival and single/parallel
+            # dimension. The key includes both the operating-point label and the
+            # thread mode — otherwise distinct operating points and single/parallel
             # timings would be averaged into one meaningless bar.
-            # aggregated[bench_type][fmt][quality][impl][threads] -> running stats
+            # aggregated[bench_type][fmt][label][impl][threads] -> running stats
             aggregated_results: dict = {"encode": {}, "decode": {}}
 
             for result in data.get("results", []):
@@ -99,7 +97,7 @@ def generate_summary(
                 cell = (
                     aggregated_results[bench_type]
                     .setdefault(fmt, {})
-                    .setdefault(parsed["quality"], {})
+                    .setdefault(parsed["label"], {})
                     .setdefault(parsed["impl"], {})
                     .setdefault(
                         parsed["threads"],
@@ -152,7 +150,7 @@ def generate_summary(
             # Generate plots and export them individually
             plot_files: list[
                 Tuple[str, str, str, str]
-            ] = []  # (bench_type, bench_format, quality, filename)
+            ] = []  # (bench_type, bench_format, label, filename)
             plots = create_plots_from_parsed_results(parsed_results)
 
             for key, fig in plots:
@@ -160,26 +158,27 @@ def generate_summary(
                 filepath = os.path.join(result_dir, filename)
                 fig.savefig(filepath)
                 plt.close(fig)
-                plot_files.append((key[1].value, key[0].value, key[2].value, filename))
+                # key = (ImageFormat, BenchmarkType, label-string)
+                plot_files.append((key[1].value, key[0].value, key[2], filename))
 
             buffer.write("## Summary\n\n")
             buffer.write(
                 "Each row is one implementation aggregated over the dataset, for a "
-                "given quality tier and threading mode (single = `--threads 1`, "
+                "given operating point and threading mode (single = `--threads 1`, "
                 "all = `--threads 0`).\n\n"
             )
             buffer.write(
-                "| Implementation | Quality | Threads | Lang | Mean (ms) | Std Dev (ms) | 95% CI (ms) | Min (ms) | Max (ms) |\n"
+                "| Implementation | Op | Threads | Lang | Mean (ms) | Std Dev (ms) | 95% CI (ms) | Min (ms) | Max (ms) |\n"
             )
             buffer.write(
-                "|----------------|---------|---------|------|-----------|--------------|-------------|----------|----------|\n"
+                "|----------------|----|---------|------|-----------|--------------|-------------|----------|----------|\n"
             )
 
             for result in data.get("results", []):
                 name = result.get("command", "unknown")
                 parsed = _parse_command_name(name)
                 impl_name = parsed["impl"] if parsed else name.split(" (")[0]
-                quality = parsed["quality"] if parsed else "?"
+                quality = parsed["label"] if parsed else "?"
                 threads_label = (
                     ("single" if parsed["threads"] == 1 else "all") if parsed else "?"
                 )
@@ -205,14 +204,14 @@ def generate_summary(
 
             buffer.write("\n## Detailed Results\n")
             buffer.write(
-                "\nOne chart per (format, operation, quality tier); bars are "
+                "\nOne chart per (format, operation, operating point); bars are "
                 "grouped per implementation showing single-threaded vs all-cores.\n"
             )
 
             if plot_files:
                 for bench_type, bench_format, quality, filename in sorted(
                     plot_files,
-                    key=lambda p: (p[0], p[1], _TIER_ORDER.get(p[2], 99), p[3]),
+                    key=lambda p: (p[0], p[1], p[2], p[3]),
                 ):
                     buffer.write(
                         f"\n### {bench_type.capitalize()} {bench_format.upper()} — {quality}\n\n"
@@ -223,7 +222,7 @@ def generate_summary(
 
         # Process metrics if available
         if metrics is not None:
-            # Sort metrics: encode vs decode, format, quality, input file
+            # Sort metrics: encode vs decode, format, operating point, input file.
             # We want ENCODE to come before DECODE.
             def type_priority(t: str) -> int:
                 return 0 if t == "encode" else 1
@@ -232,7 +231,7 @@ def generate_summary(
                 key=lambda m: (
                     type_priority(m["type"]),
                     m["format"],
-                    _TIER_ORDER.get(m["quality"], 99),  # low -> high, not alphabetical
+                    m["label"],
                     os.path.basename(m["input_path"]),
                 )
             )
@@ -300,16 +299,17 @@ def generate_summary(
             # Metrics table
             buffer.write("\n## Metrics\n\n")
             buffer.write(
-                "| Implementation | Lang | Build | Quality | Input File | File Size | bpp | SSIMULACRA 2 | Status |\n"
+                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | Status |\n"
             )
             buffer.write(
-                "|----------------|------|-------|---------|------------|-----------|-----|--------------|--------|\n"
+                "|----------------|------|-------|----|--------|------------|-----------|-----|--------------|--------|\n"
             )
             for m in metrics:
                 impl_name = m["impl"]
                 impl_lang = m.get("lang", "?")
                 impl_build = m.get("build", "?")
-                quality = m["quality"]
+                quality = m["label"]
+                params = m.get("params", "") or "—"
                 input_file = os.path.basename(m["input_path"])
                 filesize = (
                     humanize.naturalsize(m["filesize"], binary=True)
@@ -320,7 +320,7 @@ def generate_summary(
                 ssim_score = m["ssimulacra2"]
                 status = "✗ " + m["error"][:30] + "..." if m.get("error") else "✓"
                 buffer.write(
-                    f"| {impl_name} | {impl_lang} | {impl_build} | {quality} | {input_file} | {filesize} | {bpp} | {ssim_score} | {status} |\n"
+                    f"| {impl_name} | {impl_lang} | {impl_build} | {quality} | {params} | {input_file} | {filesize} | {bpp} | {ssim_score} | {status} |\n"
                 )
 
         # Write buffer to file

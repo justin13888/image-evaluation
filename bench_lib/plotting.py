@@ -9,11 +9,7 @@ from bench_lib.models import (
     BenchmarkMetrics,
     BenchmarkType,
     ImageFormat,
-    QualityTier,
 )
-
-# Quality tiers ordered low -> high (enum definition order).
-_TIER_ORDER = {t.value: i for i, t in enumerate(QualityTier)}
 
 # Threading modes -> (legend label, bar colour). 1 = single-threaded, 0 = all cores.
 _THREAD_STYLES = {
@@ -50,13 +46,13 @@ def _group_by(items: list, key_fn: Callable) -> Dict:
 def create_plots_from_parsed_results(
     parsed: Dict[str, Dict[str, Dict[str, list[Dict[str, Any]]]]],
 ) -> list[Tuple[BenchmarkKey, Any]]:
-    """Create timing figures, one per (format, operation, quality tier).
+    """Create timing figures, one per (format, operation, operating-point label).
 
-    ``parsed`` is nested ``[bench_type][fmt][quality] -> [{name, threads, mean,
+    ``parsed`` is nested ``[bench_type][fmt][label] -> [{name, threads, mean,
     stddev}]``. Within each chart, implementations are drawn as horizontal bar
     groups with one bar per threading mode (single-threaded vs all-cores) so the
     two configurations are directly comparable. Returns ``(key, Figure)`` tuples
-    keyed by ``(ImageFormat, BenchmarkType, QualityTier)``; the caller saves and
+    keyed by ``(ImageFormat, BenchmarkType, label)``; the caller saves and
     closes the figures.
     """
 
@@ -68,9 +64,7 @@ def create_plots_from_parsed_results(
 
         for fmt in sorted(codecs.keys()):
             qualities = codecs[fmt]
-            for quality in sorted(
-                qualities.keys(), key=lambda q: _TIER_ORDER.get(q, 99)
-            ):
+            for quality in sorted(qualities.keys()):
                 entries = qualities[quality]
                 if not entries:
                     continue
@@ -141,7 +135,7 @@ def create_plots_from_parsed_results(
                 key = (
                     ImageFormat(fmt),
                     BenchmarkType(bench_type.lower()),
-                    QualityTier(quality),
+                    quality,
                 )
                 plots.append((key, fig))
 

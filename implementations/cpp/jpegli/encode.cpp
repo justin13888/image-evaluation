@@ -16,22 +16,11 @@ class JpegliEncodeBench : public BenchmarkImplementation {
     height = img.height;
     input_data = std::move(img.data);
 
-    // Mirror the quality tiers used by libjpeg-turbo and mozjpeg so jpegli is
-    // directly comparable within the JPEG group.
-    const std::string tier = param_str(args, "quality-tier", "web-high");
-    if (tier == "web-low") {
-      quality = 50;
-      progressive = false;
-      use_444 = false;
-    } else if (tier == "web-high") {
-      quality = 80;
-      progressive = true;
-      use_444 = false;
-    } else {  // archival
-      quality = 95;
-      progressive = false;
-      use_444 = true;
-    }
+    // Tunables mirror the other JPEG encoders so jpegli is directly comparable
+    // within the group: quality (1-100), progressive scan, chroma subsampling.
+    quality = param_int(args, "quality", 80);
+    progressive = param_bool(args, "progressive", true);
+    use_444 = (param_str(args, "subsampling", "420") == "444");
   }
 
   std::vector<uint8_t> run(const Args &args) override {

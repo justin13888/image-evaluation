@@ -27,13 +27,10 @@ impl BenchmarkImplementation for ZuneJxlBench {
         let height = h as usize;
         let input_data = rgb;
 
-        // TODO: see if zune exposes distance parameter as something not quality setting.
-        let (quality, effort): (u8, u8) = match args.param_str("quality-tier", "web-high").as_str()
-        {
-            "web-low" => (50, 7),   // Approximate d4.0
-            "archival" => (100, 9), // lossless
-            _ => (90, 7),           // web-high; approximate d1.0
-        };
+        // TODO: see if zune exposes distance parameter as something not quality
+        // setting (so the JXL quality axis can be `distance` like libjxl).
+        let quality = args.param_u32("quality", 90) as u8;
+        let effort = args.param_u32("effort", 7) as u8;
 
         Ok(Box::new(BenchContext {
             input_data,
