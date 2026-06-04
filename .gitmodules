@@ -31,9 +31,6 @@
 [submodule "vendor/libjxl"]
 	path = vendor/libjxl
 	url = https://github.com/libjxl/libjxl.git
-[submodule "vendor/ssimulacra2"]
-	path = vendor/ssimulacra2
-	url = https://github.com/justin13888/ssimulacra2.git
 [submodule "vendor/SVT-AV1"]
 	path = vendor/SVT-AV1
 	url = https://gitlab.com/AOMediaCodec/SVT-AV1.git
@@ -46,3 +43,6 @@
 [submodule "vendor/jxl-rs"]
 	path = vendor/jxl-rs
 	url = https://github.com/libjxl/jxl-rs.git
+[submodule "vendor/iqa-rs"]
+	path = vendor/iqa-rs
+	url = https://github.com/justin13888/iqa-rs.git

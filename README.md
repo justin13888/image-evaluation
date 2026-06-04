@@ -18,16 +18,20 @@ This repository contains benchmarks for various image format implementations, co
 
   ```bash
   sudo apt install build-essential clang clang-format cmake ccache nasm \
-    meson ninja-build pkg-config imagemagick hyperfine wget unzip
+    meson ninja-build pkg-config imagemagick hyperfine wget unzip liblcms2-dev
   ```
 
   On macOS:
 
   ```bash
-  brew install clang-format cmake ccache nasm meson ninja pkg-config imagemagick hyperfine wget unzip
+  brew install clang-format cmake ccache nasm meson ninja pkg-config imagemagick hyperfine wget unzip little-cms2
   ```
 
-All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs) and ssimulacra2 are vendored as git submodules and built automatically. No system dev packages for these libraries are required.
+  > **lcms2** is required to build the image-quality tool (`tools/iqa-cli`), which
+  > links the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate's SSIMULACRA2
+  > FFI. On macOS you may need `PKG_CONFIG_PATH="$(brew --prefix little-cms2)/lib/pkgconfig"`.
+
+All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs, [iqa-rs](https://github.com/justin13888/iqa-rs) for image-quality metrics) are vendored as git submodules and built automatically. No system dev packages for these libraries are required (except `lcms2`, see Prerequisites).
 
 > **CMake version:** CMake ≥ 3.5 is required. CMake 4.x is supported — `vendor/build_vendor.py` passes `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` automatically for older vendored projects (e.g. mozjpeg) that declare a lower minimum.
 
