@@ -15,8 +15,8 @@ find_package(mimalloc REQUIRED)
 
 # Decoder binary
 add_executable(bench-null-decode decode.cpp)
-target_link_libraries(bench-null-decode ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-null-decode ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-null-encode encode.cpp)
-target_link_libraries(bench-null-encode ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-null-encode ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

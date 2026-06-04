@@ -15,8 +15,8 @@ find_package(mimalloc REQUIRED)
 
 # Decoder binary
 add_executable(bench-libwebp-decode decode.cpp)
-target_link_libraries(bench-libwebp-decode WebP::webp ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-libwebp-decode WebP::webp ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-libwebp-encode encode.cpp)
-target_link_libraries(bench-libwebp-encode WebP::webp ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-libwebp-encode WebP::webp ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

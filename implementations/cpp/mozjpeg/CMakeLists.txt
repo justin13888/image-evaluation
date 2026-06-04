@@ -15,8 +15,8 @@ find_package(mimalloc REQUIRED)
 
 # Decoder binary
 add_executable(bench-mozjpeg-decode decode.cpp)
-target_link_libraries(bench-mozjpeg-decode mozjpeg::jpeg-static ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-mozjpeg-decode mozjpeg::jpeg-static ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-mozjpeg-encode encode.cpp)
-target_link_libraries(bench-mozjpeg-encode mozjpeg::jpeg-static ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-mozjpeg-encode mozjpeg::jpeg-static ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

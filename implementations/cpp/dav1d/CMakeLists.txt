@@ -25,4 +25,4 @@ find_package(mimalloc REQUIRED)
 add_executable(bench-dav1d-decode decode.cpp)
 target_link_libraries(bench-dav1d-decode
     PkgConfig::AVIF PkgConfig::AOM PkgConfig::DAV1D PkgConfig::SVT_AV1 PkgConfig::LIBGAV1
-    ZLIB::ZLIB mimalloc-static pthread dl m)
+    ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>" pthread dl m)

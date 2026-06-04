@@ -18,8 +18,8 @@ find_package(mimalloc REQUIRED)
 
 # Decoder binary
 add_executable(bench-libjpeg-turbo-decode decode.cpp)
-target_link_libraries(bench-libjpeg-turbo-decode libjpeg-turbo::jpeg-static ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-libjpeg-turbo-decode libjpeg-turbo::jpeg-static ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
 
 # Encoder binary
 add_executable(bench-libjpeg-turbo-encode encode.cpp)
-target_link_libraries(bench-libjpeg-turbo-encode libjpeg-turbo::jpeg-static ZLIB::ZLIB mimalloc-static)
+target_link_libraries(bench-libjpeg-turbo-encode libjpeg-turbo::jpeg-static ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

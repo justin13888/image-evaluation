@@ -33,4 +33,4 @@ add_executable(bench-rav1d-decode decode.cpp)
 target_link_libraries(bench-rav1d-decode
     "$<LINK_LIBRARY:WHOLE_ARCHIVE,${RAV1D_LIB}>"
     PkgConfig::AVIF PkgConfig::AOM PkgConfig::SVT_AV1 PkgConfig::LIBGAV1
-    ZLIB::ZLIB mimalloc-static pthread dl m)
+    ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>" pthread dl m)
