@@ -1,6 +1,6 @@
 #!/bin/bash
 # DEPRECATED: This script is superseded by `./bench setup`.
-# Data setup now happens automatically on `./bench run`, or explicitly via:
+# Data setup now happens automatically on `./bench perf`/`./bench quality`, or explicitly via:
 #   ./bench setup              # all datasets
 #   ./bench setup -d kodak     # specific dataset
 #   ./bench setup --force      # force re-download/regenerate

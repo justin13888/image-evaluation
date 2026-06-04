@@ -12,8 +12,21 @@ import traceback
 import tyro
 from colorama import init
 
-from bench_lib.models import CliEntry, CleanArgs, CompileArgs, RunArgs, SetupArgs
-from bench_lib.runner import run, run_clean, run_compile, run_setup
+from bench_lib.models import (
+    CliEntry,
+    CleanArgs,
+    CompileArgs,
+    PerfArgs,
+    QualityArgs,
+    SetupArgs,
+)
+from bench_lib.runner import (
+    run_clean,
+    run_compile,
+    run_perf,
+    run_quality,
+    run_setup,
+)
 
 init(autoreset=True)
 
@@ -26,8 +39,11 @@ if __name__ == "__main__":
         elif isinstance(args, CompileArgs):
             run_compile(args)
 
-        elif isinstance(args, RunArgs):
-            run(args)
+        elif isinstance(args, PerfArgs):
+            run_perf(args)
+
+        elif isinstance(args, QualityArgs):
+            run_quality(args)
 
         elif isinstance(args, SetupArgs):
             run_setup(args)

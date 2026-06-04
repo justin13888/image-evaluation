@@ -80,60 +80,49 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
    ./bench setup --verify-only    # Check integrity only
    ```
 
-   > **Note:** `./bench run` automatically sets up required datasets on first use, so an explicit `./bench setup` step is optional.
+   > **Note:** `./bench perf` and `./bench quality` automatically set up required datasets on first use, so an explicit `./bench setup` step is optional.
 
 4. **Build implementations** (vendored libraries + all implementations built automatically via `./bench compile`)
 
 ### Running Benchmarks
 
-**The dataset is the only experiment variable.** A single `./bench run --dataset <id>` produces a complete, self-comparable result set: it sweeps **every quality tier** (`web-low`, `web-high`, `archival`) and **both threading modes** (single-threaded and all-cores) internally, for all formats and both encode + decode. Timing runs are always compute-only (output discarded). You no longer pick a quality tier, thread count, or discard mode on the command line — those were removed so results from different runs are always directly comparable (see [issue #9](https://github.com/justin13888/image-implementation-benchmark/issues/9)).
+The suite is split into **two distinctly separate benchmarks**, each its own subcommand:
 
-`--formats` and `--mode` remain as optional **subset filters** (default = everything); restricting them never changes how anything is measured, it just narrows coverage for faster iteration.
+- **`./bench perf`** — *performance*. Hyperfine-timed encode **and** decode at each implementation's single fixed preset, swept across both threading modes (single-threaded and all-cores). Timing is always compute-only (output discarded, CRC32-checksummed). Presets are hardcoded per codec and may produce different-quality outputs across implementations — this is intentional for now and will be refined.
+- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). Encoders only; no timing and no thread sweep (encoded bytes are thread-invariant). IQA metrics come from the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate via the `iqa-cli` tool.
+
+`--formats` is an optional subset filter on both; `--mode {encode,decode,both}` further narrows the performance suite.
 
 ```bash
-# Quick smoke test (collapses the sweep to one tier + all-cores, single iteration)
-./bench run --dataset kodak --sample 3 --quick
+# --- Performance ---
+# Quick smoke test (all-cores only, single iteration)
+./bench perf --dataset kodak --sample 3 --quick
 
-# =====
+# Full KODAK timing sweep (24 images, cache-resident; both thread modes)
+./bench perf --dataset kodak
 
-# Recommended if you have time: full KODAK sweep (24 images, cache-resident)
-./bench run --dataset kodak
+# Subset filters + memory
+./bench perf --dataset kodak --formats jpeg avif --mode decode
+./bench perf --dataset div2k --measure-memory
+# Override inner-loop iterations / warmup (default 10 / 2)
+./bench perf --dataset kodak --iterations 20 --warmup 3
 
-# High-resolution testing (20 diverse 2K/4K images)
-./bench run --dataset div2k
+# --- Quality (rate-distortion) ---
+# Quick smoke test (2 quality points per encoder)
+./bench quality --dataset kodak --sample 3 --quick
 
-# Pathological/stress testing (4 synthetic images)
-./bench run --dataset pathological
+# Full quality sweep (every declared quality point per encoder)
+./bench quality --dataset kodak
 
-# Sample 3 images from KODAK (still sweeps all tiers + both thread modes)
-./bench run --dataset kodak --sample 3
+# Fewer, evenly-sampled points per encoder (e.g. 5)
+./bench quality --dataset kodak --quality-steps 5 --formats jpeg jxl
 
-# Subset filter: only some formats (space-separated)
-./bench run --dataset kodak --formats jpeg avif
-
-# Subset filter: decode only
-./bench run --dataset kodak --mode decode
-
-# Measure peak memory usage (per tier + thread mode)
-./bench run --dataset div2k --measure-memory
-
-# Compile all benchmarks
-./bench compile
-
-# Advanced: override inner-loop iterations / warmup (default: 10 / 2)
-./bench run --dataset kodak --iterations 20 --warmup 3
-
-# Advanced: skip the build step (if already built)
-./bench run --dataset kodak --skip-build
-
-# Advanced: metrics only, no hyperfine timing runs
-./bench run --dataset kodak --no-benchmarks
-
-# Advanced: timing runs only, no SSIMULACRA2 metrics
-./bench run --dataset kodak --no-metrics
+# --- Shared ---
+./bench compile          # build vendored libs + all implementations + iqa-cli
+./bench clean            # remove build artifacts and results
 ```
 
-> **Runtime note:** sweeping 3 quality tiers × 2 threading modes makes a full timing run ~6× longer than a single fixed-condition run (metrics ~3×, since file size and quality are thread-invariant and collected once per tier). Use `--sample N` (caps images — the dominant factor), `--formats`/`--mode` (narrow scope), or `--quick` (collapse the sweep) to keep development cycles fast.
+> **Runtime note:** the performance suite's two thread modes make a full run ~2× a single-mode run; use `--sample N`, `--formats`/`--mode`, or `--quick` for fast iteration. The quality suite's cost scales with quality points × images × encoders; `--quality-steps` and `--sample` cap it, and `--quick` collapses to 2 points.
 
 ### Cleanup
 
@@ -143,16 +132,28 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
 
 ### Results
 
-Results are in `./results/<timestamp>/`:
+Each run writes to its own `./results/<timestamp>/` directory.
+
+**`./bench perf`** produces:
 
 | Artifact | Contents |
 | :------- | :------- |
-| `summary.md` | Human-readable report. Timing table (columns: Implementation, Quality, Threads, Lang, Mean/Std Dev/95% CI/Min/Max ms); grouped single-vs-all-cores timing charts, one per (format, operation, quality tier); compression-analysis plots. |
-| `raw.json` | Full Hyperfine output — per command: `mean/median/stddev/min/max/user/system`, `times[]`, `exit_codes[]`. One command per (impl, format, operation, quality tier, thread mode, image). |
-| `metrics.json` | Per (impl, format, operation, quality tier, image): `filesize`, `ssimulacra2`, `bpp`, `width/height/megapixels`, plus `impl/lang/build/quality/format/type`. Thread-invariant, so collected once per tier (not per thread mode). |
-| `manifest.json` | Reproducibility manifest (system, compiler & library versions, allocator, `benchmark_config`). |
-| `*.png` | Plots referenced by `summary.md`: `{fmt}_{op}_{tier}_results.png` (timing), `quality_vs_bpp_{fmt}.png`, `format_comparison.png`, `impl_comparison_{fmt}.png`. |
-| `memory.csv` | Peak RSS per task — `name, peak_rss_mb, peak_rss_kb` (only if `--measure-memory`). |
+| `summary.md` | Timing table (Implementation, Operating point, Threads, Lang, Mean/Std Dev/95% CI/Min/Max ms) + grouped single-vs-all-cores charts, one per (format, operation). |
+| `raw.json` | Full Hyperfine output — per command: `mean/median/stddev/min/max/user/system`, `times[]`, `exit_codes[]`. |
+| `manifest.json` | Reproducibility manifest (system, compiler & library versions, allocator, `benchmark_config` with `suite: performance`). |
+| `*.png` | Timing charts referenced by `summary.md`. |
+| `memory.csv` | Peak RSS per task (only with `--measure-memory`). |
+
+**`./bench quality`** produces:
+
+| Artifact | Contents |
+| :------- | :------- |
+| `summary.md` | Rate-distortion analysis (SSIMULACRA2/PSNR vs bpp) + per-step metrics table (with PSNR column). |
+| `metrics.json` | Per (impl, format, operating point, image): `filesize`, `bpp`, `ssimulacra2`, `psnr`, `width/height/megapixels`, the swept `quality_axis`/`quality_value`, plus `impl/lang/build/format/type`. |
+| `manifest.json` | Reproducibility manifest with `suite: quality` and the exact per-encoder `quality_sweeps`. |
+| `*.png` | `quality_vs_bpp_{fmt}.png`, `format_comparison.png`, `impl_comparison_{fmt}.png`. |
+
+> A future change bundles a `perf` + `quality` pair into a single result set with a self-contained `report.html`.
 
 ## Methodology
 
@@ -185,7 +186,7 @@ The benchmarks use a tiered collection of images to test different performance c
 **Preparation Phase:**
 
 * **For Encoding:** Images are taken as-is and converted to raw PPM (RGB24) or PAM (RGBA32) format.
-* **For Decoding:** Images are pre-encoded using the **reference implementation** of the corresponding format at specific quality tiers.
+* **For Decoding:** Images are pre-encoded using the **reference implementation** of the corresponding format at that encoder's fixed performance preset.
 
 #### Dataset Selection Strategy
 
@@ -198,20 +199,29 @@ Choose your dataset based on your benchmarking goals:
 
 **Recommendation:** Run `kodak` for initial development and optimization work, then validate with `div2k` and `pathological` before publishing results.
 
-### Quality Tiers
+### Tunables & Operating Points
 
-We benchmark against three distinct use cases. **Every run sweeps all three tiers** so a single run yields a full quality-vs-bpp curve per implementation; each binary maps a tier name (passed as `--quality` to the binary) to format-specific arguments internally.
+Each implementation declares its tunable knobs in a per-implementation schema in `bench_lib/models.py` (`TUNABLE_SCHEMAS`). The orchestrator passes the chosen values to the binary as generic `--param key=value` flags; the binary reads only the keys it understands. The schema defines two things per encoder:
 
-| Tier         | Intent            | JPEG                | AVIF                       | JXL               | WEBP           |
-| :----------- | :---------------- | :------------------ | :------------------------- | :---------------- | :------------- |
-| **web-low**  | Thumbnail/Preview | Q50, Baseline       | Q65, Speed 6               | d4.0, e7          | Q50, m4        |
-| **web-high** | Standard Delivery | Q80, Progressive    | Q65 *(grain synth TBD)*    | d1.0, e7          | Q75, m4 †      |
-| **archival** | High Fidelity     | Q95, No Subsampling | Q85, YUV444                | d0, e9 (Lossless) | Lossless, z6   |
+- **`perf_preset`** — the single fixed operating point the **performance** suite uses (one set of params per codec). Presets are not quality-matched across implementations.
+- **`quality_axis` + `quality_sweep`** — the knob the **quality** suite sweeps (e.g. JPEG `quality`, JXL `distance`) and the discrete values it steps through to trace a rate-distortion curve. Lossless encoders (PNG, lossless-only WebP) and decoders have no quality axis.
 
-> **† Known limitations:**
-> - **AVIF web-high grain synthesis** is specified but not yet implemented in either `libavif` or `rav1e`. Both encoders currently use the same parameters as web-low for this tier. A TODO is tracked in each implementation.
-> - **image-webp** (Rust) only supports lossless WebP encoding (crate limitation). All three quality tiers produce lossless output. Exclude `image-webp` from lossy-tier comparisons until a lossy API is available.
-> - **spng** (C++) does not expose compression level control, so all three PNG quality tiers produce identical output for `spng-encode`.
+Representative tunables (see the schema for the authoritative list):
+
+| Format | Quality axis | Other knobs | Perf preset |
+| :----- | :----------- | :---------- | :---------- |
+| **JPEG** (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder) | `quality` 1-100 | `progressive`, `subsampling` (420/444) | q80, progressive, 420 |
+| **JPEG** (image-jpeg) | `quality` 1-100 | — | q80 |
+| **WEBP** (libwebp) | `quality` 0-100 | `method` 0-6, `lossless` | q75, m4, lossy |
+| **AVIF** (libavif, svt-av1, rav1e) | `quality` 0-100 | `speed`, chroma (420/444) | q65, speed 6, 420 |
+| **JXL** (libjxl) | `distance` (0 = lossless) | `effort` 1-9 | d1.0, e7 |
+| **JXL** (zune-jpegxl) | `quality` 0-100 | `effort` 1-9 | q90, e7 |
+| **PNG** (libpng, zune-png, image-png) | — *(lossless)* | compression/effort/filter | per impl |
+
+> **Known limitations:**
+> - **AVIF film grain synthesis** is not yet implemented in `libavif` or `rav1e` (a TODO is tracked in each).
+> - **image-webp** (Rust) only supports lossless WebP encoding (crate limitation), so it has no quality axis and is excluded from the quality suite.
+> - **spng** (C++) does not expose a compression-level control.
 
 ### Benchmarking Architecture
 
@@ -222,13 +232,13 @@ To ensure statistically significant results and eliminate "Cold Start" bias (OS 
 
 #### Binary Interface
 
-Every encoder/decoder implementation is compiled into a standalone binary implementing this CLI. This per-binary interface is **unchanged** — the orchestrator (`./bench run`) is what now *sweeps* `--quality` and `--threads` across invocations and always sets `--discard` for timing runs:
+Every encoder/decoder implementation is compiled into a standalone binary implementing this uniform CLI. The orchestrator passes codec tunables as repeated `--param key=value` flags (the binary ignores keys it does not understand), sweeps `--threads` for the performance suite, and sets `--discard` for timing runs:
 
 ```bash
 ./<binary> \
   --input <path> \
   --output <path> \
-  --quality <web-low|web-high|archival> \
+  [--param <key>=<value>]... \
   --iterations <int> \
   --warmup <int> \
   --threads <int> \
@@ -237,6 +247,7 @@ Every encoder/decoder implementation is compiled into a standalone binary implem
 
 | Flag           | Description                                                                                                                       |
 | :------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
+| `--param`      | Repeatable `key=value` tunable (e.g. `--param quality=80 --param progressive=true`). Last value wins; unknown keys are ignored.    |
 | `--iterations` | Number of timed operations in the measurement loop.                                                                               |
 | `--warmup`     | Number of untimed iterations to run before measurement (default: 2). Warms branch predictors, allocators, and caches.             |
 | `--threads`    | Number of threads to use. Use `1` for single-threaded benchmarks, `0` for "use all available cores".                              |
@@ -255,13 +266,13 @@ Memory is allocated and freed inside each iteration to simulate realistic per-re
 
 **Note:** We purposely include allocation time in the measurements to reflect real-world usage patterns. We do not support preallocation for the timebeing.
 
-#### Verification Strategy
+#### Image Quality Assessment
 
-The [benchmark harness](./bench) measures the visual similarity of the decoded output to the source based on the SSIMULACRA2 metric. While any choice of similarity metric is subject to bias, this is the validate that each benchmark implementation are producing output consistent to each other.
+The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate (via the in-repo `iqa-cli` tool), reporting **SSIMULACRA2** (perceptual; 100 = identical) and **PSNR** (dB). Because `iqa-rs` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source. (Butteraugli and SSIM are planned in `iqa-rs` and tracked as TODOs.)
 
 #### Discard Checksum
 
-**Timing runs are always compute-only:** `./bench run` invokes every binary with `--discard`, removing filesystem-write variance as a confound. (The separate metric-collection pass re-runs each binary *without* `--discard` so it writes a real file to size and score.)
+**Timing runs are always compute-only:** `./bench perf` invokes every binary with `--discard`, removing filesystem-write variance as a confound. (The quality suite runs each binary *without* `--discard` so it writes a real file to size and score.)
 
 When `--discard` is set, output bytes are fed through a CRC32 checksum to prevent compiler elimination of the encode/decode work. The C/C++ harness uses zlib's `crc32()` function; the Rust harness uses `crc32fast::Hasher`. Both libraries select hardware-accelerated implementations (e.g. SSE4.2, ARM CRC32) where available at compile time.
 
@@ -277,12 +288,12 @@ This establishes the I/O and measurement floor, allowing you to isolate codec ov
 
 ### Threading Model
 
-Every run automatically sweeps **both** threading configurations (you do not select one — they appear side-by-side in the timing charts):
+The **performance** suite automatically sweeps **both** threading configurations (they appear side-by-side in the timing charts):
 
 1. **Single-threaded (`--threads 1`):** Measures per-core efficiency and is useful for comparing instruction-level optimization.
 2. **Parallel (`--threads 0`):** Uses all available cores. Measures real-world throughput for batch processing.
 
-With `--pin-cores`, binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
+The **quality** suite does not sweep threads — encoded bytes are thread-invariant, so it runs all-cores only. With `--pin-cores` (performance suite), binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
 
 ### Statistical Reporting
 
@@ -355,10 +366,11 @@ Every benchmark run generates a `manifest.json` containing:
   },
   "allocator": "mimalloc 2.1.2",
   "benchmark_config": {
+    "suite": "performance",
     "dataset": "kodak",
     "formats": ["jpeg", "png", "webp", "avif", "jxl"],
     "mode": "both",
-    "quality_tiers": ["web-low", "web-high", "archival"],
+    "operating_point": "perf-preset",
     "thread_modes": [1, 0],
     "discard_output": true,
     "iterations": 10,
@@ -369,7 +381,7 @@ Every benchmark run generates a `manifest.json` containing:
 }
 ```
 
-The `benchmark_config` block records the swept protocol: `dataset` is the only experiment variable, `formats`/`mode` are the active subset filters, and `quality_tiers`/`thread_modes` are the dimensions swept every run. This manifest is committed alongside results for full reproducibility.
+The `benchmark_config` block records the suite (`performance` or `quality`) and its protocol. The performance manifest lists the swept `thread_modes`; the quality manifest instead records `quality_steps` and the exact per-encoder `quality_sweeps`. This manifest is written alongside results for full reproducibility.
 
 ## Image Format Implementations
 
@@ -394,7 +406,7 @@ We include modern formats and their most competitive implementations.
 | Implementation | Language | Notes                                     |
 | :------------- | :------- | :---------------------------------------- |
 | **libpng**     | C        | Reference implementation                  |
-| **spng**       | C        | "Simple PNG", speed-optimized. *Encoder does not expose compression level control; all quality tiers produce identical output.* |
+| **spng**       | C        | "Simple PNG", speed-optimized. *Encoder does not expose a compression-level control.* |
 | **png**        | Rust     | Standard `image-rs` crate                 |
 | **zune-png**   | Rust     | Highly optimized pure Rust implementation |
 
@@ -403,7 +415,7 @@ We include modern formats and their most competitive implementations.
 | Implementation | Language | Notes                         |
 | :------------- | :------- | :---------------------------- |
 | **libwebp**    | C        | Reference implementation      |
-| **image-webp** | Rust     | *Lossless-only crate limitation — lossy tiers (web-low, web-high) produce lossless output. Exclude from lossy-tier comparisons.* |
+| **image-webp** | Rust     | *Lossless-only crate limitation — no quality axis, so excluded from the quality suite's rate-distortion sweep.* |
 
 ### AVIF
 
@@ -413,7 +425,7 @@ We include modern formats and their most competitive implementations.
 | **dav1d**      | C/Asm    | Decoder via libavif (dav1d backend)       |
 | **libgav1**    | C++      | Decoder via libavif (libgav1 backend)     |
 | **SVT-AV1**    | C        | Encoder via libavif (SVT-AV1 backend)     |
-| **rav1e**      | Rust     | Encoder. *Film grain synthesis (web-high) not yet implemented; web-high uses same parameters as web-low.* |
+| **rav1e**      | Rust     | Encoder. *Film grain synthesis not yet implemented (tracked as a TODO).* |
 | **rav1d**      | Rust     | Decoder (Rust port of dav1d). *Drop-in dav1d replacement; linked at binary level.* |
 
 ### JPEG XL

@@ -745,7 +745,28 @@ for _name, _schema in TUNABLE_SCHEMAS.items():
         assert _schema.quality_sweep, f"{_name}: quality_axis set but empty sweep"
 
 
-class RunArgs(BaseModel):
+def quality_label(axis: str, value: str) -> str:
+    """Grammar-safe operating-point label for one quality-sweep step, e.g.
+    ``quality-80`` or ``distance-1.0``. Never contains ``", "`` or ``"="``."""
+    return f"{axis}-{value}"
+
+
+def select_sweep(sweep: list[str], steps: Optional[int]) -> list[str]:
+    """Pick `steps` evenly-spaced values from `sweep` (always including the
+    first and last). `None` keeps the full sweep; values >= len keep all."""
+    if steps is None or steps >= len(sweep) or steps <= 0:
+        return list(sweep)
+    if steps == 1:
+        return [sweep[0]]
+    n = len(sweep)
+    idx = sorted({round(i * (n - 1) / (steps - 1)) for i in range(steps)})
+    return [sweep[i] for i in idx]
+
+
+class PerfArgs(BaseModel):
+    """Performance suite: hyperfine timing of encode + decode at each
+    implementation's fixed preset, swept across both threading modes."""
+
     formats: Annotated[
         list[ImageFormat],
         tyro.conf.EnumChoicesFromValues,
@@ -790,7 +811,7 @@ class RunArgs(BaseModel):
     quick: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
-        Field(description="Quick mode (single iteration) (only for testing)"),
+        Field(description="Quick mode (single iteration, all-cores only)"),
     ] = False
     measure_memory: Annotated[
         bool,
@@ -800,15 +821,51 @@ class RunArgs(BaseModel):
     skip_build: Annotated[
         bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
     ] = False
-    no_benchmarks: Annotated[
+    debug: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
-        Field(description="Do not run benchmarks"),
+        Field(description="Enable debug mode (more verbose output)"),
     ] = False
-    no_metrics: Annotated[
+
+
+class QualityArgs(BaseModel):
+    """Quality suite: sweep each lossy encoder's quality axis over many steps and
+    measure file size + IQA (SSIMULACRA2, PSNR), tracing a rate-distortion curve.
+    Encoders only; no timing, no thread sweep (output is thread-invariant)."""
+
+    formats: Annotated[
+        list[ImageFormat],
+        tyro.conf.EnumChoicesFromValues,
+        tyro.conf.arg(aliases=["-f"]),
+        Field(description="List of formats to test."),
+    ] = list(ImageFormat)
+    dataset: Annotated[
+        DatasetId,
+        tyro.conf.EnumChoicesFromValues,
+        tyro.conf.arg(aliases=["-d"]),
+        Field(description="Dataset to benchmark"),
+    ] = DatasetId.TEST
+    sample: Annotated[
+        Optional[int],
+        Field(
+            description="Limit the maximum number of files from dataset to sample randomly"
+        ),
+    ] = None
+    quality_steps: Annotated[
+        Optional[int],
+        tyro.conf.arg(aliases=["-q"]),
+        Field(
+            description="Number of quality-axis points per encoder (evenly sampled "
+            "from its full sweep). Default: every declared point."
+        ),
+    ] = None
+    quick: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
-        Field(description="Do not collect metrics"),
+        Field(description="Quick mode (2 quality points per encoder)"),
+    ] = False
+    skip_build: Annotated[
+        bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
     ] = False
     debug: Annotated[
         bool,
@@ -861,7 +918,8 @@ class SetupArgs(BaseModel):
 
 
 CliEntry = Union[
-    Annotated[RunArgs, tyro.conf.subcommand(name="run")],
+    Annotated[PerfArgs, tyro.conf.subcommand(name="perf")],
+    Annotated[QualityArgs, tyro.conf.subcommand(name="quality")],
     Annotated[CleanArgs, tyro.conf.subcommand(name="clean")],
     Annotated[CompileArgs, tyro.conf.subcommand(name="compile")],
     Annotated[SetupArgs, tyro.conf.subcommand(name="setup")],

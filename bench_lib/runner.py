@@ -40,11 +40,14 @@ from bench_lib.models import (
     DatasetId,
     ImageFormat,
     ImageFormats,
+    PerfArgs,
     PPMImageFormat,
-    RunArgs,
+    QualityArgs,
     SetupArgs,
     find_implementation_by_name,
+    quality_label,
     schema_for,
+    select_sweep,
 )
 from bench_lib.summary import generate_summary
 from bench_lib.system_info import (
@@ -209,10 +212,10 @@ def build_bench_list(
     format: ImageFormat,
     dataset: DatasetId,
     threads: int,
-    args: RunArgs,
+    args: PerfArgs,
 ) -> BenchList:
-    """Construct benchmark tasks for one (type, format, threads) cell of the
-    swept matrix. Each implementation runs at its fixed performance preset
+    """Construct performance-suite tasks for one (type, format, threads) cell.
+    Each implementation runs at its fixed performance preset
     (``schema.perf_params()``), labelled ``perf``."""
     from itertools import chain
 
@@ -269,6 +272,57 @@ def build_bench_list(
                 pin_cores=args.pin_cores,
             )
             benches.append(bench)
+
+    return benches
+
+
+def build_quality_bench_list(
+    format: ImageFormat,
+    dataset: DatasetId,
+    args: QualityArgs,
+) -> BenchList:
+    """Construct quality-suite tasks for one format: for each lossy encoder with
+    a quality axis, one task per swept axis value. No null/decoder tasks, no
+    thread sweep (output is thread-invariant), and outputs are written (not
+    discarded) so size + IQA can be measured."""
+    benches: BenchList = []
+    encoders = [
+        impl
+        for impl in IMPLEMENTATIONS
+        if impl.format == format and impl.type == BenchmarkType.ENCODE
+    ]
+    input_files = get_input_files(dataset, PPMImageFormat.PPM, args.sample)
+
+    for impl in encoders:
+        if not os.path.exists(impl.bin):
+            raise RuntimeError(f"Error: Binary not found: {impl.bin}")
+
+        schema = schema_for(impl.name)
+        if schema.quality_axis is None:
+            # Lossless / knob-less encoder: no rate-distortion curve to trace.
+            continue
+
+        steps = 2 if args.quick else args.quality_steps
+        for value in select_sweep(schema.quality_sweep, steps):
+            params = schema.quality_params(value)
+            label = quality_label(schema.quality_axis, value)
+            for input_file, source_file in input_files:
+                benches.append(
+                    BenchmarkTask(
+                        impl=impl,
+                        params=params,
+                        label=label,
+                        input_path=input_file,
+                        source_path=source_file,
+                        # Quality runs are not timed; one pass writes the output.
+                        iterations=1,
+                        warmup=0,
+                        threads=0,
+                        discard_output=False,
+                        measure_memory=False,
+                        pin_cores=False,
+                    )
+                )
 
     return benches
 
@@ -596,64 +650,64 @@ def measure_memory(result_dir: str, commands: list[str], command_names: list[str
     print(f"\n✓ Memory data written to {csv_path}")
 
 
-def run(args: RunArgs):
-    """Execute benchmarks using hyperfine."""
-    formats = args.formats
+def _new_result_dir() -> str:
+    """Create and return a fresh timestamped results directory."""
+    os.makedirs("results", exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_dir = f"results/{timestamp}"
+    os.makedirs(result_dir, exist_ok=True)
+    return result_dir
 
-    # Each implementation runs at its fixed performance preset (one operating
-    # point), sweeping both threading modes. --quick collapses to all-cores only.
-    # (The dedicated quality suite, which sweeps the quality axis for dense
-    # rate-distortion curves, lands in a follow-up.)
+
+def _base_manifest() -> dict:
+    """System/compiler/library/allocator metadata shared by both suites."""
+    return {
+        **get_system_info(),
+        "compiler": get_compiler_versions(),
+        "libraries": get_library_versions(),
+        "allocator": f"mimalloc {_detect_mimalloc_version()}",
+    }
+
+
+def run_perf(args: PerfArgs):
+    """Performance suite: hyperfine timing of encode + decode at each
+    implementation's fixed preset, swept across both threading modes. Timing is
+    always compute-only (--discard); no size/quality metrics are collected here
+    (that is the quality suite's job)."""
+    formats = args.formats
+    # Both threading modes; --quick collapses to all-cores only.
     thread_modes = [0] if args.quick else list(THREAD_MODES)
 
-    # Build projects
     if not args.skip_build:
         build_projects(formats)
     else:
         print("Skipping build step (--skip-build)...")
 
-    # Create results directory
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = f"results/{timestamp}"
-    os.makedirs(result_dir, exist_ok=True)
+    result_dir = _new_result_dir()
 
     print("=" * 70)
-    print("COLLECTING BENCHMARK COMMANDS")
+    print("PERFORMANCE SUITE")
     print("=" * 70)
 
-    # Generate manifest
     manifest = {
-        **get_system_info(),
-        "compiler": get_compiler_versions(),
-        "libraries": get_library_versions(),
-        "allocator": f"mimalloc {_detect_mimalloc_version()}",
+        **_base_manifest(),
         "benchmark_config": {
-            # The only true experiment variable.
+            "suite": "performance",
             "dataset": args.dataset,
-            # Subset filters (default = everything).
             "formats": formats,
             "mode": args.mode,
-            # Each implementation runs at its fixed performance preset.
             "operating_point": "perf-preset",
-            # Swept every run; timing/memory vary across these, metrics do not.
             "thread_modes": thread_modes,
-            # Fixed: timing is always compute-only.
             "discard_output": True,
-            # Measurement tuning (do not change the experimental condition).
             "iterations": args.iterations,
             "warmup": args.warmup,
             "pin_cores": args.pin_cores,
             "quick": args.quick,
         },
     }
-
     with open(f"{result_dir}/manifest.json", "w") as f:
         json.dump(manifest, f, indent=2)
-
     print(f"\n✓ Manifest written to {result_dir}/manifest.json")
-
-    benches: BenchList = []
 
     types_to_run = []
     if args.mode in (BenchmarkMode.ENCODE, BenchmarkMode.BOTH):
@@ -661,7 +715,7 @@ def run(args: RunArgs):
     if args.mode in (BenchmarkMode.DECODE, BenchmarkMode.BOTH):
         types_to_run.append(BenchmarkType.DECODE)
 
-    # Sweep the matrix: (type, format) x threads, at each impl's perf preset.
+    benches: BenchList = []
     for bench_type in types_to_run:
         for format in formats:
             for threads in thread_modes:
@@ -673,101 +727,60 @@ def run(args: RunArgs):
         print("\nError: No benchmarks to run!")
         sys.exit(1)
 
-    json_output = None
-    if not args.no_benchmarks:
-        print(f"\n✓ {len(benches)} benchmark(s) ready to run\n")
+    print(f"\n✓ {len(benches)} timing benchmark(s) ready to run\n")
+    print("=" * 70)
+    print("RUNNING TIMING BENCHMARKS")
+    print("=" * 70)
+    print()
 
-        # Run hyperfine
-        print("=" * 70)
-        print("RUNNING BENCHMARKS")
-        print("=" * 70)
-        print()
+    json_output = f"{result_dir}/raw.json"
+    if not args.quick:
+        hyperfine_cmd = [
+            "hyperfine",
+            "--warmup",
+            "3",
+            "--min-runs",
+            "10",
+            "--export-json",
+            json_output,
+        ]
+    else:
+        hyperfine_cmd = [
+            "hyperfine",
+            "--warmup",
+            "0",
+            "--min-runs",
+            "1",
+            "--max-runs",
+            "1",
+            "--export-json",
+            json_output,
+        ]
+    for task in benches:
+        hyperfine_cmd.extend(["--command-name", task.name()])
+    hyperfine_cmd.extend([task.cmd("/dev/null") for task in benches])
+    if args.debug:
+        hyperfine_cmd.append("--show-output")
 
-        json_output = f"{result_dir}/raw.json"
-        hyperfine_cmd: list[str]
-        if not args.quick:
-            hyperfine_cmd = [
-                "hyperfine",
-                "--warmup",
-                "3",
-                "--min-runs",
-                "10",
-                "--export-json",
-                json_output,
-            ]
-        else:
-            hyperfine_cmd = [
-                "hyperfine",
-                "--warmup",
-                "0",
-                "--min-runs",
-                "1",
-                "--max-runs",
-                "1",
-                "--export-json",
-                json_output,
-            ]
+    try:
+        subprocess.run(hyperfine_cmd, check=True)
+    except FileNotFoundError:
+        print("\nError: 'hyperfine' not found")
+        sys.exit(1)
+    except subprocess.CalledProcessError:
+        print("\nError: Benchmark execution failed")
+        print(f"Test command: {' '.join(hyperfine_cmd)}")
+        sys.exit(1)
 
-        # Add command names for better output
-        for task in benches:
-            hyperfine_cmd.extend(["--command-name", task.name()])
+    # Timing-only summary (no IQA/size metrics in the performance suite).
+    generate_summary(result_dir, json_output, None)
 
-        hyperfine_cmd.extend([task.cmd("/dev/null") for task in benches])
-
-        # --show-output if debug
-        if args.debug:
-            hyperfine_cmd.append("--show-output")
-
-        try:
-            subprocess.run(hyperfine_cmd, check=True)
-        except FileNotFoundError:
-            print("\nError: 'hyperfine' not found")
-            sys.exit(1)
-        except subprocess.CalledProcessError:
-            print("\nError: Benchmark execution failed")
-            print(f"Test command: {' '.join(hyperfine_cmd)}")
-            sys.exit(1)
-
-    # Collect metrics
-    metrics = None
-    if not args.no_metrics:
-        # File size and SSIMULACRA2 depend only on (impl, format, type, operating
-        # point, image) — the encoded/decoded bytes are identical across thread
-        # modes. Deduplicate so each tuple is measured (and scored) exactly once.
-        seen_metric_keys: Set[tuple] = set()
-        metrics_benches: BenchList = []
-        for task in benches:
-            key = (
-                task.impl.name,
-                task.format_as_str(),
-                task.impl.type.value,
-                task.label,
-                os.path.basename(task.input_path),
-            )
-            if key in seen_metric_keys:
-                continue
-            seen_metric_keys.add(key)
-            metrics_benches.append(task)
-
-        metrics = generate_metrics(metrics_benches, result_dir)
-        # Save metrics
-        metrics_path = f"{result_dir}/metrics.json"
-        with open(metrics_path, "w") as f:
-            json.dump(metrics, f, indent=2)
-
-        print(f"\n✓ Metrics saved to {metrics_path}")
-
-    # Generate summary
-    generate_summary(result_dir, json_output, metrics)
-
-    # Measure memory if requested
     if args.measure_memory:
         mem_commands = [
             task.cmd("/dev/null", iterations=1, warmup=0) for task in benches
         ]
         mem_names = [task.name() for task in benches]
         measure_memory(result_dir, mem_commands, mem_names)
-        print("  - memory.csv     : Peak RSS measurements")
 
     print("\n" + "=" * 70)
     print("RESULTS")
@@ -775,10 +788,79 @@ def run(args: RunArgs):
     print(f"\nResults saved to: {result_dir}/")
     print("  - manifest.json  : Reproducibility metadata")
     print("  - raw.json       : Full hyperfine output")
-    if not args.no_metrics:
-        print("  - metrics.json   : File sizes and SSIMULACRA 2 scores")
-    if not args.no_benchmarks:
-        print("  - summary.md     : Human-readable tables")
+    print("  - summary.md     : Human-readable timing tables + charts")
+    if args.measure_memory:
+        print("  - memory.csv     : Peak RSS measurements")
+    print()
+
+
+def run_quality(args: QualityArgs):
+    """Quality suite: sweep each lossy encoder's quality axis over many steps and
+    measure file size + IQA (SSIMULACRA2, PSNR) per step, tracing a
+    rate-distortion curve (issue #8). Encoders only; no timing, no thread sweep."""
+    formats = args.formats
+
+    if not args.skip_build:
+        build_projects(formats)
+    else:
+        print("Skipping build step (--skip-build)...")
+
+    result_dir = _new_result_dir()
+
+    print("=" * 70)
+    print("QUALITY SUITE")
+    print("=" * 70)
+
+    benches: BenchList = []
+    for format in formats:
+        benches += build_quality_bench_list(format, args.dataset, args)
+
+    if not benches:
+        print("\nError: No quality benchmarks to run (no lossy encoders selected)!")
+        sys.exit(1)
+
+    # Record which quality-axis values each encoder actually swept (for the
+    # reproducibility manifest and downstream rate-distortion plots).
+    sweeps: Dict[str, list[str]] = {}
+    for task in benches:
+        sweeps.setdefault(task.impl.name, [])
+        axis = schema_for(task.impl.name).quality_axis
+        value = task.params.get(axis, "") if axis else ""
+        if value and value not in sweeps[task.impl.name]:
+            sweeps[task.impl.name].append(value)
+
+    manifest = {
+        **_base_manifest(),
+        "benchmark_config": {
+            "suite": "quality",
+            "dataset": args.dataset,
+            "formats": formats,
+            "quality_steps": args.quality_steps,
+            "quality_sweeps": sweeps,
+            "quick": args.quick,
+        },
+    }
+    with open(f"{result_dir}/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n✓ Manifest written to {result_dir}/manifest.json")
+    print(f"\n✓ {len(benches)} quality measurement(s) across the sweep\n")
+
+    metrics = generate_metrics(benches, result_dir)
+    metrics_path = f"{result_dir}/metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"\n✓ Metrics saved to {metrics_path}")
+
+    # IQA/size-only summary (rate-distortion plots, no timing in this suite).
+    generate_summary(result_dir, None, metrics)
+
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    print(f"\nResults saved to: {result_dir}/")
+    print("  - manifest.json  : Reproducibility metadata + per-encoder sweeps")
+    print("  - metrics.json   : File sizes, bpp, SSIMULACRA2 + PSNR per step")
+    print("  - summary.md     : Rate-distortion analysis + metrics table")
     print()
 
 
