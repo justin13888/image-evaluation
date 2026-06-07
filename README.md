@@ -212,7 +212,8 @@ Representative tunables (see the schema for the authoritative list):
 | **JPEG** (image-jpeg) | `quality` 1-100 | — | q80 |
 | **WEBP** (libwebp) | `quality` 0-100 | `method` 0-6, `lossless` | q75, m4, lossy |
 | **AVIF** (libavif, svt-av1, rav1e) | `quality` 0-100 | `speed`, chroma (420/444) | q65, speed 6, 420 |
-| **JXL** (libjxl) | `distance` (0 = lossless) | `effort` 1-9 | d1.0, e7 |
+| **JXL** (libjxl) | `distance` (lossy, 15.0→0.1) | `effort` 1-9 | d1.0, e7 |
+| **JXL** (libjxl-lossless) | — *(distance pinned to 0)* | `effort` 1-9 | d0.0, e7 |
 | **JXL** (zune-jpegxl) | `quality` 0-100 | `effort` 1-9 | q90, e7 |
 | **PNG** (libpng, zune-png, image-png) | — *(lossless)* | compression/effort/filter | per impl |
 

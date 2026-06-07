@@ -501,6 +501,17 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.JXL,
     ),
+    # libjxl in lossless mode (distance 0). Reuses the same binary as
+    # libjxl-encode; the distinct name makes it a separate series so the lossless
+    # operating point is not conflated with the lossy distance sweep.
+    Implementation(
+        name="libjxl-lossless-encode",
+        build="cpp",
+        lang="c++",
+        bin="implementations/cpp/libjxl/build/bench-libjxl-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.JXL,
+    ),
 ]
 
 assert not (set(ImageFormat) - {i.format for i in IMPLEMENTATIONS}), (
@@ -559,12 +570,28 @@ THREAD_MODES: list[int] = [1, 0]
 _JPEG_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "85", "90", "95"]
 _WEBP_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "90", "95"]
 _AVIF_QUALITY_SWEEP = ["20", "30", "40", "50", "60", "70", "80", "90"]
-# JXL distance: higher distance = lower quality. Full range from very low quality
-# (15.0) down to lossless (distance 0). Dense near the high-quality end (small
-# distances), which is where the rate-distortion curve is most sensitive.
+# JXL distance: higher distance = lower quality. Full *lossy* range from very low
+# quality (15.0) down to near-lossless (0.1). Dense near the high-quality end
+# (small distances), which is where the rate-distortion curve is most sensitive.
+# distance 0 (true lossless) is a different encode mode (original profile, not
+# XYB) and is exposed as the separate `libjxl-lossless-encode` variant instead of
+# the tail of this lossy curve.
 _JXL_DISTANCE_SWEEP = [
-    "15.0", "12.0", "10.0", "8.0", "6.0", "5.0", "4.0", "3.0",
-    "2.0", "1.5", "1.0", "0.75", "0.5", "0.25", "0.1", "0.0",
+    "15.0",
+    "12.0",
+    "10.0",
+    "8.0",
+    "6.0",
+    "5.0",
+    "4.0",
+    "3.0",
+    "2.0",
+    "1.5",
+    "1.0",
+    "0.75",
+    "0.5",
+    "0.25",
+    "0.1",
 ]
 
 
@@ -690,6 +717,25 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_axis="distance",
         quality_sweep=_JXL_DISTANCE_SWEEP,
         perf_preset={"distance": "1.0", "effort": "7"},
+    ),
+    # Lossless libjxl: distance pinned to 0. A single-point "sweep" so the quality
+    # suite emits one operating point (label distance-0.0) as its own series,
+    # while the binary takes the true-lossless path (original profile, not XYB).
+    "libjxl-lossless-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="distance",
+                kind="float",
+                default="0.0",
+                min=0.0,
+                max=0.0,
+                description="Butteraugli distance pinned to 0 (lossless)",
+            ),
+            Tunable(name="effort", kind="int", default="7", min=1, max=9),
+        ],
+        quality_axis="distance",
+        quality_sweep=["0.0"],
+        perf_preset={"distance": "0.0", "effort": "7"},
     ),
     "zune-jpegxl-encode": TunableSchema(
         params=[
