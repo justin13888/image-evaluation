@@ -559,8 +559,13 @@ THREAD_MODES: list[int] = [1, 0]
 _JPEG_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "85", "90", "95"]
 _WEBP_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "90", "95"]
 _AVIF_QUALITY_SWEEP = ["20", "30", "40", "50", "60", "70", "80", "90"]
-# JXL distance: higher distance = lower quality, so order high -> low distance.
-_JXL_DISTANCE_SWEEP = ["8.0", "6.0", "4.0", "3.0", "2.0", "1.5", "1.0", "0.5"]
+# JXL distance: higher distance = lower quality. Full range from very low quality
+# (15.0) down to lossless (distance 0). Dense near the high-quality end (small
+# distances), which is where the rate-distortion curve is most sensitive.
+_JXL_DISTANCE_SWEEP = [
+    "15.0", "12.0", "10.0", "8.0", "6.0", "5.0", "4.0", "3.0",
+    "2.0", "1.5", "1.0", "0.75", "0.5", "0.25", "0.1", "0.0",
+]
 
 
 def _jpeg_full_schema() -> "TunableSchema":

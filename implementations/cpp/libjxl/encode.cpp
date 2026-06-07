@@ -47,7 +47,11 @@ class LibJxlEncodeBench : public BenchmarkImplementation {
     basic_info.xsize = width;
     basic_info.ysize = height;
     basic_info.bits_per_sample = 8;
-    basic_info.uses_original_profile = JXL_TRUE;
+    // XYB (uses_original_profile=FALSE) is the correct high-quality lossy path;
+    // the libjxl header notes original-profile should be FALSE for most lossy use
+    // cases. Forcing JXL_TRUE disables XYB and collapses quality at low distance.
+    // Lossless keeps the original profile, since XYB is not bit-exact.
+    basic_info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
 
     if (JXL_ENC_SUCCESS != JxlEncoderSetBasicInfo(enc.get(), &basic_info)) {
       throw std::runtime_error("JxlEncoderSetBasicInfo failed");
