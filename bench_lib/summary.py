@@ -282,10 +282,10 @@ def generate_summary(
             # Metrics table
             buffer.write("\n## Metrics\n\n")
             buffer.write(
-                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | PSNR (dB) | Status |\n"
+                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | PSNR (dB) | SSIM | Butteraugli | Status |\n"
             )
             buffer.write(
-                "|----------------|------|-------|----|--------|------------|-----------|-----|--------------|-----------|--------|\n"
+                "|----------------|------|-------|----|--------|------------|-----------|-----|--------------|-----------|------|-------------|--------|\n"
             )
             for m in metrics:
                 impl_name = m["impl"]
@@ -303,9 +303,13 @@ def generate_summary(
                 ssim_score = m["ssimulacra2"]
                 psnr_val = m.get("psnr")
                 psnr_str = f"{psnr_val:.2f}" if psnr_val is not None else "∞/NA"
+                ssim_val = m.get("ssim")
+                ssim_str = f"{ssim_val:.4f}" if ssim_val is not None else "NA"
+                ba_val = m.get("butteraugli")
+                ba_str = f"{ba_val:.3f}" if ba_val is not None else "NA"
                 status = "✗ " + m["error"][:30] + "..." if m.get("error") else "✓"
                 buffer.write(
-                    f"| {impl_name} | {impl_lang} | {impl_build} | {quality} | {params} | {input_file} | {filesize} | {bpp} | {ssim_score} | {psnr_str} | {status} |\n"
+                    f"| {impl_name} | {impl_lang} | {impl_build} | {quality} | {params} | {input_file} | {filesize} | {bpp} | {ssim_score} | {psnr_str} | {ssim_str} | {ba_str} | {status} |\n"
                 )
 
         # Write buffer to file
