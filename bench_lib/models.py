@@ -915,6 +915,14 @@ class QualityArgs(BaseModel):
         tyro.conf.FlagCreatePairsOff,
         Field(description="Quick mode (2 quality points per encoder)"),
     ] = False
+    jobs: Annotated[
+        Optional[int],
+        tyro.conf.arg(aliases=["-j"]),
+        Field(
+            description="Parallel encode workers (default: physical core count). Each "
+            "encode runs single-threaded; peak memory scales with this."
+        ),
+    ] = None
     skip_build: Annotated[
         bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
     ] = False
@@ -978,6 +986,15 @@ class AllArgs(BaseModel):
         tyro.conf.FlagCreatePairsOff,
         Field(description="Quick mode for both suites"),
     ] = False
+    jobs: Annotated[
+        Optional[int],
+        tyro.conf.arg(aliases=["-j"]),
+        Field(
+            description="Parallel encode workers for the quality suite (default: "
+            "physical core count). Each encode runs single-threaded; peak memory "
+            "scales with this."
+        ),
+    ] = None
     measure_memory: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,

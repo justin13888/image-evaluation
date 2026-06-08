@@ -44,6 +44,59 @@ def get_system_info() -> Dict[str, Any]:
     return info
 
 
+def get_physical_cores() -> int:
+    """Best-effort physical (not logical/SMT) core count.
+
+    Used to size the quality suite's parallel encode pool: one single-threaded
+    encode per physical core saturates the machine without the cache thrashing
+    that hyperthread oversubscription causes. Falls back to the logical count
+    (then 1) when the physical count can't be determined.
+    """
+    fallback = max(1, os.cpu_count() or 1)
+
+    try:
+        if platform.system() == "Darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.physicalcpu"]).decode()
+            return max(1, int(out.strip()))
+
+        if platform.system() == "Linux":
+            # Count distinct (physical id, core id) pairs from /proc/cpuinfo; each
+            # pair is one physical core regardless of SMT siblings.
+            try:
+                cores: set[tuple[str, str]] = set()
+                phys_id = core_id = None
+                with open("/proc/cpuinfo") as f:
+                    for line in f:
+                        if line.startswith("physical id"):
+                            phys_id = line.split(":", 1)[1].strip()
+                        elif line.startswith("core id"):
+                            core_id = line.split(":", 1)[1].strip()
+                        elif not line.strip():
+                            if phys_id is not None and core_id is not None:
+                                cores.add((phys_id, core_id))
+                            phys_id = core_id = None
+                if cores:
+                    return len(cores)
+            except Exception:
+                pass
+            # Fallback: count unique (Core, Socket) rows from lscpu.
+            try:
+                out = subprocess.check_output(["lscpu", "-p=Core,Socket"]).decode()
+                rows = {
+                    line
+                    for line in out.splitlines()
+                    if line and not line.startswith("#")
+                }
+                if rows:
+                    return len(rows)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return fallback
+
+
 def get_compiler_versions() -> Dict[str, str]:
     """Get versions of all compilers used."""
     versions = {}
