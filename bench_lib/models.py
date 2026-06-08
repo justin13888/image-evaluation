@@ -1187,11 +1187,15 @@ class BenchmarkMetrics(TypedDict):
     input_path: str
     source_path: str
     filesize: int
-    # IQA scores from iqa-rs (via the iqa-cli binary). ssimulacra2: 100 = identical,
-    # -1.0 on error. psnr in dB; None when non-finite (pixel-identical -> +inf) or
-    # unavailable. TODO: butteraugli + ssim once iqa-rs/iqa-cli expose them.
+    # IQA scores from the iqa crate (via the iqa-cli binary). ssimulacra2:
+    # 100 = identical, -1.0 on error. psnr in dB; None when non-finite
+    # (pixel-identical -> +inf) or unavailable. ssim: 0..1, 1.0 = identical
+    # (higher is better). butteraugli: >=0, 0.0 = identical (lower is better).
+    # ssim/butteraugli are None when unavailable.
     ssimulacra2: float
     psnr: Optional[float]
+    ssim: Optional[float]
+    butteraugli: Optional[float]
     error: Optional[str]
     type: str
     format: str
