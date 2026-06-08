@@ -269,6 +269,14 @@ Memory is allocated and freed inside each iteration to simulate realistic per-re
 
 The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate (via the in-repo `iqa-cli` tool), reporting **SSIMULACRA2** (perceptual; 100 = identical) and **PSNR** (dB). Because `iqa-rs` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source. (Butteraugli and SSIM are planned in `iqa-rs` and tracked as TODOs.)
 
+> [!IMPORTANT]
+> **IQA metrics are approximations, not ground truth.** Every image-quality metric encodes its own model of the human visual system, and each comes with assumptions and blind spots:
+>
+> - **SSIMULACRA2** is a perceptual estimator calibrated against subjective datasets at *specific* viewing conditions (display resolution, brightness, viewing distance). It can mis-rank distortions it was not tuned for and is not guaranteed to be monotonic with perceived quality near the high-fidelity (near-lossless) end of the scale.
+> - **PSNR** measures pixel-wise error only and is well known to correlate poorly with human perception — it cannot see structure, texture masking, or color sensitivity.
+>
+> Both are *automated, full-reference* metrics: they compare against the source pixels and say nothing about aesthetic quality, artifact *annoyance*, or content the metric was never trained on (e.g. text, screenshots, medical or satellite imagery). **Aggregate scores (BD-rate, Pareto fronts) can be sensitive to the metric, dataset, and operating points chosen, and a few points of SSIMULACRA2 may not be perceptible.** Treat these results as a reproducible *guide* for narrowing options, **not** as a substitute for a properly controlled human subjective study (e.g. MOS/2AFC) when determining the genuinely best-looking option for a given use case.
+
 #### Discard Checksum
 
 **Timing runs are always compute-only:** `./bench perf` invokes every binary with `--discard`, removing filesystem-write variance as a confound. (The quality suite runs each binary *without* `--discard` so it writes a real file to size and score.)
@@ -447,6 +455,8 @@ We include modern formats and their most competitive implementations.
 4. **mozjpeg design goals.** mozjpeg prioritizes compression ratio over speed. Its slower encode times are intentional, not a deficiency.
 
 5. **8-bit only pipeline.** All intermediate PPM files are normalized to 8-bit depth (max value 255). 16-bit images are not tested as they increase complexity of pipeline and do not provide meaningful extra data points.
+
+6. **IQA metrics are approximations.** SSIMULACRA2 and PSNR are automated estimators of perceived quality, each with its own assumptions and blind spots (see [Image Quality Assessment](#image-quality-assessment)). They are a reproducible guide for narrowing options, **not** a replacement for a controlled human subjective study (e.g. MOS) when determining the genuinely best-looking option.
 
 ## Contributing
 
