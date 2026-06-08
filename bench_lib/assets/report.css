@@ -20,6 +20,14 @@
 .q-controls a.q-dl:hover { text-decoration: underline; }
 
 .q-chart-title { margin: 1.4rem 0 .2rem; font-size: 1rem; }
+.q-metric-grid {
+  display: grid; gap: .6rem 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  margin: .3rem 0 1.4rem;
+}
+.q-metric-cell { min-width: 0; }            /* allow charts to shrink in grid tracks */
+.q-metric-cap { font-size: .82rem; color: #555; margin: .1rem 0 .15rem; font-weight: 600; }
+.q-metric-cell .q-chart { margin: 0; }
 .q-chart { position: relative; margin: .3rem 0 1.2rem; }
 .q-chart svg { width: 100%; height: auto; display: block; }
 .q-chart .q-plot { border: 1px solid #e6e6e6; border-radius: 6px; background: #fff; }

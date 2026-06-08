@@ -188,6 +188,9 @@ def test_report_html():
         "ssim + butteraugli must round-trip into the report"
     )
     assert "Butteraugli" in html, "Butteraugli metric must be wired into the report"
+    assert "q-metric-grid" in html, (
+        "per-format section must render the all-metrics small-multiples grid"
+    )
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 

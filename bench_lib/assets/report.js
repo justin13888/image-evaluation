@@ -127,9 +127,9 @@
   }
 
   // series: [{key,label,color,dash?,points:[{x,y,label,q,count}]}]
-  function renderRDChart(container, series, chartId) {
+  function renderRDChart(container, series, chartId, metric) {
     var hidden = HIDDEN[chartId] || (HIDDEN[chartId] = {});
-    var info = METRIC_INFO[state.metric];
+    var info = METRIC_INFO[metric];
     var log = state.xscale === "log";
     var vis = series.filter(function (s) { return !hidden[s.key]; });
     container._hits = [];
@@ -249,7 +249,7 @@
           tip.innerHTML = "<b>" + esc(best.label) + "</b><br>" +
             '<span class="k">step</span> ' + esc(best.step) + "<br>" +
             '<span class="k">bpp</span> ' + best.x.toFixed(3) + "<br>" +
-            '<span class="k">' + esc(METRIC_INFO[state.metric].name) + "</span> " + best.y.toFixed(2) +
+            '<span class="k">' + esc(info.name) + "</span> " + best.y.toFixed(2) +
             (best.count > 1 ? '<br><span class="k">images</span> ' + best.count : "");
           var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
           if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
@@ -291,33 +291,69 @@
       });
     });
     if (!series.length) { host.innerHTML = '<p class="q-note">No rate-distortion data.</p>'; return; }
-    renderRDChart(chart, series, "combined");
+    renderRDChart(chart, series, "combined", state.metric);
   }
 
-  function renderPerFormat(agg) {
+  // Metrics that actually carry finite encode data. SSIMULACRA2 always present
+  // (it gates validRows); the rest appear only when measured. Order follows
+  // METRIC_INFO.
+  function availableMetrics() {
+    function hasMetric(key) {
+      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.error; });
+    }
+    var metrics = ["ssimulacra2"];
+    ["psnr", "ssim", "butteraugli"].forEach(function (k) {
+      if (hasMetric(k)) metrics.push(k);
+    });
+    return metrics;
+  }
+
+  // Per format, a small-multiples grid: one rate-distortion chart per available
+  // metric (each metric has its own y-scale). Independent of the global toggle.
+  function renderPerFormat(rows, metrics) {
     var host = document.getElementById("q-charts");
     if (!host) return;
     host.innerHTML = "";
-    Object.keys(agg).sort().forEach(function (fmt) {
+    // Aggregate once per metric, then pivot to per-format below.
+    var aggByMetric = {};
+    metrics.forEach(function (metric) { aggByMetric[metric] = aggregate(rows, metric); });
+    var formats = {};
+    metrics.forEach(function (metric) {
+      Object.keys(aggByMetric[metric]).forEach(function (fmt) { formats[fmt] = 1; });
+    });
+    Object.keys(formats).sort().forEach(function (fmt) {
       var title = document.createElement("h4");
       title.className = "q-chart-title";
       title.textContent = fmt.toUpperCase();
       host.appendChild(title);
-      var chart = document.createElement("div");
-      chart.className = "q-chart";
-      host.appendChild(chart);
-      var series = agg[fmt].map(function (s, i) {
-        return { key: fmt + "/" + s.impl, label: s.impl, color: PALETTE[i % PALETTE.length], points: s.points };
+      var grid = document.createElement("div");
+      grid.className = "q-metric-grid";
+      host.appendChild(grid);
+      metrics.forEach(function (metric) {
+        var fmtAgg = aggByMetric[metric][fmt];
+        if (!fmtAgg) return;
+        var cell = document.createElement("div");
+        cell.className = "q-metric-cell";
+        var cap = document.createElement("div");
+        cap.className = "q-metric-cap";
+        cap.textContent = METRIC_INFO[metric].name;
+        cell.appendChild(cap);
+        var chart = document.createElement("div");
+        chart.className = "q-chart";
+        cell.appendChild(chart);
+        grid.appendChild(cell);
+        var series = fmtAgg.map(function (s, i) {
+          return { key: fmt + "/" + s.impl, label: s.impl, color: PALETTE[i % PALETTE.length], points: s.points };
+        });
+        renderRDChart(chart, series, "fmt:" + fmt + ":" + metric, metric);
       });
-      renderRDChart(chart, series, "fmt:" + fmt);
     });
   }
 
   function renderAll() {
     var rows = validRows(METRICS);
-    var agg = aggregate(rows, state.metric);
-    renderCombined(agg);
-    renderPerFormat(agg);
+    renderCombined(aggregate(rows, state.metric));
+    renderPerFormat(rows, availableMetrics());
   }
 
   // ---- BD-rate table (sortable) -------------------------------------------
@@ -393,17 +429,13 @@
     var host = document.getElementById("q-controls");
     if (!host) return;
     host.innerHTML = "";
-    function hasMetric(key) {
-      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.error; });
-    }
-    // SSIMULACRA2 is always available (it gates validRows); the rest appear only
-    // when present in the data. Order follows METRIC_INFO.
-    var metricOpts = [{ label: "SSIMULACRA2", value: "ssimulacra2" }];
-    ["psnr", "ssim", "butteraugli"].forEach(function (k) {
-      if (hasMetric(k)) metricOpts.push({ label: METRIC_INFO[k].name, value: k });
+    // The metric toggle drives only the cross-format Pareto chart; the per-format
+    // grid below always shows every available metric.
+    var metricOpts = availableMetrics().map(function (k) {
+      return { label: METRIC_INFO[k].name, value: k };
     });
     if (metricOpts.length > 1) {
-      host.appendChild(group("Metric", metricOpts,
+      host.appendChild(group("Pareto metric", metricOpts,
         function () { return state.metric; },
         function (v) { state.metric = v; renderAll(); }));
     }

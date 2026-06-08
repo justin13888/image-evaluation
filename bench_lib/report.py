@@ -101,7 +101,9 @@ def _quality_section(qual_dir: str) -> list[str]:
     parts.append(
         "<p class='muted'>Interactive — rendered in your browser from the raw "
         "measurements embedded below. Hover a point for details; click a legend "
-        "entry to toggle a series; switch metric or x-axis scale up top.</p>"
+        "entry to toggle a series. The per-format charts show every metric at "
+        "once; the Pareto-metric and x-axis-scale toggles up top drive the "
+        "cross-format Pareto chart.</p>"
     )
     parts.append(
         "<div class='q-disclaimer'><strong>IQA metrics are approximations, not "
@@ -138,8 +140,9 @@ def _quality_section(qual_dir: str) -> list[str]:
         "left is better.</p>"
         "<div id='q-combined'></div>"
         "<h3>Rate-distortion by format</h3>"
-        "<p class='q-note'>One chart per format, every encoder's quality sweep "
-        "aggregated to a clean mean curve across the dataset.</p>"
+        "<p class='q-note'>A small-multiples grid per format: every encoder's "
+        "quality sweep aggregated to a clean mean curve across the dataset, shown "
+        "for every available metric (SSIMULACRA2, PSNR, SSIM, Butteraugli).</p>"
         "<div id='q-charts'></div>"
         "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
         "<p class='q-note'>Negative = fewer bits for equal quality (better). "
