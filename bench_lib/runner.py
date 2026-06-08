@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional, Set
 
 import humanize
@@ -56,6 +57,7 @@ from bench_lib.system_info import (
     _detect_mimalloc_version,
     get_compiler_versions,
     get_library_versions,
+    get_physical_cores,
     get_system_info,
 )
 
@@ -296,7 +298,12 @@ def build_quality_bench_list(
     """Construct quality-suite tasks for one format: for each lossy encoder with
     a quality axis, one task per swept axis value. No null/decoder tasks, no
     thread sweep (output is thread-invariant), and outputs are written (not
-    discarded) so size + IQA can be measured."""
+    discarded) so size + IQA can be measured.
+
+    Each task is pinned to a single encode thread (`threads=1`): the suite runs
+    many tasks concurrently (one per physical core), so internal codec threading
+    would only oversubscribe the CPU. Output is thread-invariant, so this changes
+    scheduling, not results."""
     benches: BenchList = []
     encoders = [
         impl
@@ -329,7 +336,9 @@ def build_quality_bench_list(
                         # Quality runs are not timed; one pass writes the output.
                         iterations=1,
                         warmup=0,
-                        threads=0,
+                        # Single-threaded: tasks run in parallel (one per physical
+                        # core), so internal codec threads would oversubscribe.
+                        threads=1,
                         discard_output=False,
                         measure_memory=False,
                         pin_cores=False,
@@ -353,9 +362,19 @@ def _task_metric_fields(task: BenchmarkTask) -> Dict[str, str]:
     }
 
 
-def _decode_to_ppm(task: BenchmarkTask, encoded_path: str, ppm_path: str) -> None:
+def _decode_to_ppm(
+    task: BenchmarkTask,
+    encoded_path: str,
+    ppm_path: str,
+    env: Optional[Dict[str, str]] = None,
+) -> None:
     """Decode an encoded output back to PPM using the format's reference decoder,
-    so iqa-cli can compare raw pixels (iqa does not decode codec formats)."""
+    so iqa-cli can compare raw pixels (iqa does not decode codec formats).
+
+    `env` (when set) is passed to the decoder process; the suite uses it to pin
+    the decode to a single thread. `--threads 1` is also forced so codecs whose
+    thread pool keys off the flag rather than env (e.g. libavif) stay capped —
+    both levers are needed to avoid oversubscription under the parallel pool."""
     ref_name = REFERENCE_DECODERS.get(task.impl.format)
     if not ref_name:
         raise RuntimeError(f"No reference decoder defined for {task.impl.format}")
@@ -376,20 +395,24 @@ def _decode_to_ppm(task: BenchmarkTask, encoded_path: str, ppm_path: str) -> Non
             "--warmup",
             "0",
             "--threads",
-            "0",
+            "1",
         ],
         check=True,
         stderr=subprocess.PIPE,
+        env=env,
     )
 
 
 def _run_iqa(
-    reference_path: str, distorted_path: str
+    reference_path: str,
+    distorted_path: str,
+    env: Optional[Dict[str, str]] = None,
 ) -> tuple[float, Optional[float], Optional[float], Optional[float]]:
     """Run iqa-cli on two images, returning (ssimulacra2, psnr, ssim, butteraugli).
     SSIMULACRA2 is -1.0 if missing; the rest are None when non-finite/unavailable.
     SSIM and Butteraugli are higher/lower-is-better respectively (1.0 / 0.0 =
-    identical)."""
+    identical). `env` (when set) is passed through to cap iqa-cli's rayon threads
+    under the parallel pool."""
     res = subprocess.run(
         [
             IQA_CLI_BIN,
@@ -405,6 +428,7 @@ def _run_iqa(
         capture_output=True,
         text=True,
         check=True,
+        env=env,
     )
     data = json.loads(res.stdout.strip())
     ss = data.get("ssimulacra2")
@@ -419,152 +443,218 @@ def _run_iqa(
     )
 
 
-def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetrics]:
-    """Generate file size and visual quality metrics."""
+def _measure_one(
+    task: BenchmarkTask, temp_dir: str, env: Dict[str, str]
+) -> tuple[Optional[BenchmarkMetrics], str]:
+    """Encode one task, decode + score it, and return its metric row alongside a
+    preformatted status line.
+
+    Runs inside a worker thread: it never raises and never prints, so the caller
+    can print the returned line from the main thread and keep parallel output
+    interleave-free. Every child process inherits `env`, which (with the tasks'
+    `--threads 1`) pins it to a single thread. Returns (None, status) when the
+    task has no format to measure (skipped)."""
+    if task.impl.format is None or task.output_ext() is None:
+        return (
+            None,
+            f"{Fore.BLUE}Skipped {task.name()} (null format){Style.RESET_ALL}",
+        )
+
+    try:
+        identifier = task.identifier()
+        format_ext_str = FORMAT_EXT_MAP[task.output_ext()]
+        output_path = os.path.join(temp_dir, f"{identifier}.{format_ext_str}")
+
+        # Run implementation once (no warmup) to get the output file. Force
+        # discard=False so the binary writes a real file even though timing runs
+        # are always compute-only (--discard). Output is captured (not inherited)
+        # so concurrent encoders don't interleave on the console.
+        start_time = time.time()
+        subprocess.run(
+            shlex.split(task.cmd(output_path, iterations=1, warmup=0, discard=False)),
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        elapsed_time = time.time() - start_time
+
+        # Verify implementation generated output
+        if not os.path.exists(output_path):
+            raise RuntimeError(
+                f"Implementation {task.name()} was ran to collect metrics but "
+                f"output file not found at: {output_path}"
+            )
+
+        # 1. Get file size
+        try:
+            filesize = os.path.getsize(output_path)
+        except Exception:
+            filesize = 0
+
+        # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM + Butteraugli,
+        # from the iqa crate). iqa consumes raw pixels, so an encoded output is
+        # first decoded to PPM with the format's reference decoder; decode tasks
+        # already produce a PPM. The reference is the original source.
+        if task.impl.type == BenchmarkType.ENCODE:
+            distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
+            _decode_to_ppm(task, output_path, distorted_ppm, env=env)
+        else:
+            distorted_ppm = output_path
+        score, psnr, ssim, butteraugli = _run_iqa(
+            task.source_path, distorted_ppm, env=env
+        )
+
+        # 3. Get image dimensions from source file
+        width, height, megapixels, bpp = 0, 0, 0.0, 0.0
+        dim_warning = ""
+        try:
+            with PILImage.open(task.source_path) as img:
+                width, height = img.size
+                megapixels = (width * height) / 1_000_000
+                if width > 0 and height > 0 and filesize > 0:
+                    bpp = (filesize * 8) / (width * height)
+        except Exception as img_err:
+            dim_warning = (
+                f"\n  {Fore.YELLOW}Warning: Could not get dimensions: "
+                f"{img_err}{Style.RESET_ALL}"
+            )
+
+        psnr_str = f"{psnr:.2f}" if psnr is not None else "∞/NA"
+        ssim_str = f"{ssim:.4f}" if ssim is not None else "NA"
+        ba_str = f"{butteraugli:.3f}" if butteraugli is not None else "NA"
+        status = (
+            f"{Fore.GREEN}✓{Style.RESET_ALL} {task.name()} — "
+            f"Size: {humanize.naturalsize(filesize, binary=True)}, "
+            f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, SSIM: {ssim_str}, "
+            f"Butteraugli: {ba_str}, bpp: {bpp:.3f} "
+            f"(took {elapsed_time:.1f} s){dim_warning}"
+        )
+
+        metric = BenchmarkMetrics(
+            name=task.name(),
+            impl=task.impl.name,
+            lang=task.impl.lang,
+            build=task.impl.build,
+            **_task_metric_fields(task),
+            input_path=task.input_path,
+            source_path=task.source_path,
+            filesize=filesize,
+            ssimulacra2=score,
+            psnr=psnr,
+            ssim=ssim,
+            butteraugli=butteraugli,
+            error=None,
+            type=task.impl.type.value,
+            format=task.impl.format.value,
+            width=width,
+            height=height,
+            megapixels=megapixels,
+            bpp=bpp,
+        )
+        return (metric, status)
+    except Exception as e:
+        detail = ""
+        if isinstance(e, subprocess.CalledProcessError):
+            if e.stderr:
+                detail += (
+                    f"\n  {Fore.YELLOW}Standard Error Output:"
+                    f"\n  {Fore.WHITE}{e.stderr.strip()}{Style.RESET_ALL}"
+                )
+            if e.stdout:
+                detail += (
+                    f"\n  {Fore.YELLOW}Standard Output (at time of failure):"
+                    f"\n  {Fore.WHITE}{e.stdout.strip()}{Style.RESET_ALL}"
+                )
+        status = (
+            f"{Fore.RED}✗ Error running {task.name()}: {e}{Style.RESET_ALL}{detail}"
+        )
+        metric = BenchmarkMetrics(
+            name=task.name(),
+            impl=task.impl.name,
+            lang=task.impl.lang,
+            build=task.impl.build,
+            **_task_metric_fields(task),
+            input_path=task.input_path,
+            source_path=task.source_path,
+            filesize=0,
+            ssimulacra2=-1.0,
+            psnr=None,
+            ssim=None,
+            butteraugli=None,
+            error=str(e),
+            type=task.impl.type.value,
+            format=task.impl.format.value,
+            width=0,
+            height=0,
+            megapixels=0.0,
+            bpp=0.0,
+        )
+        return (metric, status)
+
+
+def _ensure_reference_decoders(benches: BenchList) -> None:
+    """Build any missing reference decoders serially before the parallel pool.
+
+    `_decode_to_ppm` lazily builds a missing decoder, but `build_rust_project`
+    takes no cross-thread lock and would race on cargo's target dir if several
+    workers triggered it at once. Resolve + build them up front instead. Normally
+    a no-op (the suite builds everything before running) — this guards the
+    `--skip-build` path."""
+    seen: Set[str] = set()
+    for task in benches:
+        if task.impl.format is None:
+            continue
+        ref_name = REFERENCE_DECODERS.get(task.impl.format)
+        if not ref_name or ref_name in seen:
+            continue
+        seen.add(ref_name)
+        ref_dec = find_implementation_by_name(ref_name)
+        if ref_dec and not os.path.exists(ref_dec.bin):
+            build_project(ref_dec)
+
+
+def generate_metrics(
+    benches: BenchList, result_dir: str, max_workers: int
+) -> list[BenchmarkMetrics]:
+    """Generate file size and visual quality metrics, encoding tasks in parallel.
+
+    Up to `max_workers` encode→decode→score pipelines run concurrently; each
+    child is pinned to one thread, so a pool sized to the physical core count
+    saturates the CPU without oversubscribing (issue #23). Tasks are dispatched
+    in binary-sorted order so an encoder's runs cluster in time, keeping its
+    binary + shared libs hot in cache."""
     print(f"{Fore.BLUE}{'=' * 70}\nCOLLECTING METRICS\n{'=' * 70}\n")
 
     temp_dir = tempfile.mkdtemp()
     print(f"Temporary outputs stored in: {temp_dir}")
+    print(f"Encoding with {max_workers} parallel worker(s), 1 thread each\n")
+
+    # Pin every child process to a single thread: covers rayon-/OMP-based codecs
+    # and iqa-cli. The encode/decode also pass --threads 1 for codecs (e.g.
+    # libavif) whose internal pool keys off the flag rather than these env vars.
+    env = {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+
+    # Build missing reference decoders up front (serial) to avoid a cargo race
+    # inside the worker threads.
+    _ensure_reference_decoders(benches)
+
+    # Dispatch same-binary tasks together so their executable stays cache-hot;
+    # ThreadPoolExecutor pulls from the queue in submission order.
+    ordered = sorted(benches, key=lambda t: (t.impl.bin, t.label, t.input_path))
 
     metrics: list[BenchmarkMetrics] = []
-
+    total = len(ordered)
     try:
-        for i, task in enumerate(benches):
-            print(
-                f"[{i + 1}/{len(benches)}] Processing ({task.name()} >>>> ",
-                end=" ",
-                flush=True,
-            )
-
-            identifier = task.identifier()
-            format_ext = task.output_ext()
-            if task.impl.format is None or format_ext is None:
-                print(
-                    f"{Fore.BLUE}Skipping collecting metrics for {task.name()} due to null format...{Style.RESET_ALL}"
-                )
-                continue
-
-            format_ext_str = FORMAT_EXT_MAP[format_ext]
-            output_path = os.path.join(temp_dir, f"{identifier}.{format_ext_str}")
-
-            # Obtain metric
-            try:
-                # Run implementation once (no warmup) to get the output file.
-                # Force discard=False so the binary writes a real file even
-                # though timing runs are always compute-only (--discard).
-                start_time = time.time()
-                subprocess.run(
-                    shlex.split(
-                        task.cmd(output_path, iterations=1, warmup=0, discard=False)
-                    ),
-                    check=True,
-                )
-                end_time = time.time()
-                elapsed_time = end_time - start_time
-
-                # Verify implementation generated output
-                if not os.path.exists(output_path):
-                    raise RuntimeError(
-                        f"Implementation {task.name()} was ran to collect metrics but output file not found at: {output_path}{Style.RESET_ALL}"
-                    )
-
-                # 1. Get file size
-                try:
-                    filesize = os.path.getsize(output_path)
-                except Exception:
-                    filesize = 0
-
-                # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM +
-                # Butteraugli, from the iqa crate). iqa consumes raw pixels, so an
-                # encoded output is first decoded to PPM with the format's
-                # reference decoder; decode tasks already produce a PPM. The
-                # reference is the original source.
-                if task.impl.type == BenchmarkType.ENCODE:
-                    distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
-                    _decode_to_ppm(task, output_path, distorted_ppm)
-                else:
-                    distorted_ppm = output_path
-                score, psnr, ssim, butteraugli = _run_iqa(
-                    task.source_path, distorted_ppm
-                )
-
-                # 3. Get image dimensions from source file
-                width, height, megapixels, bpp = 0, 0, 0.0, 0.0
-                try:
-                    with PILImage.open(task.source_path) as img:
-                        width, height = img.size
-                        megapixels = (width * height) / 1_000_000
-                        if width > 0 and height > 0 and filesize > 0:
-                            bpp = (filesize * 8) / (width * height)
-                except Exception as img_err:
-                    print(
-                        f"{Fore.YELLOW}Warning: Could not get dimensions: {img_err}{Style.RESET_ALL}"
-                    )
-
-                psnr_str = f"{psnr:.2f}" if psnr is not None else "∞/NA"
-                ssim_str = f"{ssim:.4f}" if ssim is not None else "NA"
-                ba_str = f"{butteraugli:.3f}" if butteraugli is not None else "NA"
-                print(
-                    f"{Fore.GREEN}✓ Size: {humanize.naturalsize(filesize, binary=True)}, "
-                    f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, SSIM: {ssim_str}, "
-                    f"Butteraugli: {ba_str}, bpp: {bpp:.3f} "
-                    f"{Style.RESET_ALL}(took {elapsed_time:.1f} s)"
-                )
-
-                metrics.append(
-                    BenchmarkMetrics(
-                        name=task.name(),
-                        impl=task.impl.name,
-                        lang=task.impl.lang,
-                        build=task.impl.build,
-                        **_task_metric_fields(task),
-                        input_path=task.input_path,
-                        source_path=task.source_path,
-                        filesize=filesize,
-                        ssimulacra2=score,
-                        psnr=psnr,
-                        ssim=ssim,
-                        butteraugli=butteraugli,
-                        error=None,
-                        type=task.impl.type.value,
-                        format=task.impl.format.value,
-                        width=width,
-                        height=height,
-                        megapixels=megapixels,
-                        bpp=bpp,
-                    )
-                )
-            except Exception as e:
-                print(f"{Fore.RED}✗ Error running {task.name()}: {e}")
-                if isinstance(e, subprocess.CalledProcessError):
-                    if e.stderr:
-                        print(f"{Fore.YELLOW}Standard Error Output:")
-                        print(f"{Fore.WHITE}{e.stderr.strip()}")
-                    if e.stdout:
-                        print(f"{Fore.YELLOW}Standard Output (at time of failure):")
-                        print(f"{Fore.WHITE}{e.stdout.strip()}")
-
-                metrics.append(
-                    BenchmarkMetrics(
-                        name=task.name(),
-                        impl=task.impl.name,
-                        lang=task.impl.lang,
-                        build=task.impl.build,
-                        **_task_metric_fields(task),
-                        input_path=task.input_path,
-                        source_path=task.source_path,
-                        filesize=0,
-                        ssimulacra2=-1.0,
-                        psnr=None,
-                        error=str(e),
-                        type=task.impl.type.value,
-                        format=task.impl.format.value,
-                        width=0,
-                        height=0,
-                        megapixels=0.0,
-                        bpp=0.0,
-                    )
-                )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_measure_one, task, temp_dir, env) for task in ordered
+            ]
+            for done, future in enumerate(as_completed(futures), start=1):
+                metric, status = future.result()
+                print(f"[{done}/{total}] {status}")
+                if metric is not None:
+                    metrics.append(metric)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -839,6 +929,18 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
         if value and value not in sweeps[task.impl.name]:
             sweeps[task.impl.name].append(value)
 
+    # Parallel encode workers: physical cores by default (one single-threaded
+    # encode per core saturates the CPU without oversubscribing), capped at the
+    # task count and overridable via --jobs. A non-positive --jobs falls back to
+    # the physical-core default.
+    max_workers = max(
+        1,
+        min(
+            args.jobs if (args.jobs and args.jobs > 0) else get_physical_cores(),
+            len(benches),
+        ),
+    )
+
     manifest = {
         **_base_manifest(),
         "benchmark_config": {
@@ -848,6 +950,7 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
             "quality_steps": args.quality_steps,
             "quality_sweeps": sweeps,
             "quick": args.quick,
+            "jobs": max_workers,
         },
     }
     with open(f"{result_dir}/manifest.json", "w") as f:
@@ -855,7 +958,7 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
     print(f"\n✓ Manifest written to {result_dir}/manifest.json")
     print(f"\n✓ {len(benches)} quality measurement(s) across the sweep\n")
 
-    metrics = generate_metrics(benches, result_dir)
+    metrics = generate_metrics(benches, result_dir, max_workers)
     metrics_path = f"{result_dir}/metrics.json"
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
@@ -1000,6 +1103,7 @@ def run_all(args: AllArgs):
         sample=args.sample,
         quality_steps=args.quality_steps,
         quick=args.quick,
+        jobs=args.jobs,
         skip_build=True,
         debug=args.debug,
     )
