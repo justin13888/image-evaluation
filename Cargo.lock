@@ -909,23 +909,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "iqa"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16485bbf43fb222b50bac7068917c12af4896dedac12618ed75b980dda0b6a1f"
+dependencies = [
+ "cc",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "iqa-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "image",
- "iqa-rs",
-]
-
-[[package]]
-name = "iqa-rs"
-version = "0.1.0"
-dependencies = [
- "cc",
- "pkg-config",
- "thiserror 2.0.18",
- "tracing",
+ "iqa",
+ "serde_json",
 ]
 
 [[package]]
@@ -951,6 +953,12 @@ checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
+
+[[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ivf"
@@ -1761,6 +1769,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2334,6 +2355,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zune-core"
