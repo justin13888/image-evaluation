@@ -56,3 +56,7 @@ table.q-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.q-table td.good { color: #157f3b; }
 table.q-table td.bad { color: #b3261e; }
 .q-note { color: #666; font-size: .85rem; margin: .2rem 0 .8rem; }
+.q-disclaimer { border-left: 4px solid #d9a300; background: #fffaf0; color: #5c4a00;
+                padding: .6rem .9rem; margin: .8rem 0 1.2rem; font-size: .85rem;
+                border-radius: 0 4px 4px 0; line-height: 1.45; }
+.q-disclaimer strong { color: #7a5d00; }

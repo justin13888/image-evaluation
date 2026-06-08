@@ -103,6 +103,20 @@ def _quality_section(qual_dir: str) -> list[str]:
         "measurements embedded below. Hover a point for details; click a legend "
         "entry to toggle a series; switch metric or x-axis scale up top.</p>"
     )
+    parts.append(
+        "<div class='q-disclaimer'><strong>IQA metrics are approximations, not "
+        "ground truth.</strong> SSIMULACRA2 and PSNR are automated estimators of "
+        "perceived quality, each with its own assumptions and blind spots. "
+        "SSIMULACRA2 is calibrated against subjective data at specific viewing "
+        "conditions and can mis-rank distortions it was not tuned for (especially "
+        "near the near-lossless end); PSNR is pixel-wise error that correlates "
+        "poorly with perception. Aggregate scores (BD-rate, Pareto fronts) are "
+        "sensitive to the metric, dataset, and operating points chosen, and a few "
+        "points of SSIMULACRA2 may not be perceptible. Treat these results as a "
+        "reproducible guide for narrowing options &mdash; <em>not</em> a "
+        "substitute for a controlled human subjective study (e.g. MOS) when "
+        "determining the genuinely best-looking option.</div>"
+    )
     # Embedded data (source of truth). Charts recompute from #quality-metrics; the
     # BD-rate and Pareto summaries are precomputed here (numpy / dominance) and
     # embedded so the browser need not reimplement them.
