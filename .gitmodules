@@ -43,6 +43,3 @@
 [submodule "vendor/jxl-rs"]
 	path = vendor/jxl-rs
 	url = https://github.com/libjxl/jxl-rs.git
-[submodule "vendor/iqa-rs"]
-	path = vendor/iqa-rs
-	url = https://github.com/justin13888/iqa-rs.git

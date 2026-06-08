@@ -18,20 +18,16 @@ This repository contains benchmarks for various image format implementations, co
 
   ```bash
   sudo apt install build-essential clang clang-format cmake ccache nasm \
-    meson ninja-build pkg-config imagemagick hyperfine wget unzip liblcms2-dev
+    meson ninja-build pkg-config imagemagick hyperfine wget unzip
   ```
 
   On macOS:
 
   ```bash
-  brew install clang-format cmake ccache nasm meson ninja pkg-config imagemagick hyperfine wget unzip little-cms2
+  brew install clang-format cmake ccache nasm meson ninja pkg-config imagemagick hyperfine wget unzip
   ```
 
-  > **lcms2** is required to build the image-quality tool (`tools/iqa-cli`), which
-  > links the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate's SSIMULACRA2
-  > FFI. On macOS you may need `PKG_CONFIG_PATH="$(brew --prefix little-cms2)/lib/pkgconfig"`.
-
-All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs, [iqa-rs](https://github.com/justin13888/iqa-rs) for image-quality metrics) are vendored as git submodules and built automatically. No system dev packages for these libraries are required (except `lcms2`, see Prerequisites).
+All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs) are vendored as git submodules and built automatically; image-quality metrics come from the published [`iqa`](https://crates.io/crates/iqa) crate (resolved from crates.io, with lcms2 compiled from source). No system dev packages for these libraries are required.
 
 > **CMake version:** CMake ≥ 3.5 is required. CMake 4.x is supported — `vendor/build_vendor.py` passes `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` automatically for older vendored projects (e.g. mozjpeg) that declare a lower minimum.
 
@@ -89,7 +85,7 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
 The suite is split into **two distinctly separate benchmarks**, each its own subcommand:
 
 - **`./bench perf`** — *performance*. Hyperfine-timed encode **and** decode at each implementation's single fixed preset, swept across both threading modes (single-threaded and all-cores). Timing is always compute-only (output discarded, CRC32-checksummed). Presets are hardcoded per codec and may produce different-quality outputs across implementations — this is intentional for now and will be refined.
-- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). Encoders only; no timing and no thread sweep (encoded bytes are thread-invariant). IQA metrics come from the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate via the `iqa-cli` tool.
+- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). Encoders only; no timing and no thread sweep (encoded bytes are thread-invariant). IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the `iqa-cli` tool.
 
 `--formats` is an optional subset filter on both; `--mode {encode,decode,both}` further narrows the performance suite.
 
@@ -149,9 +145,9 @@ results/<timestamp>/
 
 **`performance/`** — `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`), and `memory.csv` (with `--measure-memory`).
 
-**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, dimensions, the swept `quality_axis`/`quality_value`) is the raw data everything else is recomputed from; `summary.md` (BD-rate table + Pareto best-of-format table + per-step metrics table, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`). The quality suite renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
+**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, `ssim`, `butteraugli`, dimensions, the swept `quality_axis`/`quality_value`) is the raw data everything else is recomputed from; `summary.md` (BD-rate table + Pareto best-of-format table + per-step metrics table, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`). The quality suite renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
 
-**`report.html`** is a single offline-friendly file. Performance charts are embedded as base64 PNGs. The **quality** view is interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR) and linear/log-x toggles, hover tooltips, and a sortable BD-rate table. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
+**`report.html`** is a single offline-friendly file. Performance charts are embedded as base64 PNGs. The **quality** view is interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, and a sortable BD-rate table. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
 
 ## Methodology
 
@@ -267,15 +263,17 @@ Memory is allocated and freed inside each iteration to simulate realistic per-re
 
 #### Image Quality Assessment
 
-The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa-rs`](https://github.com/justin13888/iqa-rs) crate (via the in-repo `iqa-cli` tool), reporting **SSIMULACRA2** (perceptual; 100 = identical) and **PSNR** (dB). Because `iqa-rs` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source. (Butteraugli and SSIM are planned in `iqa-rs` and tracked as TODOs.)
+The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa`](https://crates.io/crates/iqa) crate (via the in-repo `iqa-cli` tool), reporting **SSIMULACRA2** (perceptual; 100 = identical), **PSNR** (dB), **SSIM** (structural similarity; 1.0 = identical, higher is better) and **Butteraugli** (perceptual difference; 0 = identical, **lower** is better). Because `iqa` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source.
 
 > [!IMPORTANT]
 > **IQA metrics are approximations, not ground truth.** Every image-quality metric encodes its own model of the human visual system, and each comes with assumptions and blind spots:
 >
 > - **SSIMULACRA2** is a perceptual estimator calibrated against subjective datasets at *specific* viewing conditions (display resolution, brightness, viewing distance). It can mis-rank distortions it was not tuned for and is not guaranteed to be monotonic with perceived quality near the high-fidelity (near-lossless) end of the scale.
 > - **PSNR** measures pixel-wise error only and is well known to correlate poorly with human perception — it cannot see structure, texture masking, or color sensitivity.
+> - **SSIM** compares local structure, luminance, and contrast (higher is better, 1.0 = identical). It is more perceptual than PSNR but still a relatively simple model that can miss color and high-frequency artifacts.
+> - **Butteraugli** (derived from libjxl) estimates the perceptual difference between two images, with **lower** meaning closer to identical (0 = identical). Like the others it encodes specific assumptions and can disagree with human judgement on content it was not tuned for.
 >
-> Both are *automated, full-reference* metrics: they compare against the source pixels and say nothing about aesthetic quality, artifact *annoyance*, or content the metric was never trained on (e.g. text, screenshots, medical or satellite imagery). **Aggregate scores (BD-rate, Pareto fronts) can be sensitive to the metric, dataset, and operating points chosen, and a few points of SSIMULACRA2 may not be perceptible.** Treat these results as a reproducible *guide* for narrowing options, **not** as a substitute for a properly controlled human subjective study (e.g. MOS/2AFC) when determining the genuinely best-looking option for a given use case.
+> These are all *automated, full-reference* metrics: they compare against the source pixels and say nothing about aesthetic quality, artifact *annoyance*, or content the metric was never trained on (e.g. text, screenshots, medical or satellite imagery). **Aggregate scores (BD-rate, Pareto fronts) can be sensitive to the metric, dataset, and operating points chosen, and a few points of SSIMULACRA2 may not be perceptible.** Treat these results as a reproducible *guide* for narrowing options, **not** as a substitute for a properly controlled human subjective study (e.g. MOS/2AFC) when determining the genuinely best-looking option for a given use case.
 
 #### Discard Checksum
 
@@ -456,7 +454,7 @@ We include modern formats and their most competitive implementations.
 
 5. **8-bit only pipeline.** All intermediate PPM files are normalized to 8-bit depth (max value 255). 16-bit images are not tested as they increase complexity of pipeline and do not provide meaningful extra data points.
 
-6. **IQA metrics are approximations.** SSIMULACRA2 and PSNR are automated estimators of perceived quality, each with its own assumptions and blind spots (see [Image Quality Assessment](#image-quality-assessment)). They are a reproducible guide for narrowing options, **not** a replacement for a controlled human subjective study (e.g. MOS) when determining the genuinely best-looking option.
+6. **IQA metrics are approximations.** SSIMULACRA2, PSNR, SSIM and Butteraugli are automated estimators of perceived quality, each with its own assumptions and blind spots (see [Image Quality Assessment](#image-quality-assessment)). They are a reproducible guide for narrowing options, **not** a replacement for a controlled human subjective study (e.g. MOS) when determining the genuinely best-looking option.
 
 ## Contributing
 

@@ -61,8 +61,9 @@ from bench_lib.system_info import (
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# iqa-cli: in-repo Rust binary computing IQA metrics (SSIMULACRA2 + PSNR) via the
-# iqa-rs crate. Built as part of the Rust workspace (cargo build --release).
+# iqa-cli: in-repo Rust binary computing IQA metrics (SSIMULACRA2 + PSNR + SSIM +
+# Butteraugli) via the iqa crate. Built as part of the Rust workspace (cargo build
+# --release).
 IQA_CLI_BIN = os.path.join(PROJECT_ROOT, "target", "release", "iqa-cli")
 
 DATASET_FILES_CHECKED: Set[str] = set()
@@ -354,7 +355,7 @@ def _task_metric_fields(task: BenchmarkTask) -> Dict[str, str]:
 
 def _decode_to_ppm(task: BenchmarkTask, encoded_path: str, ppm_path: str) -> None:
     """Decode an encoded output back to PPM using the format's reference decoder,
-    so iqa-cli can compare raw pixels (iqa-rs does not decode codec formats)."""
+    so iqa-cli can compare raw pixels (iqa does not decode codec formats)."""
     ref_name = REFERENCE_DECODERS.get(task.impl.format)
     if not ref_name:
         raise RuntimeError(f"No reference decoder defined for {task.impl.format}")
@@ -382,9 +383,13 @@ def _decode_to_ppm(task: BenchmarkTask, encoded_path: str, ppm_path: str) -> Non
     )
 
 
-def _run_iqa(reference_path: str, distorted_path: str) -> tuple[float, Optional[float]]:
-    """Run iqa-cli on two images, returning (ssimulacra2, psnr). SSIMULACRA2 is
-    -1.0 if missing; PSNR is None when non-finite/unavailable."""
+def _run_iqa(
+    reference_path: str, distorted_path: str
+) -> tuple[float, Optional[float], Optional[float], Optional[float]]:
+    """Run iqa-cli on two images, returning (ssimulacra2, psnr, ssim, butteraugli).
+    SSIMULACRA2 is -1.0 if missing; the rest are None when non-finite/unavailable.
+    SSIM and Butteraugli are higher/lower-is-better respectively (1.0 / 0.0 =
+    identical)."""
     res = subprocess.run(
         [
             IQA_CLI_BIN,
@@ -393,7 +398,7 @@ def _run_iqa(reference_path: str, distorted_path: str) -> tuple[float, Optional[
             "--distorted",
             distorted_path,
             "--metric",
-            "ssimulacra2,psnr",
+            "ssimulacra2,psnr,ssim,butteraugli",
             "--format",
             "json",
         ],
@@ -404,9 +409,13 @@ def _run_iqa(reference_path: str, distorted_path: str) -> tuple[float, Optional[
     data = json.loads(res.stdout.strip())
     ss = data.get("ssimulacra2")
     psnr = data.get("psnr")
+    ssim = data.get("ssim")
+    butteraugli = data.get("butteraugli")
     return (
         float(ss) if ss is not None else -1.0,
         float(psnr) if psnr is not None else None,
+        float(ssim) if ssim is not None else None,
+        float(butteraugli) if butteraugli is not None else None,
     )
 
 
@@ -465,16 +474,19 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                 except Exception:
                     filesize = 0
 
-                # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR, from iqa-rs).
-                # iqa-rs consumes raw pixels, so an encoded output is first
-                # decoded to PPM with the format's reference decoder; decode tasks
-                # already produce a PPM. The reference is the original source.
+                # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM +
+                # Butteraugli, from the iqa crate). iqa consumes raw pixels, so an
+                # encoded output is first decoded to PPM with the format's
+                # reference decoder; decode tasks already produce a PPM. The
+                # reference is the original source.
                 if task.impl.type == BenchmarkType.ENCODE:
                     distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
                     _decode_to_ppm(task, output_path, distorted_ppm)
                 else:
                     distorted_ppm = output_path
-                score, psnr = _run_iqa(task.source_path, distorted_ppm)
+                score, psnr, ssim, butteraugli = _run_iqa(
+                    task.source_path, distorted_ppm
+                )
 
                 # 3. Get image dimensions from source file
                 width, height, megapixels, bpp = 0, 0, 0.0, 0.0
@@ -490,9 +502,12 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                     )
 
                 psnr_str = f"{psnr:.2f}" if psnr is not None else "∞/NA"
+                ssim_str = f"{ssim:.4f}" if ssim is not None else "NA"
+                ba_str = f"{butteraugli:.3f}" if butteraugli is not None else "NA"
                 print(
                     f"{Fore.GREEN}✓ Size: {humanize.naturalsize(filesize, binary=True)}, "
-                    f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, bpp: {bpp:.3f} "
+                    f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, SSIM: {ssim_str}, "
+                    f"Butteraugli: {ba_str}, bpp: {bpp:.3f} "
                     f"{Style.RESET_ALL}(took {elapsed_time:.1f} s)"
                 )
 
@@ -508,6 +523,8 @@ def generate_metrics(benches: BenchList, result_dir: str) -> list[BenchmarkMetri
                         filesize=filesize,
                         ssimulacra2=score,
                         psnr=psnr,
+                        ssim=ssim,
+                        butteraugli=butteraugli,
                         error=None,
                         type=task.impl.type.value,
                         format=task.impl.format.value,

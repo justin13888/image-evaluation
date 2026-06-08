@@ -6,8 +6,8 @@
    Charts:
      - one rate-distortion chart per format (all encoders), and
      - a combined chart overlaying the Pareto-front encoders of every format.
-   Plus a sortable BD-rate table. Metric (SSIMULACRA2 / PSNR) and linear/log-x
-   are global toggles. */
+   Plus a sortable BD-rate table. Metric (SSIMULACRA2 / PSNR / SSIM /
+   Butteraugli) and linear/log-x are global toggles. */
 (function () {
   "use strict";
 
@@ -28,6 +28,8 @@
   var METRIC_INFO = {
     ssimulacra2: { key: "ssimulacra2", name: "SSIMULACRA2", y: "SSIMULACRA2 (higher is better)" },
     psnr: { key: "psnr", name: "PSNR", y: "PSNR dB (higher is better)" },
+    ssim: { key: "ssim", name: "SSIM", y: "SSIM (higher is better)" },
+    butteraugli: { key: "butteraugli", name: "Butteraugli", y: "Butteraugli (lower is better)" },
   };
 
   var state = { metric: "ssimulacra2", xscale: "linear" };
@@ -391,9 +393,15 @@
     var host = document.getElementById("q-controls");
     if (!host) return;
     host.innerHTML = "";
-    var hasPsnr = METRICS.some(function (m) { return isNum(m.psnr) && m.type === "encode" && !m.error; });
+    function hasMetric(key) {
+      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.error; });
+    }
+    // SSIMULACRA2 is always available (it gates validRows); the rest appear only
+    // when present in the data. Order follows METRIC_INFO.
     var metricOpts = [{ label: "SSIMULACRA2", value: "ssimulacra2" }];
-    if (hasPsnr) metricOpts.push({ label: "PSNR", value: "psnr" });
+    ["psnr", "ssim", "butteraugli"].forEach(function (k) {
+      if (hasMetric(k)) metricOpts.push({ label: METRIC_INFO[k].name, value: k });
+    });
     if (metricOpts.length > 1) {
       host.appendChild(group("Metric", metricOpts,
         function () { return state.metric; },

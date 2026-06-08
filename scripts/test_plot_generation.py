@@ -39,7 +39,9 @@ from bench_lib.report import generate_report_html  # noqa: E402
 from bench_lib.summary import generate_summary  # noqa: E402
 
 
-def _metric(impl, fmt, label, bpp, ss, psnr, img="file.png"):
+def _metric(
+    impl, fmt, label, bpp, ss, psnr, ssim=None, butteraugli=None, img="file.png"
+):
     axis = "quality"
     return {
         "name": f"{impl} ({fmt}, encode, {label}, t0, {img})",
@@ -55,6 +57,8 @@ def _metric(impl, fmt, label, bpp, ss, psnr, img="file.png"):
         "filesize": int(bpp * 1000),
         "ssimulacra2": ss,
         "psnr": psnr,
+        "ssim": ssim,
+        "butteraugli": butteraugli,
         "error": None,
         "type": "encode",
         "format": fmt,
@@ -141,14 +145,21 @@ def test_report_html():
     # Minimal placeholder perf PNG (content irrelevant; report just base64s it).
     with open(os.path.join(perf, "jpeg_encode_perf_results.png"), "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n placeholder")
-    # Real quality metrics so the interactive path is exercised.
+    # Real quality metrics (incl. SSIM higher-better and Butteraugli lower-better)
+    # so all four metric series are exercised in the interactive path.
     metrics = [
-        _metric("libjpeg-turbo-encode", "jpeg", "quality-60", 0.30, 60.0, 30.0),
-        _metric("libjpeg-turbo-encode", "jpeg", "quality-90", 1.00, 90.0, 42.0),
-        _metric("mozjpeg-encode", "jpeg", "quality-60", 0.25, 60.0, 30.0),
-        _metric("mozjpeg-encode", "jpeg", "quality-90", 0.85, 90.0, 42.0),
+        _metric(
+            "libjpeg-turbo-encode", "jpeg", "quality-60", 0.30, 60.0, 30.0, 0.95, 2.1
+        ),
+        _metric(
+            "libjpeg-turbo-encode", "jpeg", "quality-90", 1.00, 90.0, 42.0, 0.99, 0.6
+        ),
+        _metric("mozjpeg-encode", "jpeg", "quality-60", 0.25, 60.0, 30.0, 0.95, 2.0),
+        _metric("mozjpeg-encode", "jpeg", "quality-90", 0.85, 90.0, 42.0, 0.99, 0.5),
         # A legitimate low-quality point with negative SSIMULACRA2 — must survive.
-        _metric("jpeg-encoder-encode", "jpeg", "quality-10", 1.10, -40.0, 11.0),
+        _metric(
+            "jpeg-encoder-encode", "jpeg", "quality-10", 1.10, -40.0, 11.0, 0.40, 12.0
+        ),
     ]
     with open(os.path.join(qual, "metrics.json"), "w") as f:
         json.dump(metrics, f)
@@ -173,6 +184,10 @@ def test_report_html():
     assert any(r["ssimulacra2"] < 0 for r in embedded), (
         "negative-score tail must survive"
     )
+    assert all("ssim" in r and "butteraugli" in r for r in embedded), (
+        "ssim + butteraugli must round-trip into the report"
+    )
+    assert "Butteraugli" in html, "Butteraugli metric must be wired into the report"
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 

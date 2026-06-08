@@ -2,20 +2,27 @@
 name = "iqa-cli"
 version = "0.1.0"
 edition = "2021"
+description = "Command-line front-end to the iqa crate: compute image-quality metrics between two images and emit them as JSON."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/justin13888/iqa-rs"
+keywords = ["iqa", "image-quality", "ssim", "psnr", "cli"]
+categories = ["multimedia::images", "command-line-utilities"]
 
 [[bin]]
 name = "iqa-cli"
 path = "src/main.rs"
 
 [dependencies]
-# The metric math comes from iqa-rs (vendored as a submodule); this CLI only
-# decodes inputs and serializes results. SSIMULACRA2 + PSNR are enabled by
-# iqa-rs's default features.
-iqa-rs = { path = "../../vendor/iqa-rs" }
+# All metric math comes from the iqa crate; this CLI only decodes inputs and
+# serializes results. Its default features enable PSNR, SSIM, SSIMULACRA2 and
+# Butteraugli, and build lcms2 from source (vendored-lcms2) — so no system
+# lcms2 is required.
+iqa = "0.1.2"
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
+serde_json = "1.0"
 # Decodes reference/distorted images (PNG/JPEG/PPM) into raw RGB8 buffers, the
-# input iqa-rs expects. iqa-rs deliberately does not decode image formats.
+# input iqa expects. iqa deliberately does not decode image formats.
 image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",
