@@ -170,7 +170,9 @@ def test_report_html():
         ).group(1)
     )
     assert len(embedded) == len(metrics), "all raw rows must round-trip into the report"
-    assert any(r["ssimulacra2"] < 0 for r in embedded), "negative-score tail must survive"
+    assert any(r["ssimulacra2"] < 0 for r in embedded), (
+        "negative-score tail must survive"
+    )
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 
