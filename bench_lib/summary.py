@@ -17,6 +17,7 @@ from bench_lib.models import (
 from bench_lib.plotting import (
     compute_bd_rate_table,
     create_plots_from_parsed_results,
+    lossless_efficiency,
     pareto_front_encoders,
 )
 
@@ -277,6 +278,36 @@ def generate_summary(
                 buffer.write("|--------|-------------------------|\n")
                 for fmt in sorted(pareto):
                     buffer.write(f"| {fmt.upper()} | {', '.join(pareto[fmt])} |\n")
+                buffer.write("\n")
+
+            # Lossless compression efficiency: lossless encoders have no
+            # rate-distortion tradeoff, so they are compared by file size alone
+            # (issue #26). Ratio is against the 24 bpp RGB8 source; higher = better.
+            lossless = lossless_efficiency(metrics)
+            if lossless:
+                buffer.write("\n### Lossless compression efficiency\n\n")
+                buffer.write(
+                    "Lossless encoders produce a pixel-identical image, so they "
+                    "differ only in size. Best (smallest) bits-per-pixel across the "
+                    "effort sweep, averaged over the dataset; ratio vs the 24 bpp "
+                    "RGB8 source (higher is better).\n\n"
+                )
+                buffer.write(
+                    "| Format | Implementation | Best bpp | Ratio | Best setting |\n"
+                )
+                buffer.write(
+                    "|--------|----------------|----------|-------|--------------|\n"
+                )
+                for impl in sorted(
+                    lossless,
+                    key=lambda i: (lossless[i]["format"], lossless[i]["best_bpp"]),
+                ):
+                    d = lossless[impl]
+                    ratio = f"{d['ratio']:.2f}×" if d["ratio"] is not None else "N/A"
+                    buffer.write(
+                        f"| {d['format'].upper()} | {impl} | {d['best_bpp']:.3f} | "
+                        f"{ratio} | {d['best_label']} |\n"
+                    )
                 buffer.write("\n")
 
             # Metrics table

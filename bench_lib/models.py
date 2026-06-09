@@ -174,14 +174,24 @@ class TunableSchema(BaseModel):
 
     # Every knob this implementation reads. May be empty (decoders, spng).
     params: list[Tunable] = []
-    # The knob swept to trace a size-vs-quality curve. None for decoders and
-    # lossless encoders (PNG, lossless-only WebP) which have no such tradeoff.
+    # The knob the quality suite sweeps. For a *lossy* encoder this traces a
+    # size-vs-quality (rate-distortion) curve; for a *lossless* encoder (see
+    # `lossless`) it is instead a compression-effort axis tracing size-vs-effort.
+    # None for decoders and for knob-less encoders (spng, image-webp), which the
+    # quality suite then runs at a single operating point.
     quality_axis: Optional[str] = None
     # Concrete quality-axis values the quality suite sweeps (issue #8). Strings on
-    # the wire, ordered low-quality -> high-quality. Empty when quality_axis None.
+    # the wire, ordered low-quality -> high-quality (lossy) or low-effort ->
+    # high-effort (lossless). Empty when quality_axis is None.
     quality_sweep: list[str] = []
     # The single fixed operating point the performance suite uses. param -> value.
     perf_preset: dict[str, str] = {}
+    # True when this encoder's output is lossless (pixel-identical round-trip).
+    # Such encoders have no rate-distortion tradeoff, so their quality-suite rows
+    # are flagged (issue #26) and routed to the dedicated lossless
+    # compression-efficiency view instead of the rate-distortion charts / BD-rate
+    # / Pareto front. `quality_axis` (if set) is then an effort axis, not quality.
+    lossless: bool = False
 
     def perf_params(self) -> Dict[str, str]:
         """Concrete params for the performance suite (the fixed preset)."""
@@ -560,10 +570,12 @@ THREAD_MODES: list[int] = [1, 0]
 #
 # Each encoder declares the knobs it honours (sent to the binary via --param),
 # the single fixed operating point used by the performance suite (`perf_preset`),
-# and — for lossy encoders — the `quality_axis` knob plus the discrete
-# `quality_sweep` values traced by the quality suite to build a rate-distortion
-# curve (issue #8). Decoders, null binaries, and lossless-only encoders that
-# expose no knob fall back to an empty schema via `schema_for`.
+# and the `quality_axis` knob plus discrete `quality_sweep` values the quality
+# suite steps through — a rate-distortion curve for lossy encoders (issue #8), or
+# a size-vs-effort curve for lossless ones (`lossless=True`, issue #26). Lossless
+# encoders with no knob (spng, image-webp) still declare `lossless=True` so they
+# contribute a single operating point. Decoders and null binaries fall back to an
+# empty schema via `schema_for`.
 # ---------------------------------------------------------------------------
 
 # Shared quality-axis sweeps (ordered low-quality -> high-quality).
@@ -593,6 +605,12 @@ _JXL_DISTANCE_SWEEP = [
     "0.25",
     "0.1",
 ]
+
+# Lossless effort/compression sweeps (issue #26), ordered low-effort ->
+# high-effort. For lossless encoders these trace size-vs-effort, not quality.
+_PNG_ZLIB_SWEEP = [str(i) for i in range(10)]  # zlib level / effort 0-9
+_IMAGE_PNG_COMPRESSION_SWEEP = ["fast", "default", "best"]  # image crate preset
+_JXL_EFFORT_SWEEP = [str(i) for i in range(1, 10)]  # libjxl effort 1-9
 
 
 def _jpeg_full_schema() -> "TunableSchema":
@@ -670,7 +688,7 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_JPEG_QUALITY_SWEEP,
         perf_preset={"quality": "80"},
     ),
-    # --- WEBP --- (image-webp is lossless-only: empty schema via schema_for)
+    # --- WEBP ---
     "libwebp-encode": TunableSchema(
         params=[
             Tunable(name="quality", kind="float", default="75", min=0, max=100),
@@ -681,6 +699,10 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_WEBP_QUALITY_SWEEP,
         perf_preset={"quality": "75", "method": "4", "lossless": "false"},
     ),
+    # image-webp encodes lossless WebP only (crate limitation) and exposes no
+    # knob, so it has no rate-distortion curve. Flagged lossless (issue #26) so it
+    # contributes one operating point to the lossless compression-efficiency view.
+    "image-webp-encode": TunableSchema(lossless=True),
     # --- AVIF ---
     "rav1e-encode": TunableSchema(
         params=[
@@ -718,9 +740,10 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_JXL_DISTANCE_SWEEP,
         perf_preset={"distance": "1.0", "effort": "7"},
     ),
-    # Lossless libjxl: distance pinned to 0. A single-point "sweep" so the quality
-    # suite emits one operating point (label distance-0.0) as its own series,
-    # while the binary takes the true-lossless path (original profile, not XYB).
+    # Lossless libjxl: distance pinned to 0 (true-lossless path, original profile
+    # not XYB). Its quality-suite axis is *effort* (issue #26): a size-vs-effort
+    # sweep feeding the lossless compression-efficiency view, not the JXL
+    # rate-distortion curve.
     "libjxl-lossless-encode": TunableSchema(
         params=[
             Tunable(
@@ -733,9 +756,10 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
             ),
             Tunable(name="effort", kind="int", default="7", min=1, max=9),
         ],
-        quality_axis="distance",
-        quality_sweep=["0.0"],
+        quality_axis="effort",
+        quality_sweep=_JXL_EFFORT_SWEEP,
         perf_preset={"distance": "0.0", "effort": "7"},
+        lossless=True,
     ),
     "zune-jpegxl-encode": TunableSchema(
         params=[
@@ -746,7 +770,8 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=["40", "50", "60", "70", "80", "90", "95", "100"],
         perf_preset={"quality": "90", "effort": "7"},
     ),
-    # --- PNG (lossless: no quality axis, perf knob only) ---
+    # --- PNG (lossless: the swept axis is compression *effort*, not quality;
+    # rows feed the lossless compression-efficiency view, issue #26) ---
     "image-png-encode": TunableSchema(
         params=[
             Tunable(
@@ -762,24 +787,36 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
                 choices=["none", "sub", "up", "avg", "paeth", "adaptive"],
             ),
         ],
+        quality_axis="compression",
+        quality_sweep=_IMAGE_PNG_COMPRESSION_SWEEP,
         perf_preset={"compression": "default", "filter": "adaptive"},
+        lossless=True,
     ),
     "zune-png-encode": TunableSchema(
         params=[Tunable(name="effort", kind="int", default="4", min=0, max=9)],
+        quality_axis="effort",
+        quality_sweep=_PNG_ZLIB_SWEEP,
         perf_preset={"effort": "4"},
+        lossless=True,
     ),
     "libpng-encode": TunableSchema(
         params=[Tunable(name="compression", kind="int", default="6", min=0, max=9)],
+        quality_axis="compression",
+        quality_sweep=_PNG_ZLIB_SWEEP,
         perf_preset={"compression": "6"},
+        lossless=True,
     ),
-    # spng-encode exposes no compression control -> empty schema (schema_for).
+    # spng exposes no compression control, so it has no effort axis; flagged
+    # lossless so it still contributes a single operating point (issue #26).
+    "spng-encode": TunableSchema(lossless=True),
 }
 
 
 def schema_for(impl_name: str) -> "TunableSchema":
     """Tunable schema for an implementation; an empty schema (no knobs, no
-    quality axis, empty preset) for decoders, null binaries, and encoders that
-    expose nothing to tune (spng, image-webp)."""
+    quality axis, not lossless) for decoders and null binaries. Knob-less
+    lossless encoders (spng, image-webp) carry an explicit `lossless=True`
+    schema so they are still picked up by the quality suite."""
     return TUNABLE_SCHEMAS.get(impl_name, TunableSchema())
 
 
@@ -794,6 +831,15 @@ for _name, _schema in TUNABLE_SCHEMAS.items():
             f"{_name}: quality_axis '{_schema.quality_axis}' not in params"
         )
         assert _schema.quality_sweep, f"{_name}: quality_axis set but empty sweep"
+    # A knob-less encoder with no quality axis only enters the quality suite when
+    # it is flagged lossless (single operating point); otherwise it is skipped.
+    if _schema.quality_axis is None and _schema.quality_sweep:
+        raise AssertionError(f"{_name}: quality_sweep set but no quality_axis")
+
+
+# Operating-point label for a lossless encoder's single point (no swept axis),
+# e.g. spng / image-webp. Grammar-safe like `quality_label` (no ", " or "=").
+LOSSLESS_LABEL = "lossless"
 
 
 def quality_label(axis: str, value: str) -> str:
@@ -880,9 +926,10 @@ class PerfArgs(BaseModel):
 
 
 class QualityArgs(BaseModel):
-    """Quality suite: sweep each lossy encoder's quality axis over many steps and
-    measure file size + IQA (SSIMULACRA2, PSNR), tracing a rate-distortion curve.
-    Encoders only; no timing, no thread sweep (output is thread-invariant)."""
+    """Quality suite: sweep each lossy encoder's quality axis to trace a
+    rate-distortion curve, and measure each lossless encoder's compression
+    efficiency (size vs effort), recording file size + IQA (SSIMULACRA2, PSNR,
+    ...). Encoders only; no timing, no thread sweep (output is thread-invariant)."""
 
     formats: Annotated[
         list[ImageFormat],
@@ -1197,8 +1244,9 @@ class BenchmarkMetrics(TypedDict):
     label: str
     # Serialized tunables for this point (e.g. "effort=7;quality=80").
     params: str
-    # The swept quality knob name and its value for this point (empty strings for
-    # lossless/decode points). Used to order/annotate rate-distortion curves.
+    # The swept knob name and its value for this point (empty strings for
+    # single-point/decode rows). Used to order/annotate rate-distortion curves
+    # (lossy) or the effort axis of the lossless efficiency view (issue #26).
     quality_axis: str
     quality_value: str
     input_path: str
@@ -1216,6 +1264,10 @@ class BenchmarkMetrics(TypedDict):
     error: Optional[str]
     type: str
     format: str
+    # True for a lossless encoder's rows (issue #26): pixel-identical round-trip,
+    # so excluded from rate-distortion charts / BD-rate / Pareto and shown in the
+    # lossless compression-efficiency view instead.
+    lossless: bool
     # Image dimension metrics
     width: int
     height: int

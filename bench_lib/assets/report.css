@@ -63,6 +63,16 @@ table.q-table th .arrow { color: #999; font-size: .8em; }
 table.q-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.q-table td.good { color: #157f3b; }
 table.q-table td.bad { color: #b3261e; }
+/* Lossless compression-efficiency view (issue #26): a bpp leaderboard + a
+   size-vs-effort chart. The effort chart reuses .q-chart; the bars need their
+   own plot framing since they are not a .q-chart. */
+#q-lossless-bars .q-plot {
+  border: 1px solid #e6e6e6; border-radius: 6px; background: #fff; margin-bottom: 1rem;
+}
+#q-lossless-bars svg { width: 100%; height: auto; display: block; }
+.q-ll-name { fill: #222; font-size: 12px; }
+.q-ll-val { fill: #444; font-size: 12px; font-variant-numeric: tabular-nums; }
+
 .q-note { color: #666; font-size: .85rem; margin: .2rem 0 .8rem; }
 .q-disclaimer { border-left: 4px solid #d9a300; background: #fffaf0; color: #5c4a00;
                 padding: .6rem .9rem; margin: .8rem 0 1.2rem; font-size: .85rem;

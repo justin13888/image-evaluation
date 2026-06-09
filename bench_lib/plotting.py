@@ -20,6 +20,8 @@ from bench_lib.models import (
     BenchmarkMetrics,
     BenchmarkType,
     ImageFormat,
+    quality_label,
+    schema_for,
 )
 
 # Threading modes -> (legend label, bar colour). 1 = single-threaded, 0 = all cores.
@@ -32,11 +34,16 @@ _THREAD_STYLES = {
 def _filter_valid_encode_metrics(
     metrics: list[BenchmarkMetrics],
 ) -> list[BenchmarkMetrics]:
-    """Filter to encode-only metrics with valid bpp, score, and no errors."""
+    """Filter to lossy encode-only metrics with valid bpp, score, and no errors.
+
+    Lossless rows (issue #26) are excluded: they have no rate-distortion tradeoff,
+    so they do not belong in BD-rate or the rate-distortion Pareto front — they go
+    to the lossless compression-efficiency view instead."""
     return [
         m
         for m in metrics
         if m["type"] == "encode"
+        and not m.get("lossless")
         and m["bpp"] > 0
         and m["ssimulacra2"] > 0
         and not m.get("error")
@@ -52,10 +59,11 @@ def _finite_encode_metrics(
     SSIMULACRA2 below zero is the legitimate low-quality tail of a rate-distortion
     curve, not an error, and dropping it truncates the curve. Used for the
     rate-distortion views (the Pareto front here, and the client-side charts,
-    which apply the same rule)."""
+    which apply the same rule). Lossless rows (issue #26) are excluded — they have
+    no distortion axis and are shown in the lossless efficiency view instead."""
     out: list[BenchmarkMetrics] = []
     for m in metrics:
-        if m["type"] != "encode" or m.get("error"):
+        if m["type"] != "encode" or m.get("error") or m.get("lossless"):
             continue
         s = m["ssimulacra2"]
         if m["bpp"] > 0 and s is not None and np.isfinite(s):
@@ -113,6 +121,72 @@ def pareto_front_encoders(
                 front.add(impl)
         if front:
             result[fmt] = sorted(front)
+    return result
+
+
+# Uncompressed PPM source is 8-bit RGB, so 24 bits per pixel. Used to express a
+# lossless encoder's bpp as a compression ratio (24 / bpp, higher is better).
+_SOURCE_BPP = 24.0
+
+
+def lossless_efficiency(
+    metrics: list[BenchmarkMetrics],
+) -> Dict[str, Dict[str, Any]]:
+    """Per lossless encoder, its compression efficiency across the dataset (issue
+    #26). Each encoder's lossless rows are aggregated to one mean-bpp point per
+    effort step (averaged across images); the best (smallest) such bpp is the
+    encoder's headline number, with its compression ratio against the 24 bpp RGB8
+    source. ``points`` is ordered low-effort -> high-effort using the schema's
+    declared sweep, so the size-vs-effort curve reads left-to-right.
+
+    Returns ``{impl: {format, best_bpp, best_label, ratio, points}}`` where each
+    point is ``{label, value, bpp}``. Encoders with no valid lossless row are
+    omitted."""
+    rows = [
+        m
+        for m in metrics
+        if m.get("lossless")
+        and m["type"] == "encode"
+        and not m.get("error")
+        and m["bpp"] > 0
+    ]
+    result: Dict[str, Dict[str, Any]] = {}
+    for impl, impl_rows in _group_by(rows, lambda m: m["impl"]).items():
+        # label -> mean bpp across images (one point per effort step).
+        agg: Dict[str, Dict[str, Any]] = {}
+        for m in impl_rows:
+            a = agg.setdefault(
+                m["label"], {"value": m["quality_value"], "sum": 0.0, "n": 0}
+            )
+            a["sum"] += m["bpp"]
+            a["n"] += 1
+        # Canonical low->high effort order from the schema's sweep; any labels not
+        # in the sweep (e.g. the single "lossless" point) keep insertion order.
+        schema = schema_for(impl)
+        ordered = (
+            [quality_label(schema.quality_axis, v) for v in schema.quality_sweep]
+            if schema.quality_axis
+            else []
+        )
+        labels = [lbl for lbl in ordered if lbl in agg] + [
+            lbl for lbl in agg if lbl not in ordered
+        ]
+        points = [
+            {
+                "label": lbl,
+                "value": agg[lbl]["value"],
+                "bpp": agg[lbl]["sum"] / agg[lbl]["n"],
+            }
+            for lbl in labels
+        ]
+        best = min(points, key=lambda p: p["bpp"])
+        result[impl] = {
+            "format": impl_rows[0]["format"],
+            "best_bpp": best["bpp"],
+            "best_label": best["label"],
+            "ratio": _SOURCE_BPP / best["bpp"] if best["bpp"] > 0 else None,
+            "points": points,
+        }
     return result
 
 

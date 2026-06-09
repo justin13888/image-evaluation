@@ -16,7 +16,11 @@ import json
 import os
 from typing import Any, Optional
 
-from bench_lib.plotting import compute_bd_rate_table, pareto_front_encoders
+from bench_lib.plotting import (
+    compute_bd_rate_table,
+    lossless_efficiency,
+    pareto_front_encoders,
+)
 
 _ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
@@ -103,7 +107,9 @@ def _quality_section(qual_dir: str) -> list[str]:
         "measurements embedded below. Hover a point for details; click a legend "
         "entry to toggle a series. The per-format charts show every metric at "
         "once; the Pareto-metric and x-axis-scale toggles up top drive the "
-        "cross-format Pareto chart.</p>"
+        "cross-format Pareto chart. Lossless encoders (PNG, lossless JXL/WebP) "
+        "have no rate-distortion tradeoff, so they appear in their own "
+        "compression-efficiency section rather than on the curves.</p>"
     )
     parts.append(
         "<div class='q-disclaimer'><strong>IQA metrics are approximations, not "
@@ -130,6 +136,7 @@ def _quality_section(qual_dir: str) -> list[str]:
         parts.append(_json_script("quality-manifest", qmanifest))
     parts.append(_json_script("quality-bdrate", compute_bd_rate_table(metrics)))
     parts.append(_json_script("quality-pareto", pareto_front_encoders(metrics)))
+    parts.append(_json_script("quality-lossless", lossless_efficiency(metrics)))
 
     parts.append(
         "<div id='quality-app'>"
@@ -144,6 +151,13 @@ def _quality_section(qual_dir: str) -> list[str]:
         "quality sweep aggregated to a clean mean curve across the dataset, shown "
         "for every available metric (SSIMULACRA2, PSNR, SSIM, Butteraugli).</p>"
         "<div id='q-charts'></div>"
+        "<h3>Lossless compression efficiency</h3>"
+        "<p class='q-note'>Lossless encoders produce a pixel-identical image, so "
+        "they differ only in file size — lower bits-per-pixel (bpp) is better. The "
+        "leaderboard ranks each encoder by its smallest achievable bpp; the "
+        "size-vs-effort chart traces how bpp falls as compression effort rises "
+        "(single-knob encoders show one point).</p>"
+        "<div id='q-lossless'></div>"
         "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
         "<p class='q-note'>Negative = fewer bits for equal quality (better). "
         "Computed per image then averaged; <code>N/A</code> = non-overlapping "

@@ -42,6 +42,8 @@ from bench_lib.models import (
     DatasetId,
     ImageFormat,
     ImageFormats,
+    Implementation,
+    LOSSLESS_LABEL,
     PerfArgs,
     PPMImageFormat,
     QualityArgs,
@@ -295,10 +297,16 @@ def build_quality_bench_list(
     dataset: DatasetId,
     args: QualityArgs,
 ) -> BenchList:
-    """Construct quality-suite tasks for one format: for each lossy encoder with
-    a quality axis, one task per swept axis value. No null/decoder tasks, no
-    thread sweep (output is thread-invariant), and outputs are written (not
-    discarded) so size + IQA can be measured.
+    """Construct quality-suite tasks for one format. For each encoder:
+
+    - *lossy* (a quality axis): one task per swept quality value — a
+      rate-distortion curve (issue #8);
+    - *lossless* with an effort knob (PNG, lossless JXL): one task per swept
+      effort value — a size-vs-effort curve (issue #26);
+    - *lossless* with no knob (spng, image-webp): a single operating point.
+
+    No null/decoder tasks, no thread sweep (output is thread-invariant), and
+    outputs are written (not discarded) so size + IQA can be measured.
 
     Each task is pinned to a single encode thread (`threads=1`): the suite runs
     many tasks concurrently (one per physical core), so internal codec threading
@@ -312,38 +320,48 @@ def build_quality_bench_list(
     ]
     input_files = get_input_files(dataset, PPMImageFormat.PPM, args.sample)
 
+    def emit(impl: Implementation, params: Dict[str, str], label: str) -> None:
+        """Append one task per input image for a single operating point."""
+        for input_file, source_file in input_files:
+            benches.append(
+                BenchmarkTask(
+                    impl=impl,
+                    params=params,
+                    label=label,
+                    input_path=input_file,
+                    source_path=source_file,
+                    # Quality runs are not timed; one pass writes the output.
+                    iterations=1,
+                    warmup=0,
+                    # Single-threaded: tasks run in parallel (one per physical
+                    # core), so internal codec threads would oversubscribe.
+                    threads=1,
+                    discard_output=False,
+                    measure_memory=False,
+                    pin_cores=False,
+                )
+            )
+
     for impl in encoders:
         if not os.path.exists(impl.bin):
             raise RuntimeError(f"Error: Binary not found: {impl.bin}")
 
         schema = schema_for(impl.name)
         if schema.quality_axis is None:
-            # Lossless / knob-less encoder: no rate-distortion curve to trace.
+            # No swept axis. A knob-less *lossless* encoder still contributes a
+            # single operating point at its preset; anything else (decoders, a
+            # lossy encoder with no axis) has no curve to trace and is skipped.
+            if schema.lossless:
+                emit(impl, schema.perf_params(), LOSSLESS_LABEL)
             continue
 
         steps = 2 if args.quick else args.quality_steps
         for value in select_sweep(schema.quality_sweep, steps):
-            params = schema.quality_params(value)
-            label = quality_label(schema.quality_axis, value)
-            for input_file, source_file in input_files:
-                benches.append(
-                    BenchmarkTask(
-                        impl=impl,
-                        params=params,
-                        label=label,
-                        input_path=input_file,
-                        source_path=source_file,
-                        # Quality runs are not timed; one pass writes the output.
-                        iterations=1,
-                        warmup=0,
-                        # Single-threaded: tasks run in parallel (one per physical
-                        # core), so internal codec threads would oversubscribe.
-                        threads=1,
-                        discard_output=False,
-                        measure_memory=False,
-                        pin_cores=False,
-                    )
-                )
+            emit(
+                impl,
+                schema.quality_params(value),
+                quality_label(schema.quality_axis, value),
+            )
 
     return benches
 
@@ -460,6 +478,10 @@ def _measure_one(
             f"{Fore.BLUE}Skipped {task.name()} (null format){Style.RESET_ALL}",
         )
 
+    # Lossless encoders (issue #26) are flagged on every row so the report/summary
+    # can route them to the compression-efficiency view and out of the RD analytics.
+    lossless = schema_for(task.impl.name).lossless
+
     try:
         identifier = task.identifier()
         format_ext_str = FORMAT_EXT_MAP[task.output_ext()]
@@ -547,6 +569,7 @@ def _measure_one(
             error=None,
             type=task.impl.type.value,
             format=task.impl.format.value,
+            lossless=lossless,
             width=width,
             height=height,
             megapixels=megapixels,
@@ -585,6 +608,7 @@ def _measure_one(
             error=str(e),
             type=task.impl.type.value,
             format=task.impl.format.value,
+            lossless=lossless,
             width=0,
             height=0,
             megapixels=0.0,
@@ -896,9 +920,10 @@ def _run_perf_suite(args: PerfArgs, result_dir: str):
 
 
 def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
-    """Quality suite body: sweep each lossy encoder's quality axis over many
-    steps and measure file size + IQA (SSIMULACRA2, PSNR) per step, tracing a
-    rate-distortion curve (issue #8). Encoders only; no timing, no thread sweep.
+    """Quality suite body: sweep each lossy encoder's quality axis to trace a
+    rate-distortion curve (issue #8) and measure each lossless encoder's
+    compression efficiency (issue #26), recording file size + IQA (SSIMULACRA2,
+    PSNR, ...) per operating point. Encoders only; no timing, no thread sweep.
     Writes its artifacts into `result_dir`; the caller handles building and
     bundle finalization.
 
@@ -916,7 +941,7 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
         benches += build_quality_bench_list(format, args.dataset, args)
 
     if not benches:
-        print("\nError: No quality benchmarks to run (no lossy encoders selected)!")
+        print("\nError: No quality benchmarks to run (no encoders selected)!")
         sys.exit(1)
 
     # Record which quality-axis values each encoder actually swept (for the
