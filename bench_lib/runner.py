@@ -462,7 +462,7 @@ def _run_iqa(
 
 
 def _measure_one(
-    task: BenchmarkTask, temp_dir: str, env: Dict[str, str]
+    task: BenchmarkTask, temp_dir: str, env: Dict[str, str], keep_temp: bool = False
 ) -> tuple[Optional[BenchmarkMetrics], str]:
     """Encode one task, decode + score it, and return its metric row alongside a
     preformatted status line.
@@ -471,7 +471,12 @@ def _measure_one(
     can print the returned line from the main thread and keep parallel output
     interleave-free. Every child process inherits `env`, which (with the tasks'
     `--threads 1`) pins it to a single thread. Returns (None, status) when the
-    task has no format to measure (skipped)."""
+    task has no format to measure (skipped).
+
+    Unless `keep_temp` is set, the encoded output and decoded PPM this task writes
+    are deleted as soon as it's scored — they're dead once the size + IQA numbers
+    are recorded, and freeing them per task (rather than at end of sweep) bounds
+    peak disk use to ~`max_workers` tasks' worth instead of the whole sweep's."""
     if task.impl.format is None or task.output_ext() is None:
         return (
             None,
@@ -482,10 +487,15 @@ def _measure_one(
     # can route them to the compression-efficiency view and out of the RD analytics.
     lossless = schema_for(task.impl.name).lossless
 
+    # Temp files this task writes into the shared staging dir; removed in `finally`
+    # (unless --keep-temp). Filenames carry a random suffix via identifier(), so
+    # per-task deletion never races another worker.
+    temp_files: list[str] = []
     try:
         identifier = task.identifier()
         format_ext_str = FORMAT_EXT_MAP[task.output_ext()]
         output_path = os.path.join(temp_dir, f"{identifier}.{format_ext_str}")
+        temp_files.append(output_path)
 
         # Run implementation once (no warmup) to get the output file. Force
         # discard=False so the binary writes a real file even though timing runs
@@ -520,6 +530,7 @@ def _measure_one(
         # already produce a PPM. The reference is the original source.
         if task.impl.type == BenchmarkType.ENCODE:
             distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
+            temp_files.append(distorted_ppm)
             _decode_to_ppm(task, output_path, distorted_ppm, env=env)
         else:
             distorted_ppm = output_path
@@ -615,6 +626,17 @@ def _measure_one(
             bpp=0.0,
         )
         return (metric, status)
+    finally:
+        # Free this task's temp files the moment it's scored (size + IQA already
+        # captured), so a huge sweep doesn't accumulate every encode+decode on
+        # disk at once. Runs on both the success and error returns above. The
+        # error path may not have written some files — tolerate that.
+        if not keep_temp:
+            for path in temp_files:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 def _ensure_reference_decoders(benches: BenchList) -> None:
@@ -639,7 +661,10 @@ def _ensure_reference_decoders(benches: BenchList) -> None:
 
 
 def generate_metrics(
-    benches: BenchList, result_dir: str, max_workers: int
+    benches: BenchList,
+    result_dir: str,
+    max_workers: int,
+    keep_temp: bool = False,
 ) -> list[BenchmarkMetrics]:
     """Generate file size and visual quality metrics, encoding tasks in parallel.
 
@@ -647,11 +672,18 @@ def generate_metrics(
     child is pinned to one thread, so a pool sized to the physical core count
     saturates the CPU without oversubscribing (issue #23). Tasks are dispatched
     in binary-sorted order so an encoder's runs cluster in time, keeping its
-    binary + shared libs hot in cache."""
+    binary + shared libs hot in cache.
+
+    By default each task's temp files are deleted as soon as it's scored, so peak
+    disk use stays bounded on large sweeps; `keep_temp` keeps every intermediate
+    (and the staging dir) for inspection instead."""
     print(f"{Fore.BLUE}{'=' * 70}\nCOLLECTING METRICS\n{'=' * 70}\n")
 
     temp_dir = tempfile.mkdtemp()
-    print(f"Temporary outputs stored in: {temp_dir}")
+    if keep_temp:
+        print(f"Temporary outputs stored in: {temp_dir}")
+    else:
+        print(f"Staging temp outputs in: {temp_dir} (freed per task as scored)")
     print(f"Encoding with {max_workers} parallel worker(s), 1 thread each\n")
 
     # Pin every child process to a single thread: covers rayon-/OMP-based codecs
@@ -672,7 +704,8 @@ def generate_metrics(
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(_measure_one, task, temp_dir, env) for task in ordered
+                executor.submit(_measure_one, task, temp_dir, env, keep_temp)
+                for task in ordered
             ]
             for done, future in enumerate(as_completed(futures), start=1):
                 metric, status = future.result()
@@ -680,7 +713,13 @@ def generate_metrics(
                 if metric is not None:
                     metrics.append(metric)
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        # Default: drop the now-empty staging dir (plus any error-path stragglers
+        # the per-task cleanup couldn't write). With --keep-temp, leave everything
+        # in place and point the user at it.
+        if keep_temp:
+            print(f"\nTemporary outputs preserved at: {temp_dir}")
+        else:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     return metrics
 
@@ -983,7 +1022,7 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
     print(f"\n✓ Manifest written to {result_dir}/manifest.json")
     print(f"\n✓ {len(benches)} quality measurement(s) across the sweep\n")
 
-    metrics = generate_metrics(benches, result_dir, max_workers)
+    metrics = generate_metrics(benches, result_dir, max_workers, args.keep_temp)
     metrics_path = f"{result_dir}/metrics.json"
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
@@ -1129,6 +1168,7 @@ def run_all(args: AllArgs):
         quality_steps=args.quality_steps,
         quick=args.quick,
         jobs=args.jobs,
+        keep_temp=args.keep_temp,
         skip_build=True,
         debug=args.debug,
     )

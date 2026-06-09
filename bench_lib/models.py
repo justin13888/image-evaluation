@@ -970,6 +970,15 @@ class QualityArgs(BaseModel):
             "encode runs single-threaded; peak memory scales with this."
         ),
     ] = None
+    keep_temp: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Keep each task's encoded/decoded temp files (and the staging "
+            "dir) for inspection. Default off: temp files are deleted as soon as each "
+            "task is scored, bounding peak disk use on large sweeps."
+        ),
+    ] = False
     skip_build: Annotated[
         bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
     ] = False
@@ -1042,6 +1051,15 @@ class AllArgs(BaseModel):
             "scales with this."
         ),
     ] = None
+    keep_temp: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Keep each quality task's encoded/decoded temp files (and the "
+            "staging dir) for inspection. Default off: temp files are deleted as soon "
+            "as each task is scored, bounding peak disk use on large sweeps."
+        ),
+    ] = False
     measure_memory: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
