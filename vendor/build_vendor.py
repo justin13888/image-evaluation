@@ -625,8 +625,9 @@ def main():
         ("libavif", build_libavif),
         ("libjxl", build_libjxl),
         ("libwebp", build_libwebp),
-        # Image-quality metrics come from the published iqa crate (crates.io),
-        # built via the Rust workspace (tools/iqa-cli); no vendored metric binary.
+        # Image-quality metrics come from the published iqa-cli binary, installed
+        # from crates.io via `cargo install` (see bench_lib/build.install_iqa_cli);
+        # no in-repo source and no vendored metric binary.
     ]
 
     for name, fn in steps:

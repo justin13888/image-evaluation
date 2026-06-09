@@ -65,10 +65,11 @@ from bench_lib.system_info import (
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# iqa-cli: in-repo Rust binary computing IQA metrics (SSIMULACRA2 + PSNR + SSIM +
-# Butteraugli) via the iqa crate. Built as part of the Rust workspace (cargo build
-# --release).
-IQA_CLI_BIN = os.path.join(PROJECT_ROOT, "target", "release", "iqa-cli")
+# iqa-cli: published Rust binary computing IQA metrics (SSIMULACRA2 + PSNR + SSIM
+# + Butteraugli) via the iqa crate. Installed from crates.io into target/bin by
+# build.install_iqa_cli (see `./bench compile`), no longer built from in-repo
+# source.
+IQA_CLI_BIN = os.path.join(PROJECT_ROOT, "target", "bin", "iqa-cli")
 
 DATASET_FILES_CHECKED: Set[str] = set()
 

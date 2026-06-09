@@ -27,7 +27,7 @@ This repository contains benchmarks for various image format implementations, co
   brew install clang-format cmake ccache nasm meson ninja pkg-config imagemagick hyperfine wget unzip
   ```
 
-All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs) are vendored as git submodules and built automatically; image-quality metrics come from the published [`iqa`](https://crates.io/crates/iqa) crate (resolved from crates.io, with lcms2 compiled from source). No system dev packages for these libraries are required.
+All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs) are vendored as git submodules and built automatically; image-quality metrics come from the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary (installed from crates.io via `cargo install`, building the [`iqa`](https://crates.io/crates/iqa) crate with lcms2 compiled from source). No system dev packages for these libraries are required.
 
 > **CMake version:** CMake ≥ 3.5 is required. CMake 4.x is supported — `vendor/build_vendor.py` passes `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` automatically for older vendored projects (e.g. mozjpeg) that declare a lower minimum.
 
@@ -85,7 +85,7 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
 The suite is split into **two distinctly separate benchmarks**, each its own subcommand:
 
 - **`./bench perf`** — *performance*. Hyperfine-timed encode **and** decode at each implementation's single fixed preset, swept across both threading modes (single-threaded and all-cores). Timing is always compute-only (output discarded, CRC32-checksummed). Presets are hardcoded per codec and may produce different-quality outputs across implementations — this is intentional for now and will be refined.
-- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). **Lossless encoders** (PNG, lossless JXL/WebP) have no such tradeoff — output is pixel-identical — so instead they are swept over their *compression-effort* axis and ranked by file size in a dedicated lossless compression-efficiency view ([issue #26](https://github.com/justin13888/image-implementation-benchmark/issues/26)). Encoders only; each point's single encode pass is wall-clocked as a *relative* encode time ([issue #29](https://github.com/justin13888/image-implementation-benchmark/issues/29)) — surfaced on the report's hover tooltips so you can gauge how a setting's cost scales — but with no warmup/repeats and no thread sweep (encoded bytes are thread-invariant), it is not the performance suite's rigorous timing. IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the `iqa-cli` tool.
+- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). **Lossless encoders** (PNG, lossless JXL/WebP) have no such tradeoff — output is pixel-identical — so instead they are swept over their *compression-effort* axis and ranked by file size in a dedicated lossless compression-efficiency view ([issue #26](https://github.com/justin13888/image-implementation-benchmark/issues/26)). Encoders only; each point's single encode pass is wall-clocked as a *relative* encode time ([issue #29](https://github.com/justin13888/image-implementation-benchmark/issues/29)) — surfaced on the report's hover tooltips so you can gauge how a setting's cost scales — but with no warmup/repeats and no thread sweep (encoded bytes are thread-invariant), it is not the performance suite's rigorous timing. IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary.
 
 `--formats` is an optional subset filter on both; `--mode {encode,decode,both}` further narrows the performance suite.
 
@@ -118,7 +118,7 @@ The suite is split into **two distinctly separate benchmarks**, each its own sub
 ./bench all --dataset kodak
 
 # --- Shared ---
-./bench compile          # build vendored libs + all implementations + iqa-cli
+./bench compile          # build vendored libs + all implementations + install iqa-cli
 ./bench clean            # remove build artifacts and results
 ```
 
@@ -268,7 +268,7 @@ Memory is allocated and freed inside each iteration to simulate realistic per-re
 
 #### Image Quality Assessment
 
-The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa`](https://crates.io/crates/iqa) crate (via the in-repo `iqa-cli` tool), reporting **SSIMULACRA2** (perceptual; 100 = identical), **PSNR** (dB), **SSIM** (structural similarity; 1.0 = identical, higher is better) and **Butteraugli** (perceptual difference; 0 = identical, **lower** is better). Because `iqa` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source.
+The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa`](https://crates.io/crates/iqa) crate (via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary), reporting **SSIMULACRA2** (perceptual; 100 = identical), **PSNR** (dB), **SSIM** (structural similarity; 1.0 = identical, higher is better) and **Butteraugli** (perceptual difference; 0 = identical, **lower** is better). Because `iqa` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source.
 
 > [!IMPORTANT]
 > **IQA metrics are approximations, not ground truth.** Every image-quality metric encodes its own model of the human visual system, and each comes with assumptions and blind spots:

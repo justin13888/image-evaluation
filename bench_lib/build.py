@@ -25,6 +25,12 @@ VENDOR_COMMON = os.path.join(VENDOR_DIR, "install", "common")
 VENDOR_LIBJPEG_TURBO = os.path.join(VENDOR_DIR, "install", "libjpeg-turbo")
 VENDOR_MOZJPEG = os.path.join(VENDOR_DIR, "install", "mozjpeg")
 
+# iqa-cli (the image-quality metrics CLI) is no longer vendored in-repo; it is
+# installed from crates.io, pinned to a version that tracks the iqa crate. The
+# binary is installed into target/bin (see install_iqa_cli) so it lives with the
+# workspace build and is removed by `just clean` (which wipes target/).
+IQA_CLI_VERSION = "0.2.0"
+
 # Per-build-directory locks to prevent concurrent cmake/make in the same dir
 _build_dir_locks: dict[str, threading.Lock] = {}
 _build_dir_locks_lock = threading.Lock()
@@ -203,6 +209,37 @@ def build_vendor_deps():
         sys.exit(1)
 
 
+def install_iqa_cli(env):
+    """Install the pinned iqa-cli binary from crates.io into target/bin.
+
+    The published crate bundles the vendored C++/lcms2 sources, so this needs
+    only a C++ toolchain (already required for the C++ implementations) — no git
+    submodules. `cargo install` is a no-op when the pinned version is already
+    present, so re-running `./bench compile` is cheap."""
+    print(
+        f"{Fore.BLUE}\n[Step 2b/3] Installing iqa-cli {IQA_CLI_VERSION} from crates.io..."
+    )
+    try:
+        subprocess.run(
+            [
+                "cargo",
+                "install",
+                "iqa-cli",
+                "--version",
+                f"={IQA_CLI_VERSION}",
+                "--locked",
+                "--root",
+                os.path.join(PROJECT_ROOT, "target"),
+            ],
+            check=True,
+            env=env,
+        )
+        print("  ✓ iqa-cli installed")
+    except subprocess.CalledProcessError as e:
+        print(f"  ✗ iqa-cli install failed: {e}")
+        sys.exit(1)
+
+
 def build_projects(formats: list[ImageFormat]):
     """Build Rust and C++ projects."""
 
@@ -222,6 +259,9 @@ def build_projects(formats: list[ImageFormat]):
     except subprocess.CalledProcessError as e:
         print(f"  ✗ Rust build failed: {e}")
         sys.exit(1)
+
+    # Install the published iqa-cli metrics binary (not built from in-repo source).
+    install_iqa_cli(env)
 
     # Build C++ projects
     print(f"{Fore.BLUE}\n[Step 3/3] Building C++ projects...")
