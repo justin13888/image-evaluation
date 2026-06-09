@@ -929,7 +929,9 @@ class QualityArgs(BaseModel):
     """Quality suite: sweep each lossy encoder's quality axis to trace a
     rate-distortion curve, and measure each lossless encoder's compression
     efficiency (size vs effort), recording file size + IQA (SSIMULACRA2, PSNR,
-    ...). Encoders only; no timing, no thread sweep (output is thread-invariant)."""
+    ...). Encoders only; each point's single encode pass is wall-clocked as a
+    *relative* encode time (issue #29) — no warmup/repeats and no thread sweep
+    (output is thread-invariant), so it is not the performance suite's timing."""
 
     formats: Annotated[
         list[ImageFormat],
@@ -1291,3 +1293,9 @@ class BenchmarkMetrics(TypedDict):
     height: int
     megapixels: float
     bpp: float  # bits per pixel = (filesize * 8) / (width * height)
+    # Wall-clock seconds for the single encode pass that produced this row
+    # (issue #29). The quality suite times one pass (no warmup/repeats) under the
+    # parallel worker pool, so this includes contention from sibling encodes — a
+    # *relative* indicator of how long an operating point (quality/effort) costs,
+    # not the performance suite's isolated timing. 0.0 on error.
+    encode_time_s: float

@@ -330,7 +330,8 @@ def build_quality_bench_list(
                     label=label,
                     input_path=input_file,
                     source_path=source_file,
-                    # Quality runs are not timed; one pass writes the output.
+                    # One pass writes the output; its wall-clock is recorded as a
+                    # relative encode time (issue #29), not rigorously timed.
                     iterations=1,
                     warmup=0,
                     # Single-threaded: tasks run in parallel (one per physical
@@ -585,6 +586,7 @@ def _measure_one(
             height=height,
             megapixels=megapixels,
             bpp=bpp,
+            encode_time_s=elapsed_time,
         )
         return (metric, status)
     except Exception as e:
@@ -624,6 +626,10 @@ def _measure_one(
             height=0,
             megapixels=0.0,
             bpp=0.0,
+            # The encode may have failed before/within the timed pass; the time is
+            # meaningless for a failed row, so record 0.0 (also: elapsed_time may
+            # be unbound if subprocess.run raised).
+            encode_time_s=0.0,
         )
         return (metric, status)
     finally:
@@ -962,7 +968,9 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
     """Quality suite body: sweep each lossy encoder's quality axis to trace a
     rate-distortion curve (issue #8) and measure each lossless encoder's
     compression efficiency (issue #26), recording file size + IQA (SSIMULACRA2,
-    PSNR, ...) per operating point. Encoders only; no timing, no thread sweep.
+    PSNR, ...) per operating point, plus each point's single-pass wall-clock as a
+    relative encode time (issue #29). Encoders only; no warmup/repeats, no thread
+    sweep.
     Writes its artifacts into `result_dir`; the caller handles building and
     bundle finalization.
 
@@ -1036,7 +1044,8 @@ def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
     if failures:
         return failures
 
-    # IQA/size-only summary (rate-distortion plots, no timing in this suite).
+    # IQA/size summary plus per-point relative encode times (issue #29); no
+    # rigorous timing in this suite.
     generate_summary(result_dir, None, metrics)
     return []
 

@@ -66,8 +66,9 @@
       var impls = (byFmt[m.format] = byFmt[m.format] || {});
       var steps = (impls[m.impl] = impls[m.impl] || {});
       var s = (steps[m.label] = steps[m.label] ||
-        { bpp: 0, y: 0, n: 0, label: m.label, q: m.quality_value });
+        { bpp: 0, y: 0, n: 0, t: 0, label: m.label, q: m.quality_value });
       s.bpp += m.bpp; s.y += y; s.n += 1;
+      s.t += isNum(m.encode_time_s) ? m.encode_time_s : 0;
     });
     var out = {};
     Object.keys(byFmt).forEach(function (fmt) {
@@ -75,7 +76,7 @@
         var steps = byFmt[fmt][impl];
         var points = Object.keys(steps).map(function (k) {
           var s = steps[k];
-          return { x: s.bpp / s.n, y: s.y / s.n, label: s.label, q: s.q, count: s.n };
+          return { x: s.bpp / s.n, y: s.y / s.n, label: s.label, q: s.q, count: s.n, t: s.t / s.n };
         }).sort(function (a, b) { return a.x - b.x; });
         return { impl: impl, points: points };
       }).filter(function (s) { return s.points.length > 0; });
@@ -118,6 +119,12 @@
     if (a >= 10) return v.toFixed(1);
     if (a >= 1) return v.toFixed(2);
     return v.toFixed(3);
+  }
+  // Single-pass wall-clock seconds -> compact human string for tooltips.
+  function fmtTime(s) {
+    if (s >= 100) return s.toFixed(0) + " s";
+    if (s >= 1) return s.toFixed(2) + " s";
+    return (s * 1000).toFixed(0) + " ms";
   }
 
   // ---- chart rendering -----------------------------------------------------
@@ -200,7 +207,7 @@
         s.points.forEach(function (p, i) {
           var px = sx(p.x), py = sy(p.y);
           d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
-          hits.push({ sx: px, sy: py, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count });
+          hits.push({ sx: px, sy: py, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, t: p.t });
         });
         svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
         s.points.forEach(function (p) {
@@ -255,6 +262,7 @@
             '<span class="k">step</span> ' + esc(best.step) + "<br>" +
             '<span class="k">bpp</span> ' + best.x.toFixed(3) + "<br>" +
             '<span class="k">' + esc(info.name) + "</span> " + best.y.toFixed(2) +
+            (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
             (best.count > 1 ? '<br><span class="k">images</span> ' + best.count : "");
           var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
           if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
@@ -464,7 +472,7 @@
       var d = LOSSLESS[impl];
       var n = d.points.length;
       var points = d.points.map(function (p, i) {
-        return { x: n > 1 ? i / (n - 1) : 1, y: p.bpp, setting: p.value || p.label };
+        return { x: n > 1 ? i / (n - 1) : 1, y: p.bpp, setting: p.value || p.label, t: p.time_s };
       });
       var di = dashByFmt[d.format] || 0;
       dashByFmt[d.format] = di + 1;
@@ -505,7 +513,7 @@
       s.points.forEach(function (p, i) {
         var px = sx(p.x), py = sy(p.y);
         d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
-        hits.push({ sx: px, sy: py, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y });
+        hits.push({ sx: px, sy: py, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
       });
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' +
@@ -543,7 +551,8 @@
         tip.hidden = false;
         tip.innerHTML = "<b>" + esc(best.impl) + "</b><br>" +
           '<span class="k">setting</span> ' + esc(best.setting) + "<br>" +
-          '<span class="k">bpp</span> ' + best.bpp.toFixed(3);
+          '<span class="k">bpp</span> ' + best.bpp.toFixed(3) +
+          (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "");
         var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
         if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
         tip.style.left = Math.max(0, tx) + "px";
