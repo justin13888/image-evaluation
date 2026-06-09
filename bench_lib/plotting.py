@@ -156,9 +156,10 @@ def lossless_efficiency(
         agg: Dict[str, Dict[str, Any]] = {}
         for m in impl_rows:
             a = agg.setdefault(
-                m["label"], {"value": m["quality_value"], "sum": 0.0, "n": 0}
+                m["label"], {"value": m["quality_value"], "sum": 0.0, "n": 0, "t": 0.0}
             )
             a["sum"] += m["bpp"]
+            a["t"] += m.get("encode_time_s") or 0.0
             a["n"] += 1
         # Canonical low->high effort order from the schema's sweep; any labels not
         # in the sweep (e.g. the single "lossless" point) keep insertion order.
@@ -176,6 +177,7 @@ def lossless_efficiency(
                 "label": lbl,
                 "value": agg[lbl]["value"],
                 "bpp": agg[lbl]["sum"] / agg[lbl]["n"],
+                "time_s": agg[lbl]["t"] / agg[lbl]["n"],
             }
             for lbl in labels
         ]

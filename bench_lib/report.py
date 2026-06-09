@@ -109,7 +109,12 @@ def _quality_section(qual_dir: str) -> list[str]:
         "once; the Pareto-metric and x-axis-scale toggles up top drive the "
         "cross-format Pareto chart. Lossless encoders (PNG, lossless JXL/WebP) "
         "have no rate-distortion tradeoff, so they appear in their own "
-        "compression-efficiency section rather than on the curves.</p>"
+        "compression-efficiency section rather than on the curves. Hovering a "
+        "point also shows its mean <em>encode time</em> — a single-pass "
+        "wall-clock measured while the suite encodes many images in parallel, so "
+        "read it as a <em>relative</em> sense of how an operating point's cost "
+        "scales (higher quality/effort = slower), not the performance suite's "
+        "isolated timing.</p>"
     )
     parts.append(
         "<div class='q-disclaimer'><strong>IQA metrics are approximations, not "
