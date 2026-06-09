@@ -85,7 +85,7 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
 The suite is split into **two distinctly separate benchmarks**, each its own subcommand:
 
 - **`./bench perf`** — *performance*. Hyperfine-timed encode **and** decode at each implementation's single fixed preset, swept across both threading modes (single-threaded and all-cores). Timing is always compute-only (output discarded, CRC32-checksummed). Presets are hardcoded per codec and may produce different-quality outputs across implementations — this is intentional for now and will be refined.
-- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). Encoders only; no timing and no thread sweep (encoded bytes are thread-invariant). IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the `iqa-cli` tool.
+- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). **Lossless encoders** (PNG, lossless JXL/WebP) have no such tradeoff — output is pixel-identical — so instead they are swept over their *compression-effort* axis and ranked by file size in a dedicated lossless compression-efficiency view ([issue #26](https://github.com/justin13888/image-implementation-benchmark/issues/26)). Encoders only; no timing and no thread sweep (encoded bytes are thread-invariant). IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the `iqa-cli` tool.
 
 `--formats` is an optional subset filter on both; `--mode {encode,decode,both}` further narrows the performance suite.
 
@@ -145,9 +145,9 @@ results/<timestamp>/
 
 **`performance/`** — `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`), and `memory.csv` (with `--measure-memory`).
 
-**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, `ssim`, `butteraugli`, dimensions, the swept `quality_axis`/`quality_value`) is the raw data everything else is recomputed from; `summary.md` (BD-rate table + Pareto best-of-format table + per-step metrics table, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`). The quality suite renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
+**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, `ssim`, `butteraugli`, dimensions, the swept `quality_axis`/`quality_value`, and a `lossless` flag) is the raw data everything else is recomputed from; `summary.md` (BD-rate table + Pareto best-of-format table + lossless compression-efficiency table + per-step metrics table, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`). The quality suite renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
 
-**`report.html`** is a single offline-friendly file. Performance charts are embedded as base64 PNGs. The **quality** view is interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, and a sortable BD-rate table. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
+**`report.html`** is a single offline-friendly file. Performance charts are embedded as base64 PNGs. The **quality** view is interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, and a sortable BD-rate table, plus a dedicated **lossless compression-efficiency** section (a bpp leaderboard + size-vs-effort chart) for the lossless encoders. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
 
 ## Methodology
 
@@ -198,25 +198,30 @@ Choose your dataset based on your benchmarking goals:
 Each implementation declares its tunable knobs in a per-implementation schema in `bench_lib/models.py` (`TUNABLE_SCHEMAS`). The orchestrator passes the chosen values to the binary as generic `--param key=value` flags; the binary reads only the keys it understands. The schema defines two things per encoder:
 
 - **`perf_preset`** — the single fixed operating point the **performance** suite uses (one set of params per codec). Presets are not quality-matched across implementations.
-- **`quality_axis` + `quality_sweep`** — the knob the **quality** suite sweeps (e.g. JPEG `quality`, JXL `distance`) and the discrete values it steps through to trace a rate-distortion curve. Lossless encoders (PNG, lossless-only WebP) and decoders have no quality axis.
+- **`quality_axis` + `quality_sweep`** — the knob the **quality** suite sweeps and the discrete values it steps through. For a **lossy** encoder this traces a rate-distortion curve (e.g. JPEG `quality`, JXL `distance`); for a **lossless** encoder (`lossless: true` — PNG, lossless JXL) it is instead a *compression-effort* axis tracing size-vs-effort. Knob-less lossless encoders (spng, image-webp) declare `lossless` with no axis and contribute a single operating point. Decoders have no axis.
 
 Representative tunables (see the schema for the authoritative list):
 
-| Format | Quality axis | Other knobs | Perf preset |
-| :----- | :----------- | :---------- | :---------- |
+A **lossy** quality axis traces a rate-distortion curve; a **lossless** axis (marked *effort*) traces size-vs-effort and feeds the lossless compression-efficiency view.
+
+| Format | Quality / effort axis | Other knobs | Perf preset |
+| :----- | :-------------------- | :---------- | :---------- |
 | **JPEG** (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder) | `quality` 1-100 | `progressive`, `subsampling` (420/444) | q80, progressive, 420 |
 | **JPEG** (image-jpeg) | `quality` 1-100 | — | q80 |
 | **WEBP** (libwebp) | `quality` 0-100 | `method` 0-6, `lossless` | q75, m4, lossy |
+| **WEBP** (image-webp) | — *(lossless, single point)* | — | lossless |
 | **AVIF** (libavif, svt-av1, rav1e) | `quality` 0-100 | `speed`, chroma (420/444) | q65, speed 6, 420 |
 | **JXL** (libjxl) | `distance` (lossy, 15.0→0.1) | `effort` 1-9 | d1.0, e7 |
-| **JXL** (libjxl-lossless) | — *(distance pinned to 0)* | `effort` 1-9 | d0.0, e7 |
+| **JXL** (libjxl-lossless) | `effort` 1-9 *(lossless, distance pinned to 0)* | — | d0.0, e7 |
 | **JXL** (zune-jpegxl) | `quality` 0-100 | `effort` 1-9 | q90, e7 |
-| **PNG** (libpng, zune-png, image-png) | — *(lossless)* | compression/effort/filter | per impl |
+| **PNG** (libpng, zune-png) | `compression`/`effort` 0-9 *(lossless)* | — | level 6 / effort 4 |
+| **PNG** (image-png) | `compression` (fast/default/best) *(lossless)* | `filter` | default, adaptive |
+| **PNG** (spng) | — *(lossless, single point)* | — | default |
 
 > **Known limitations:**
 > - **AVIF film grain synthesis** is not yet implemented in `libavif` or `rav1e` (a TODO is tracked in each).
-> - **image-webp** (Rust) only supports lossless WebP encoding (crate limitation), so it has no quality axis and is excluded from the quality suite.
-> - **spng** (C++) does not expose a compression-level control.
+> - **image-webp** (Rust) only supports lossless WebP encoding (crate limitation), so it has no effort knob — it contributes a single lossless operating point to the compression-efficiency view.
+> - **spng** (C++) does not expose a compression-level control, so it too contributes a single lossless operating point.
 
 ### Benchmarking Architecture
 
@@ -420,7 +425,7 @@ We include modern formats and their most competitive implementations.
 | Implementation | Language | Notes                         |
 | :------------- | :------- | :---------------------------- |
 | **libwebp**    | C        | Reference implementation      |
-| **image-webp** | Rust     | *Lossless-only crate limitation — no quality axis, so excluded from the quality suite's rate-distortion sweep.* |
+| **image-webp** | Rust     | *Lossless-only (crate limitation) — no quality axis; contributes a single lossless operating point to the compression-efficiency view.* |
 
 ### AVIF
 

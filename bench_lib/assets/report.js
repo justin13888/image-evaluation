@@ -24,6 +24,9 @@
   var METRICS = readJSON("quality-metrics") || [];
   var PARETO = readJSON("quality-pareto") || {};
   var BDRATE = readJSON("quality-bdrate") || {};
+  // Precomputed lossless compression-efficiency summary (issue #26):
+  // { impl: {format, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
+  var LOSSLESS = readJSON("quality-lossless") || {};
 
   var METRIC_INFO = {
     ssimulacra2: { key: "ssimulacra2", name: "SSIMULACRA2", y: "SSIMULACRA2 (higher is better)" },
@@ -44,9 +47,11 @@
   }
   function isNum(v) { return typeof v === "number" && isFinite(v); }
 
+  // Rows for the rate-distortion views: lossy encode rows only. Lossless rows
+  // (issue #26) have no distortion axis and are shown in the lossless section.
   function validRows(rows) {
     return rows.filter(function (m) {
-      return m.type === "encode" && !m.error && m.bpp > 0 && isNum(m.ssimulacra2);
+      return m.type === "encode" && !m.lossless && !m.error && m.bpp > 0 && isNum(m.ssimulacra2);
     });
   }
 
@@ -299,7 +304,7 @@
   // METRIC_INFO.
   function availableMetrics() {
     function hasMetric(key) {
-      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.error; });
+      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.lossless && !m.error; });
     }
     var metrics = ["ssimulacra2"];
     ["psnr", "ssim", "butteraugli"].forEach(function (k) {
@@ -403,6 +408,155 @@
     draw();
   }
 
+  // ---- lossless compression efficiency ------------------------------------
+
+  // Lossless encoders are pixel-identical, so they differ only in size. Two
+  // views from the precomputed LOSSLESS summary: a bpp leaderboard, and a
+  // size-vs-effort chart (issue #26). Independent of the metric/x-scale toggles.
+  function renderLossless() {
+    var host = document.getElementById("q-lossless");
+    if (!host) return;
+    var impls = Object.keys(LOSSLESS);
+    if (!impls.length) {
+      host.innerHTML = '<p class="q-note">No lossless encoders measured.</p>';
+      return;
+    }
+    host.innerHTML =
+      '<div class="q-metric-cap">Best bits per pixel — lower is better</div>' +
+      '<div id="q-lossless-bars"></div>' +
+      '<div class="q-metric-cap">Size vs compression effort</div>' +
+      '<div id="q-lossless-effort" class="q-chart"></div>';
+    renderLosslessBars(document.getElementById("q-lossless-bars"), impls);
+    renderLosslessEffort(document.getElementById("q-lossless-effort"), impls);
+  }
+
+  function renderLosslessBars(host, impls) {
+    var rows = impls.map(function (impl) {
+      var d = LOSSLESS[impl];
+      return { impl: impl, fmt: d.format, bpp: d.best_bpp, ratio: d.ratio };
+    }).sort(function (a, b) { return a.bpp - b.bpp; });
+    var maxBpp = Math.max.apply(null, rows.map(function (r) { return r.bpp; }));
+    var rowH = 26, padT = 8, padB = 8, labelW = 160, valW = 150;
+    var W = VBW, H = padT + padB + rows.length * rowH;
+    var x0 = labelW, x1 = W - valW;
+    var svg = [];
+    rows.forEach(function (r, i) {
+      var cy = padT + i * rowH + rowH / 2;
+      var bw = maxBpp > 0 ? (r.bpp / maxBpp) * (x1 - x0) : 0;
+      var color = FORMAT_COLORS[r.fmt] || PALETTE[0];
+      var ratio = r.ratio ? " · " + r.ratio.toFixed(2) + "×" : "";
+      svg.push('<text class="q-ll-name" x="' + (labelW - 8) + '" y="' + (cy + 4) +
+        '" text-anchor="end">' + esc(r.impl) + "</text>");
+      svg.push('<rect class="q-ll-bar" x="' + x0 + '" y="' + (cy - rowH / 2 + 3) +
+        '" width="' + bw.toFixed(1) + '" height="' + (rowH - 6) + '" fill="' + color + '"/>');
+      svg.push('<text class="q-ll-val" x="' + (x1 + 6) + '" y="' + (cy + 4) + '">' +
+        r.bpp.toFixed(3) + " bpp" + ratio + "</text>");
+    });
+    host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + W + " " + H +
+      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>";
+  }
+
+  function renderLosslessEffort(host, impls) {
+    // x = effort normalized to [0,1] per encoder (low -> high); y = bpp. Colour
+    // by format, dashed per encoder within a format so they stay distinguishable.
+    var dashByFmt = {};
+    var series = impls.map(function (impl) {
+      var d = LOSSLESS[impl];
+      var n = d.points.length;
+      var points = d.points.map(function (p, i) {
+        return { x: n > 1 ? i / (n - 1) : 1, y: p.bpp, setting: p.value || p.label };
+      });
+      var di = dashByFmt[d.format] || 0;
+      dashByFmt[d.format] = di + 1;
+      return {
+        impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
+        dash: DASHES[di % DASHES.length], points: points,
+      };
+    });
+    var ys = [];
+    series.forEach(function (s) { s.points.forEach(function (p) { ys.push(p.y); }); });
+    var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
+    var yticks = linTicks(ymin, ymax, 6);
+    var dymin = Math.min(ymin, yticks[0]), dymax = Math.max(ymax, yticks[yticks.length - 1]);
+    if (dymax === dymin) dymax = dymin + 1;
+    function sx(x) { return X0 + x * (X1 - X0); }
+    function sy(y) { return Y1 - (y - dymin) / (dymax - dymin) * (Y1 - Y0); }
+
+    var svg = [], hits = [];
+    yticks.forEach(function (t) {
+      if (t < dymin - 1e-9 || t > dymax + 1e-9) return;
+      var y = sy(t).toFixed(1);
+      svg.push('<line class="q-grid" x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '"/>');
+      svg.push('<text class="q-tick" x="' + (X0 - 8) + '" y="' + (+y + 4) + '" text-anchor="end">' + esc(fmtNum(t)) + "</text>");
+    });
+    [[0, "low"], [1, "high"]].forEach(function (tk) {
+      var x = sx(tk[0]).toFixed(1);
+      svg.push('<line class="q-grid" x1="' + x + '" y1="' + Y0 + '" x2="' + x + '" y2="' + Y1 + '"/>');
+      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + tk[1] + "</text>");
+    });
+    svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
+    svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
+    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) +
+      '" text-anchor="middle">Compression effort (low → high)</text>');
+    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) +
+      ') rotate(-90)" text-anchor="middle">Bits per pixel (lower is better)</text>');
+    series.forEach(function (s) {
+      var d = "";
+      s.points.forEach(function (p, i) {
+        var px = sx(p.x), py = sy(p.y);
+        d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
+        hits.push({ sx: px, sy: py, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y });
+      });
+      if (s.points.length > 1) {
+        svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' +
+          (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+      }
+      s.points.forEach(function (p) {
+        svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) +
+          '" r="4.5" fill="' + s.color + '"/>');
+      });
+    });
+    svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
+    var chips = series.map(function (s) {
+      return '<span class="q-chip"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
+    }).join("");
+    host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
+      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
+      '<div class="q-legend">' + chips + "</div><div class=\"q-tooltip\" hidden></div>";
+
+    var svgEl = host.querySelector("svg");
+    var tip = host.querySelector(".q-tooltip");
+    var hl = host.querySelector(".q-hl");
+    svgEl.addEventListener("mousemove", function (ev) {
+      var r = svgEl.getBoundingClientRect();
+      var vx = (ev.clientX - r.left) * (VBW / r.width);
+      var vy = (ev.clientY - r.top) * (VBH / r.height);
+      var best = null, bd = 1e9;
+      hits.forEach(function (h) {
+        var dd = (h.sx - vx) * (h.sx - vx) + (h.sy - vy) * (h.sy - vy);
+        if (dd < bd) { bd = dd; best = h; }
+      });
+      if (best && bd <= 26 * 26) {
+        hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
+        hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
+        var crect = host.getBoundingClientRect();
+        tip.hidden = false;
+        tip.innerHTML = "<b>" + esc(best.impl) + "</b><br>" +
+          '<span class="k">setting</span> ' + esc(best.setting) + "<br>" +
+          '<span class="k">bpp</span> ' + best.bpp.toFixed(3);
+        var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
+        if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
+        tip.style.left = Math.max(0, tx) + "px";
+        tip.style.top = ty + "px";
+      } else {
+        hl.setAttribute("visibility", "hidden"); tip.hidden = true;
+      }
+    });
+    svgEl.addEventListener("mouseleave", function () {
+      hl.setAttribute("visibility", "hidden"); tip.hidden = true;
+    });
+  }
+
   // ---- controls ------------------------------------------------------------
 
   function group(labelText, opts, current, onPick) {
@@ -463,6 +617,7 @@
     if (!document.getElementById("quality-app")) return;
     renderControls();
     renderAll();
+    renderLossless();
     renderBdRate();
   }
 
