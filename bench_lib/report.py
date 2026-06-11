@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from bench_lib.plotting import (
     compute_bd_rate_table,
+    decoder_fidelity,
     lossless_efficiency,
     pareto_front_encoders,
 )
@@ -96,7 +97,7 @@ def _quality_section(qual_dir: str) -> list[str]:
     summaries as JSON, drop in the chart mount points, and inline the chart JS.
     Returns the HTML fragments (empty if there is nothing to show)."""
     metrics = _load_json(os.path.join(qual_dir, "metrics.json"))
-    parts = ["<h2>Quality (rate-distortion)</h2>"]
+    parts = ["<h2>Quality &mdash; rate-distortion &amp; decoder fidelity</h2>"]
     if not metrics:
         parts.append("<p><em>No quality metrics.</em></p>")
         return parts
@@ -142,6 +143,7 @@ def _quality_section(qual_dir: str) -> list[str]:
     parts.append(_json_script("quality-bdrate", compute_bd_rate_table(metrics)))
     parts.append(_json_script("quality-pareto", pareto_front_encoders(metrics)))
     parts.append(_json_script("quality-lossless", lossless_efficiency(metrics)))
+    parts.append(_json_script("quality-decoders", decoder_fidelity(metrics)))
 
     parts.append(
         "<div id='quality-app'>"
@@ -163,6 +165,13 @@ def _quality_section(qual_dir: str) -> list[str]:
         "size-vs-effort chart traces how bpp falls as compression effort rises "
         "(single-knob encoders show one point).</p>"
         "<div id='q-lossless'></div>"
+        "<h3>Decoder fidelity &amp; speed</h3>"
+        "<p class='q-note'>Decoders carry no rate-distortion tradeoff, so they are "
+        "judged on speed and on fidelity against the format's golden (reference) "
+        "decoder of the same input. Fidelity ∞ = pixel-identical (a faithful "
+        "decoder); a finite worst-case PSNR flags an approximate decode path. "
+        "Decode time is the relative one-pass cost across the input-bitrate sweep.</p>"
+        "<div id='q-decoders'></div>"
         "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
         "<p class='q-note'>Negative = fewer bits for equal quality (better). "
         "Computed per image then averaged; <code>N/A</code> = non-overlapping "
@@ -210,12 +219,20 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         parts.append("<h2>Environment</h2>")
         parts.append(manifest_html)
 
-    if os.path.isdir(perf_dir):
-        parts.append("<h2>Performance (timing)</h2>")
-        parts.append(_embed_pngs(perf_dir))
-
+    # Quality is primary (rate-distortion + decoder fidelity); the rigorous timing
+    # overlay is the optional secondary view, shown below it.
     if os.path.isdir(qual_dir):
         parts.extend(_quality_section(qual_dir))
+
+    if os.path.isdir(perf_dir):
+        parts.append("<h2>Performance &mdash; rigorous timing overlay</h2>")
+        parts.append(
+            "<p class='muted'>Optional, secondary view. Isolated hyperfine timing "
+            "(warmup + repeats, compute-only) at the selected operating points, "
+            "across single-threaded and all-cores modes. Quality above is primary: "
+            "raw speed is only meaningful alongside the quality it trades for.</p>"
+        )
+        parts.append(_embed_pngs(perf_dir))
 
     parts.append(
         "<p class='muted'>Raw data is embedded above "

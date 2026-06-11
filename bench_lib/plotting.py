@@ -159,7 +159,7 @@ def lossless_efficiency(
                 m["label"], {"value": m["quality_value"], "sum": 0.0, "n": 0, "t": 0.0}
             )
             a["sum"] += m["bpp"]
-            a["t"] += m.get("encode_time_s") or 0.0
+            a["t"] += m.get("time_s") or 0.0
             a["n"] += 1
         # Canonical low->high effort order from the schema's sweep; any labels not
         # in the sweep (e.g. the single "lossless" point) keep insertion order.
@@ -187,6 +187,65 @@ def lossless_efficiency(
             "best_bpp": best["bpp"],
             "best_label": best["label"],
             "ratio": _SOURCE_BPP / best["bpp"] if best["bpp"] > 0 else None,
+            "points": points,
+        }
+    return result
+
+
+def decoder_fidelity(
+    metrics: list[BenchmarkMetrics],
+) -> Dict[str, Dict[str, Any]]:
+    """Per decoder, its speed and fidelity versus the golden (reference) decoder
+    across the sweep of reference-encoded inputs (``metric_basis == "golden"``).
+
+    Decoders have no rate-distortion tradeoff of their own: a correct decoder
+    reproduces the golden decoder's pixels, so PSNR vs golden is ∞ (recorded as
+    ``None``). This view answers "how fast, and is it faithful?" — each decoder's
+    golden-basis rows are aggregated to its mean one-pass decode time, mean input
+    bpp, the worst (minimum *finite*) PSNR vs golden, whether every point was
+    bit-exact, and a ``points`` list (decode time + PSNR vs input bpp) for the
+    speed-vs-bitrate chart.
+
+    Returns ``{impl: {format, mean_time_s, mean_bpp, count, bit_exact,
+    worst_psnr, points:[{bpp, time_s, psnr, label}]}}``. Decoders with no valid
+    golden-basis row are omitted."""
+    rows = [
+        m
+        for m in metrics
+        if m["type"] == "decode"
+        and m.get("metric_basis") == "golden"
+        and not m.get("error")
+    ]
+    result: Dict[str, Dict[str, Any]] = {}
+    for impl, impl_rows in _group_by(rows, lambda m: m["impl"]).items():
+        times = [
+            m["time_s"] for m in impl_rows if isinstance(m.get("time_s"), (int, float))
+        ]
+        bpps = [m["bpp"] for m in impl_rows if m["bpp"] > 0]
+        # PSNR vs golden is None for a pixel-identical (bit-exact) decode; a finite
+        # value flags an approximate decode path.
+        finite_psnrs = [
+            m["psnr"] for m in impl_rows if isinstance(m.get("psnr"), (int, float))
+        ]
+        points = sorted(
+            (
+                {
+                    "bpp": m["bpp"],
+                    "time_s": m.get("time_s") or 0.0,
+                    "psnr": m.get("psnr"),
+                    "label": m["label"],
+                }
+                for m in impl_rows
+            ),
+            key=lambda p: p["bpp"],
+        )
+        result[impl] = {
+            "format": impl_rows[0]["format"],
+            "mean_time_s": (sum(times) / len(times)) if times else 0.0,
+            "mean_bpp": (sum(bpps) / len(bpps)) if bpps else 0.0,
+            "count": len(impl_rows),
+            "bit_exact": len(finite_psnrs) == 0,
+            "worst_psnr": (min(finite_psnrs) if finite_psnrs else None),
             "points": points,
         }
     return result

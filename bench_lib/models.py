@@ -860,9 +860,27 @@ def select_sweep(sweep: list[str], steps: Optional[int]) -> list[str]:
     return [sweep[i] for i in idx]
 
 
-class PerfArgs(BaseModel):
-    """Performance suite: hyperfine timing of encode + decode at each
-    implementation's fixed preset, swept across both threading modes."""
+# Rigorous-timing breadth for the optional performance overlay. Every metric row
+# already carries a one-pass *relative* time; this controls how much extra,
+# isolated hyperfine timing is layered on top:
+#   off    — none (relative times only);
+#   anchor — one point per impl (its perf preset), the default;
+#   all    — every operating point, across both thread modes.
+PerfMode = Literal["off", "anchor", "all"]
+
+_PERF_ARG = Annotated[
+    PerfMode,
+    tyro.conf.arg(aliases=["-p"]),
+    Field(
+        description="Rigorous (hyperfine) timing breadth layered on the sweep: "
+        "'off' relative one-pass times only; 'anchor' rigorous timing at each "
+        "impl's preset point; 'all' rigorous timing at every operating point."
+    ),
+]
+
+
+class BaseArgs(BaseModel):
+    """Options shared by every sweep run."""
 
     formats: Annotated[
         list[ImageFormat],
@@ -876,44 +894,18 @@ class PerfArgs(BaseModel):
         tyro.conf.arg(aliases=["-d"]),
         Field(description="Dataset to benchmark"),
     ] = DatasetId.TEST
-    mode: Annotated[
-        BenchmarkMode,
-        tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-m"]),
-        Field(description="Benchmark mode (subset filter; default runs both)"),
-    ] = BenchmarkMode.BOTH
-    iterations: Annotated[
-        int,
-        tyro.conf.arg(aliases=["-i"]),
-        Field(description="Iterations per benchmark"),
-    ] = 10
-    warmup: Annotated[
-        int,
-        tyro.conf.arg(aliases=["-w"]),
-        Field(description="Warmup iterations"),
-    ] = 2
     sample: Annotated[
         Optional[int],
         Field(
             description="Limit the maximum number of files from dataset to sample randomly"
         ),
     ] = None
-
-    # Booleans automatically become flags.
-    pin_cores: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Pin benchmarks to specific CPU cores"),
-    ] = False
     quick: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
-        Field(description="Quick mode (single iteration, all-cores only)"),
-    ] = False
-    measure_memory: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Measure peak memory usage"),
+        Field(
+            description="Quick mode (2 quality points per impl; all-cores-only anchor timing)"
+        ),
     ] = False
     skip_build: Annotated[
         bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
@@ -925,51 +917,44 @@ class PerfArgs(BaseModel):
     ] = False
 
 
-class QualityArgs(BaseModel):
-    """Quality suite: sweep each lossy encoder's quality axis to trace a
-    rate-distortion curve, and measure each lossless encoder's compression
-    efficiency (size vs effort), recording file size + IQA (SSIMULACRA2, PSNR,
-    ...). Encoders only; each point's single encode pass is wall-clocked as a
-    *relative* encode time (issue #29) — no warmup/repeats and no thread sweep
-    (output is thread-invariant), so it is not the performance suite's timing."""
+class RunArgs(BaseArgs):
+    """Unified benchmark: sweep every encoder's quality/effort axis (and every
+    decoder across the same axis of reference-encoded inputs), scoring quality at
+    each operating point — encoders by IQA vs the source, decoders by PSNR vs the
+    golden/reference decoder — and recording each point's one-pass relative time.
+    Rigorous performance timing is an optional overlay selected by ``--perf``."""
 
-    formats: Annotated[
-        list[ImageFormat],
+    mode: Annotated[
+        BenchmarkMode,
         tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-f"]),
-        Field(description="List of formats to test."),
-    ] = list(ImageFormat)
-    dataset: Annotated[
-        DatasetId,
-        tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-d"]),
-        Field(description="Dataset to benchmark"),
-    ] = DatasetId.TEST
-    sample: Annotated[
-        Optional[int],
-        Field(
-            description="Limit the maximum number of files from dataset to sample randomly"
-        ),
-    ] = None
+        tyro.conf.arg(aliases=["-m"]),
+        Field(description="Implementation-type filter (encode/decode; default both)"),
+    ] = BenchmarkMode.BOTH
+    perf: _PERF_ARG = "anchor"
     quality_steps: Annotated[
         Optional[int],
         tyro.conf.arg(aliases=["-q"]),
         Field(
-            description="Number of quality-axis points per encoder (evenly sampled "
-            "from its full sweep). Default: every declared point."
+            description="Number of quality-axis points per impl (evenly sampled from "
+            "the full sweep). Default: every declared point."
         ),
     ] = None
-    quick: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Quick mode (2 quality points per encoder)"),
-    ] = False
+    iterations: Annotated[
+        int,
+        tyro.conf.arg(aliases=["-i"]),
+        Field(description="Iterations per rigorous (hyperfine) timing benchmark"),
+    ] = 10
+    warmup: Annotated[
+        int,
+        tyro.conf.arg(aliases=["-w"]),
+        Field(description="Warmup iterations for rigorous timing"),
+    ] = 2
     jobs: Annotated[
         Optional[int],
         tyro.conf.arg(aliases=["-j"]),
         Field(
-            description="Parallel encode workers (default: physical core count). Each "
-            "encode runs single-threaded; peak memory scales with this."
+            description="Parallel scoring workers (default: physical core count). Each "
+            "encode/decode runs single-threaded; peak memory scales with this."
         ),
     ] = None
     keep_temp: Annotated[
@@ -977,104 +962,42 @@ class QualityArgs(BaseModel):
         tyro.conf.FlagCreatePairsOff,
         Field(
             description="Keep each task's encoded/decoded temp files (and the staging "
-            "dir) for inspection. Default off: temp files are deleted as soon as each "
-            "task is scored, bounding peak disk use on large sweeps."
+            "dir) for inspection. Default off: temp files are deleted as each task is "
+            "scored, bounding peak disk use on large sweeps."
         ),
     ] = False
-    skip_build: Annotated[
-        bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
-    ] = False
-    debug: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Enable debug mode (more verbose output)"),
-    ] = False
-
-
-class AllArgs(BaseModel):
-    """Run both suites into a single bundle (performance/ + quality/ + a
-    self-contained report.html). Combines the options of both suites."""
-
-    formats: Annotated[
-        list[ImageFormat],
-        tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-f"]),
-        Field(description="List of formats to test."),
-    ] = list(ImageFormat)
-    dataset: Annotated[
-        DatasetId,
-        tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-d"]),
-        Field(description="Dataset to benchmark"),
-    ] = DatasetId.TEST
-    mode: Annotated[
-        BenchmarkMode,
-        tyro.conf.EnumChoicesFromValues,
-        tyro.conf.arg(aliases=["-m"]),
-        Field(description="Performance-suite mode (subset filter; default both)"),
-    ] = BenchmarkMode.BOTH
-    iterations: Annotated[
-        int,
-        tyro.conf.arg(aliases=["-i"]),
-        Field(description="Iterations per timing benchmark"),
-    ] = 10
-    warmup: Annotated[
-        int,
-        tyro.conf.arg(aliases=["-w"]),
-        Field(description="Warmup iterations"),
-    ] = 2
-    sample: Annotated[
-        Optional[int],
-        Field(
-            description="Limit the maximum number of files from dataset to sample randomly"
-        ),
-    ] = None
-    quality_steps: Annotated[
-        Optional[int],
-        tyro.conf.arg(aliases=["-q"]),
-        Field(description="Number of quality-axis points per encoder (default: all)"),
-    ] = None
     pin_cores: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
-        Field(description="Pin performance benchmarks to specific CPU cores"),
-    ] = False
-    quick: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Quick mode for both suites"),
-    ] = False
-    jobs: Annotated[
-        Optional[int],
-        tyro.conf.arg(aliases=["-j"]),
-        Field(
-            description="Parallel encode workers for the quality suite (default: "
-            "physical core count). Each encode runs single-threaded; peak memory "
-            "scales with this."
-        ),
-    ] = None
-    keep_temp: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(
-            description="Keep each quality task's encoded/decoded temp files (and the "
-            "staging dir) for inspection. Default off: temp files are deleted as soon "
-            "as each task is scored, bounding peak disk use on large sweeps."
-        ),
+        Field(description="Pin rigorous timing benchmarks to specific CPU cores"),
     ] = False
     measure_memory: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
-        Field(description="Measure peak memory usage (performance suite)"),
+        Field(description="Measure peak memory usage (rigorous timing overlay)"),
     ] = False
-    skip_build: Annotated[
-        bool, tyro.conf.FlagCreatePairsOff, Field(description="Skip compilation step")
-    ] = False
-    debug: Annotated[
-        bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Enable debug mode (more verbose output)"),
-    ] = False
+
+
+class QualityArgs(RunArgs):
+    """Backward-compatible alias for ``run --perf off``: the quality sweep with
+    relative one-pass timing only (no rigorous hyperfine pass)."""
+
+    perf: _PERF_ARG = "off"
+
+
+class PerfArgs(RunArgs):
+    """Backward-compatible alias for ``run --perf all``: the full sweep with
+    rigorous hyperfine timing at every operating point. Quality is still scored
+    (now always collected), so this is a superset of the old performance suite."""
+
+    perf: _PERF_ARG = "all"
+
+
+class AllArgs(RunArgs):
+    """Backward-compatible alias for ``run`` (``--perf anchor``): the quality sweep
+    plus rigorous timing at each impl's preset point."""
+
+    pass
 
 
 class CleanArgs(BaseModel):
@@ -1121,8 +1044,9 @@ class SetupArgs(BaseModel):
 
 
 CliEntry = Union[
-    Annotated[PerfArgs, tyro.conf.subcommand(name="perf")],
+    Annotated[RunArgs, tyro.conf.subcommand(name="run")],
     Annotated[QualityArgs, tyro.conf.subcommand(name="quality")],
+    Annotated[PerfArgs, tyro.conf.subcommand(name="perf")],
     Annotated[AllArgs, tyro.conf.subcommand(name="all")],
     Annotated[CleanArgs, tyro.conf.subcommand(name="clean")],
     Annotated[CompileArgs, tyro.conf.subcommand(name="compile")],
@@ -1271,6 +1195,9 @@ class BenchmarkMetrics(TypedDict):
     quality_value: str
     input_path: str
     source_path: str
+    # Encoded artifact size in bytes: the encoder's output, or — for a decoder —
+    # the encoded input it consumed (the decoded PPM is raw/format-invariant). bpp
+    # is derived from this, so it is input bitrate for decode rows. 0 on error.
     filesize: int
     # IQA scores from the iqa crate (via the iqa-cli binary). ssimulacra2:
     # 100 = identical, -1.0 on error. psnr in dB; None when non-finite
@@ -1281,6 +1208,12 @@ class BenchmarkMetrics(TypedDict):
     psnr: Optional[float]
     ssim: Optional[float]
     butteraugli: Optional[float]
+    # What the IQA scores above are measured against: "source" for encoders (vs the
+    # original image) or "golden" for decoders (vs the format's reference decoder on
+    # the same input, isolating decoder fidelity from the encoder loss both share).
+    # A bit-exact decoder therefore scores ∞/identical; only approximate decode
+    # paths show a finite PSNR. "" for rows with no score.
+    metric_basis: str
     error: Optional[str]
     type: str
     format: str
@@ -1293,9 +1226,9 @@ class BenchmarkMetrics(TypedDict):
     height: int
     megapixels: float
     bpp: float  # bits per pixel = (filesize * 8) / (width * height)
-    # Wall-clock seconds for the single encode pass that produced this row
-    # (issue #29). The quality suite times one pass (no warmup/repeats) under the
-    # parallel worker pool, so this includes contention from sibling encodes — a
-    # *relative* indicator of how long an operating point (quality/effort) costs,
-    # not the performance suite's isolated timing. 0.0 on error.
-    encode_time_s: float
+    # Wall-clock seconds for the single pass (encode or decode) that produced this
+    # row (issue #29). One pass, no warmup/repeats, under the parallel worker pool,
+    # so it includes contention from sibling tasks — a *relative* indicator of how
+    # an operating point's cost scales, not the rigorous-timing overlay's isolated
+    # measurement. 0.0 on error.
+    time_s: float
