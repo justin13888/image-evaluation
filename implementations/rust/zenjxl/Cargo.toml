@@ -1,0 +1,25 @@
+[package]
+name = "bench-zenjxl"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-zenjxl-encode"
+path = "src/encode.rs"
+
+[[bin]]
+name = "bench-zenjxl-lossless-encode"
+path = "src/encode_lossless.rs"
+
+[[bin]]
+name = "bench-zenjxl-decode"
+path = "src/decode.rs"
+
+[dependencies]
+benchmark-harness = { path = "../../../harness/rust" }
+# Pure-Rust JPEG XL codec (AGPL-3.0). Not published to crates.io, so it is a git
+# dependency (Cargo.lock pins the exact commit). Default features = encode+decode.
+zenjxl = { git = "https://github.com/imazen/zenjxl" }
+# PixelBuffer -> Rgb8 conversion for the decode path.
+zenpixels-convert = { version = "0.2", default-features = false, features = ["rgb", "imgref"] }
+anyhow = "1.0"

@@ -495,6 +495,32 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.JXL,
     ),
+    # zenjxl: pure-Rust JPEG XL codec (AGPL-3.0, imazen/zenjxl). Lossy (distance)
+    # and lossless (modular) encode series, plus a decoder.
+    Implementation(
+        name="zenjxl-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjxl-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.JXL,
+    ),
+    Implementation(
+        name="zenjxl-lossless-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjxl-lossless-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.JXL,
+    ),
+    Implementation(
+        name="zenjxl-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjxl-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.JXL,
+    ),
     Implementation(
         name="libjxl-decode",
         build="cpp",
@@ -770,6 +796,27 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=["40", "50", "60", "70", "80", "90", "95", "100"],
         perf_preset={"quality": "90", "effort": "7"},
     ),
+    # zenjxl lossy VarDCT: swept over butteraugli distance (like libjxl-encode).
+    # The convenience encoder fixes effort at its default, so distance is the only
+    # exposed knob.
+    "zenjxl-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="distance",
+                kind="float",
+                default="1.0",
+                min=0.0,
+                max=25.0,
+                description="Butteraugli distance; 0 = lossless",
+            ),
+        ],
+        quality_axis="distance",
+        quality_sweep=_JXL_DISTANCE_SWEEP,
+        perf_preset={"distance": "1.0"},
+    ),
+    # zenjxl lossless (modular): the convenience encoder exposes no effort knob, so
+    # it contributes a single operating point to the lossless efficiency view.
+    "zenjxl-lossless-encode": TunableSchema(lossless=True),
     # --- PNG (lossless: the swept axis is compression *effort*, not quality;
     # rows feed the lossless compression-efficiency view, issue #26) ---
     "image-png-encode": TunableSchema(

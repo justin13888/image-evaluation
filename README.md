@@ -449,6 +449,7 @@ We include modern formats and their most competitive implementations.
 | **jxl-oxide**   | Rust     | Pure Rust decoder        |
 | **jxl-rs**      | Rust     | libjxl's official Rust decoder (vendored submodule) |
 | **zune-jpegxl** | Rust     | Optimized Rust encoder   |
+| **zenjxl**      | Rust     | Pure-Rust JPEG XL from [imazen/zenjxl](https://github.com/imazen/zenjxl). **AGPL-3.0.** Lossy VarDCT (distance) + lossless modular encoders and a decoder. *Git dependency — currently blocked on the unpublished `jxl-encoder` 0.3.2 (see the integration PR).* |
 
 ## Limitations and Caveats
 
