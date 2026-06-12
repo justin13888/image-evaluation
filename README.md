@@ -76,53 +76,56 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
    ./bench setup --verify-only    # Check integrity only
    ```
 
-   > **Note:** `./bench perf` and `./bench quality` automatically set up required datasets on first use, so an explicit `./bench setup` step is optional.
+   > **Note:** `./bench run` automatically sets up required datasets on first use, so an explicit `./bench setup` step is optional.
 
 4. **Build implementations** (vendored libraries + all implementations built automatically via `./bench compile`)
 
 ### Running Benchmarks
 
-The suite is split into **two distinctly separate benchmarks**, each its own subcommand:
+The benchmark is **quality-first**: a single **`./bench run`** sweeps the *same* operating points for every implementation and scores quality at each, then *optionally* layers rigorous performance timing on top. Raw speed means little without the quality it trades for, so quality is primary and performance is an overlay.
 
-- **`./bench perf`** — *performance*. Hyperfine-timed encode **and** decode at each implementation's single fixed preset, swept across both threading modes (single-threaded and all-cores). Timing is always compute-only (output discarded, CRC32-checksummed). Presets are hardcoded per codec and may produce different-quality outputs across implementations — this is intentional for now and will be refined.
-- **`./bench quality`** — *quality / rate-distortion*. Sweeps each lossy **encoder's** quality axis (e.g. JPEG quality, JXL distance) over many operating points and measures **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** at each, tracing a size-vs-quality curve (the many points needed for [issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). **Lossless encoders** (PNG, lossless JXL/WebP) have no such tradeoff — output is pixel-identical — so instead they are swept over their *compression-effort* axis and ranked by file size in a dedicated lossless compression-efficiency view ([issue #26](https://github.com/justin13888/image-implementation-benchmark/issues/26)). Encoders only; each point's single encode pass is wall-clocked as a *relative* encode time ([issue #29](https://github.com/justin13888/image-implementation-benchmark/issues/29)) — surfaced on the report's hover tooltips so you can gauge how a setting's cost scales — but with no warmup/repeats and no thread sweep (encoded bytes are thread-invariant), it is not the performance suite's rigorous timing. IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary.
+- **Encoders** are swept across their quality/effort axis (e.g. JPEG quality, JXL distance) and scored with **file size + bits-per-pixel + SSIMULACRA2 + PSNR + SSIM + Butteraugli** against the source — a rate-distortion curve ([issue #8](https://github.com/justin13888/image-implementation-benchmark/issues/8)). **Lossless encoders** (PNG, lossless JXL/WebP) have no such tradeoff (output is pixel-identical), so they are swept over their *compression-effort* axis and ranked by file size in a dedicated lossless efficiency view ([issue #26](https://github.com/justin13888/image-implementation-benchmark/issues/26)).
+- **Decoders** are swept across the same axis of reference-encoded inputs and scored on **decode speed** and **PSNR vs the format's golden (reference) decoder** of the same input — isolating decoder fidelity from the encoder loss both share. A bit-exact decoder scores ∞; an approximate decode path shows a finite PSNR.
+- Every operating point also records a one-pass *relative* time ([issue #29](https://github.com/justin13888/image-implementation-benchmark/issues/29)).
 
-`--formats` is an optional subset filter on both; `--mode {encode,decode,both}` further narrows the performance suite.
+`--perf {off,anchor,all}` selects the optional rigorous (hyperfine, compute-only) timing overlay:
+
+- **`off`** — quality only, relative one-pass times (fastest);
+- **`anchor`** *(default)* — rigorous timing at each implementation's preset point, plus the relative-time curve across the whole sweep;
+- **`all`** — rigorous timing at **every** operating point, across both threading modes (most thorough; runtime grows with the number of points).
+
+IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary. `--formats` filters formats; `--mode {encode,decode,both}` narrows to encoders and/or decoders. Backward-compatible aliases map onto `run`: **`./bench quality`** = `run --perf off`, **`./bench perf`** = `run --perf all`, **`./bench all`** = `run` (anchor).
 
 ```bash
-# --- Performance ---
-# Quick smoke test (all-cores only, single iteration)
-./bench perf --dataset kodak --sample 3 --quick
+# Quick smoke test (2 quality points per impl, anchor timing, all-cores only)
+./bench run --dataset kodak --sample 3 --quick
 
-# Full KODAK timing sweep (24 images, cache-resident; both thread modes)
-./bench perf --dataset kodak
+# Full quality-first sweep + rigorous anchor timing (the default)
+./bench run --dataset kodak
 
-# Subset filters + memory
-./bench perf --dataset kodak --formats jpeg avif --mode decode
-./bench perf --dataset div2k --measure-memory
-# Override inner-loop iterations / warmup (default 10 / 2)
-./bench perf --dataset kodak --iterations 20 --warmup 3
+# Quality only, no rigorous timing (fastest iteration)
+./bench run --dataset kodak --perf off
 
-# --- Quality (rate-distortion) ---
-# Quick smoke test (2 quality points per encoder)
-./bench quality --dataset kodak --sample 3 --quick
+# Rigorous timing at EVERY operating point (most thorough; much longer)
+./bench run --dataset kodak --perf all
 
-# Full quality sweep (every declared quality point per encoder)
-./bench quality --dataset kodak
+# Fewer, evenly-sampled points; subset of formats; encoders only
+./bench run --dataset kodak --quality-steps 5 --formats jpeg jxl --mode encode
 
-# Fewer, evenly-sampled points per encoder (e.g. 5)
-./bench quality --dataset kodak --quality-steps 5 --formats jpeg jxl
+# Peak memory during the timing overlay; override inner-loop iters/warmup (default 10/2)
+./bench run --dataset div2k --measure-memory --iterations 20 --warmup 3
 
-# --- Both suites in one bundle ---
-# Runs perf + quality into a single results bundle with a self-contained report.html
-./bench all --dataset kodak
+# Backward-compatible aliases
+./bench quality --dataset kodak     # = run --perf off
+./bench perf --dataset kodak        # = run --perf all
+./bench all --dataset kodak         # = run (anchor)
 
 # --- Shared ---
 ./bench compile          # build vendored libs + all implementations + install iqa-cli
 ./bench clean            # remove build artifacts and results
 ```
 
-> **Runtime note:** the performance suite's two thread modes make a full run ~2× a single-mode run; use `--sample N`, `--formats`/`--mode`, or `--quick` for fast iteration. The quality suite's cost scales with quality points × images × encoders; `--quality-steps` and `--sample` cap it, and `--quick` collapses to 2 points.
+> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--sample`, `--formats`/`--mode`, and `--quick` all cap it. The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration.
 
 ### Cleanup
 
@@ -132,22 +135,22 @@ The suite is split into **two distinctly separate benchmarks**, each its own sub
 
 ### Results
 
-Every run writes a **bundle** to `./results/<timestamp>/` containing a `performance/` and/or `quality/` subfolder (both for `./bench all`), plus a top-level index and a self-contained report:
+Every run writes a **bundle** to `./results/<timestamp>/` containing a `quality/` subfolder (always) and a `performance/` subfolder (whenever `--perf` is not `off`), plus a top-level index and a self-contained report:
 
 ```
 results/<timestamp>/
-├── report.html        # self-contained, opens offline (perf charts + interactive quality)
-├── summary.md         # index linking the per-suite summaries
-├── manifest.json      # bundle metadata (which suites ran)
-├── performance/       # (perf / all) raw.json, summary.md, timing charts, memory.csv
-└── quality/           # (quality / all) metrics.json, summary.md (tables), manifest.json
+├── report.html        # self-contained, opens offline (interactive quality + timing overlay)
+├── summary.md         # index linking the per-pass summaries
+├── manifest.json      # bundle metadata (which passes ran)
+├── quality/           # always: metrics.json, summary.md (tables), manifest.json
+└── performance/       # when --perf != off: raw.json, summary.md, timing charts, memory.csv
 ```
 
-**`performance/`** — `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`), and `memory.csv` (with `--measure-memory`).
+**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, `ssim`, `butteraugli`, `metric_basis` (`"source"` for encoders, `"golden"` for decoders), `time_s` (single relative one-pass time, encode or decode), dimensions, the swept `quality_axis`/`quality_value`, and a `lossless` flag) is the raw data everything else is recomputed from; `summary.md` (BD-rate + Pareto best-of-format + lossless efficiency + **decoder fidelity & speed** + per-step metrics tables, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-impl `quality_sweeps`). The metric pass renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
 
-**`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, `ssim`, `butteraugli`, `encode_time_s` (single-pass relative encode time), dimensions, the swept `quality_axis`/`quality_value`, and a `lossless` flag) is the raw data everything else is recomputed from; `summary.md` (BD-rate table + Pareto best-of-format table + lossless compression-efficiency table + per-step metrics table, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-encoder `quality_sweeps`). The quality suite renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.
+**`performance/`** — the optional rigorous-timing overlay. `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`, with the `perf` mode), and `memory.csv` (with `--measure-memory`).
 
-**`report.html`** is a single offline-friendly file. Performance charts are embedded as base64 PNGs. The **quality** view is interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, and a sortable BD-rate table, plus a dedicated **lossless compression-efficiency** section (a bpp leaderboard + size-vs-effort chart) for the lossless encoders. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
+**`report.html`** is a single offline-friendly file, **quality-first**. The quality view is primary and interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, a sortable BD-rate table, a **lossless compression-efficiency** section (bpp leaderboard + size-vs-effort chart), and a **decoder fidelity & speed** section (decode time + PSNR vs the golden decoder). The rigorous-timing overlay's charts (embedded as base64 PNGs) follow below it as the secondary view. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
 
 ## Methodology
 
@@ -232,7 +235,7 @@ To ensure statistically significant results and eliminate "Cold Start" bias (OS 
 
 #### Binary Interface
 
-Every encoder/decoder implementation is compiled into a standalone binary implementing this uniform CLI. The orchestrator passes codec tunables as repeated `--param key=value` flags (the binary ignores keys it does not understand), sweeps `--threads` for the performance suite, and sets `--discard` for timing runs:
+Every encoder/decoder implementation is compiled into a standalone binary implementing this uniform CLI. The orchestrator passes codec tunables as repeated `--param key=value` flags (the binary ignores keys it does not understand), sweeps `--threads` for the rigorous-timing overlay, and sets `--discard` for timing runs:
 
 ```bash
 ./<binary> \
@@ -268,7 +271,7 @@ Memory is allocated and freed inside each iteration to simulate realistic per-re
 
 #### Image Quality Assessment
 
-The quality suite measures the fidelity of each encoded output relative to the source using the [`iqa`](https://crates.io/crates/iqa) crate (via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary), reporting **SSIMULACRA2** (perceptual; 100 = identical), **PSNR** (dB), **SSIM** (structural similarity; 1.0 = identical, higher is better) and **Butteraugli** (perceptual difference; 0 = identical, **lower** is better). Because `iqa` consumes raw pixels, each encoded output is first decoded back to PPM with the format's reference decoder, then compared to the source.
+The metric pass measures the fidelity of each output using the [`iqa`](https://crates.io/crates/iqa) crate (via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary), reporting **SSIMULACRA2** (perceptual; 100 = identical), **PSNR** (dB), **SSIM** (structural similarity; 1.0 = identical, higher is better) and **Butteraugli** (perceptual difference; 0 = identical, **lower** is better). Because `iqa` consumes raw pixels, an **encoder's** output is first decoded back to PPM with the format's reference decoder and then compared to the **source** (`metric_basis: "source"`). A **decoder** is instead scored against the format's **golden (reference) decoder** of the same input (`metric_basis: "golden"`), isolating decoder fidelity from the encoder loss both share — a bit-exact decoder scores ∞, an approximate decode path a finite PSNR.
 
 > [!IMPORTANT]
 > **IQA metrics are approximations, not ground truth.** Every image-quality metric encodes its own model of the human visual system, and each comes with assumptions and blind spots:
@@ -282,7 +285,7 @@ The quality suite measures the fidelity of each encoded output relative to the s
 
 #### Discard Checksum
 
-**Timing runs are always compute-only:** `./bench perf` invokes every binary with `--discard`, removing filesystem-write variance as a confound. (The quality suite runs each binary *without* `--discard` so it writes a real file to size and score.)
+**Rigorous timing is always compute-only:** the `--perf` overlay invokes every binary with `--discard`, removing filesystem-write variance as a confound. (The always-on metric pass runs each binary *without* `--discard` so it writes a real file to size and score.)
 
 When `--discard` is set, output bytes are fed through a CRC32 checksum to prevent compiler elimination of the encode/decode work. The C/C++ harness uses zlib's `crc32()` function; the Rust harness uses `crc32fast::Hasher`. Both libraries select hardware-accelerated implementations (e.g. SSE4.2, ARM CRC32) where available at compile time.
 
@@ -298,12 +301,12 @@ This establishes the I/O and measurement floor, allowing you to isolate codec ov
 
 ### Threading Model
 
-The **performance** suite automatically sweeps **both** threading configurations (they appear side-by-side in the timing charts):
+The **rigorous-timing overlay** (`--perf`) automatically sweeps **both** threading configurations (they appear side-by-side in the timing charts):
 
 1. **Single-threaded (`--threads 1`):** Measures per-core efficiency and is useful for comparing instruction-level optimization.
 2. **Parallel (`--threads 0`):** Uses all available cores. Measures real-world throughput for batch processing.
 
-The **quality** suite does not sweep threads — encoded bytes are thread-invariant, so it runs all-cores only. With `--pin-cores` (performance suite), binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
+The always-on **metric pass** does not sweep threads — output bytes are thread-invariant, so each task runs single-threaded under the parallel worker pool (one task per physical core). With `--pin-cores`, the timing overlay's binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
 
 ### Statistical Reporting
 

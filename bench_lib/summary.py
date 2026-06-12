@@ -17,6 +17,7 @@ from bench_lib.models import (
 from bench_lib.plotting import (
     compute_bd_rate_table,
     create_plots_from_parsed_results,
+    decoder_fidelity,
     lossless_efficiency,
     pareto_front_encoders,
 )
@@ -310,10 +311,49 @@ def generate_summary(
                     )
                 buffer.write("\n")
 
+            # Decoder fidelity & speed. Decoders have no rate-distortion tradeoff,
+            # so they are judged on decode speed and fidelity vs the format's golden
+            # (reference) decoder of the same input — isolating decoder behaviour
+            # from the encoder loss both share. ∞ = pixel-identical to golden; a
+            # finite worst-case PSNR flags an approximate decode path.
+            decoders = decoder_fidelity(metrics)
+            if decoders:
+                buffer.write("\n### Decoder fidelity & speed\n\n")
+                buffer.write(
+                    "Decoders are scored against the format's golden (reference) "
+                    "decoder of the same input, not the original source, isolating "
+                    "decoder fidelity from the encoder loss. Mean decode time is a "
+                    "single relative pass (see the performance overlay for isolated "
+                    "timing); fidelity ∞ = pixel-identical to golden, a finite "
+                    "worst-case PSNR flags an approximate decode path.\n\n"
+                )
+                buffer.write(
+                    "| Format | Decoder | Mean decode (ms) | Mean input bpp | Fidelity vs golden |\n"
+                )
+                buffer.write(
+                    "|--------|---------|------------------|----------------|--------------------|\n"
+                )
+                for impl in sorted(
+                    decoders,
+                    key=lambda i: (decoders[i]["format"], decoders[i]["mean_time_s"]),
+                ):
+                    d = decoders[impl]
+                    fidelity = (
+                        "∞ (bit-exact)"
+                        if d["bit_exact"]
+                        else f"{d['worst_psnr']:.2f} dB (worst)"
+                    )
+                    buffer.write(
+                        f"| {d['format'].upper()} | {impl} | "
+                        f"{d['mean_time_s'] * 1000:.2f} | {d['mean_bpp']:.3f} | "
+                        f"{fidelity} |\n"
+                    )
+                buffer.write("\n")
+
             # Metrics table
             buffer.write("\n## Metrics\n\n")
             buffer.write(
-                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | PSNR (dB) | SSIM | Butteraugli | Encode (s) | Status |\n"
+                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | PSNR (dB) | SSIM | Butteraugli | Time (s) | Status |\n"
             )
             buffer.write(
                 "|----------------|------|-------|----|--------|------------|-----------|-----|--------------|-----------|------|-------------|------------|--------|\n"
@@ -338,7 +378,7 @@ def generate_summary(
                 ssim_str = f"{ssim_val:.4f}" if ssim_val is not None else "NA"
                 ba_val = m.get("butteraugli")
                 ba_str = f"{ba_val:.3f}" if ba_val is not None else "NA"
-                enc_val = m.get("encode_time_s")
+                enc_val = m.get("time_s")
                 enc_str = f"{enc_val:.2f}" if enc_val else "N/A"
                 status = "✗ " + m["error"][:30] + "..." if m.get("error") else "✓"
                 buffer.write(

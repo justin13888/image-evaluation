@@ -13,21 +13,17 @@ import tyro
 from colorama import init
 
 from bench_lib.models import (
-    AllArgs,
     CliEntry,
     CleanArgs,
     CompileArgs,
-    PerfArgs,
-    QualityArgs,
+    RunArgs,
     SetupArgs,
 )
 from bench_lib.runner import (
-    run_all,
     run_clean,
     run_compile,
-    run_perf,
-    run_quality,
     run_setup,
+    run_sweep,
 )
 
 init(autoreset=True)
@@ -41,17 +37,13 @@ if __name__ == "__main__":
         elif isinstance(args, CompileArgs):
             run_compile(args)
 
-        elif isinstance(args, PerfArgs):
-            run_perf(args)
-
-        elif isinstance(args, QualityArgs):
-            run_quality(args)
-
-        elif isinstance(args, AllArgs):
-            run_all(args)
-
         elif isinstance(args, SetupArgs):
             run_setup(args)
+
+        # RunArgs and its backward-compatible aliases (quality/perf/all) are all
+        # RunArgs subclasses, so this single branch handles every sweep command.
+        elif isinstance(args, RunArgs):
+            run_sweep(args)
 
         else:
             print("Error: Unknown command")

@@ -16,7 +16,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set
 
 import humanize
 from colorama import Fore, Style
@@ -24,7 +24,6 @@ from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
 from bench_lib.models import (
-    AllArgs,
     DATASETS,
     FORMAT_EXT_MAP,
     IMPLEMENTATIONS,
@@ -44,10 +43,11 @@ from bench_lib.models import (
     ImageFormats,
     Implementation,
     LOSSLESS_LABEL,
-    PerfArgs,
+    PerfMode,
     PPMImageFormat,
-    QualityArgs,
+    RunArgs,
     SetupArgs,
+    TunableSchema,
     find_implementation_by_name,
     quality_label,
     schema_for,
@@ -224,148 +224,259 @@ def get_input_files(
     return input_files
 
 
-def build_bench_list(
-    type: BenchmarkType,
-    format: ImageFormat,
-    dataset: DatasetId,
-    threads: int,
-    args: PerfArgs,
-) -> BenchList:
-    """Construct performance-suite tasks for one (type, format, threads) cell.
-    Each implementation runs at its fixed performance preset
-    (``schema.perf_params()``), labelled ``perf``."""
-    from itertools import chain
+def _source_to_ppm(f: str) -> str:
+    """Return an 8-bit P6 PPM path for source `f`, generating it via ImageMagick
+    if `f` is not already a PPM. Mirrors the conversion in `get_input_files`
+    (forced 8-bit, since not every implementation handles 16-bit PPM)."""
+    if f.lower().endswith(".ppm"):
+        return f
+    base = os.path.splitext(f)[0]
+    ppm = f"{base}.ppm"
+    if not os.path.exists(ppm):
+        subprocess.run(
+            ["convert", f, "-depth", "8", ppm],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return ppm
 
-    # Construct list of implementations to run
-    # For each format, we get the null implementation + implementations that support that format, together filtered by type
-    implementations = chain(
-        (impl for impl in NULL_IMPLEMENTATIONS if impl.type == type),
-        (
+
+# Decode inputs are reference-encoded once per (dataset, format, operating point).
+DECODE_INPUTS_CACHE: Dict[
+    tuple[DatasetId, ImageFormats, str, Optional[int]],
+    Sequence[tuple[str, str]],
+] = {}
+
+
+def get_decode_inputs(
+    dataset_name: DatasetId,
+    format: ImageFormat,
+    label: str,
+    params: Dict[str, str],
+    limit: Optional[int] = None,
+) -> Sequence[tuple[str, str]]:
+    """Reference-encoded decode inputs for one operating point of the sweep.
+
+    For each (sampled) source image, encode it with `format`'s reference encoder
+    at `params` — the same quality/effort axis the encoder sweep uses — returning
+    (encoded_path, source_ppm_path) pairs. The encoded file is named with the
+    operating-point `label` so different quality levels never collide, and the
+    list is cached per (dataset, format, label, limit).
+
+    The decoder under test reads `encoded_path`; fidelity is scored against the
+    format's golden decoder of the same input (not against the source), so
+    `source_ppm_path` is returned only for reference/round-trip use."""
+    key = (dataset_name, format, label, limit)
+    if key in DECODE_INPUTS_CACHE:
+        return DECODE_INPUTS_CACHE[key]
+
+    dataset_files = get_dataset_files(dataset_name)
+    if limit is not None and limit < len(dataset_files):
+        # Same seed as get_input_files so decode sources track encode sources.
+        rnd = random.Random(f"{dataset_name}_{limit}")
+        dataset_files = rnd.sample(dataset_files, limit)
+
+    ref_name = REFERENCE_ENCODERS.get(format)
+    if not ref_name:
+        raise RuntimeError(f"No reference encoder defined for {format}")
+    ref_impl = find_implementation_by_name(ref_name)
+    if not ref_impl:
+        raise RuntimeError(f"Reference encoder {ref_name} not found")
+    if not os.path.exists(ref_impl.bin):
+        build_project(ref_impl)
+
+    ext = FORMAT_EXT_MAP[format]
+    inputs: list[tuple[str, str]] = []
+    for f in dataset_files:
+        ppm = _source_to_ppm(f)
+        base = os.path.splitext(f)[0]
+        target = f"{base}.{label}.{ext}"
+        if not os.path.exists(target):
+            print(f"Generating decode input {target} from {f}...")
+            cmd = [
+                ref_impl.bin,
+                "--input",
+                ppm,
+                "--output",
+                target,
+                "--iterations",
+                "1",
+                "--warmup",
+                "0",
+                "--threads",
+                "0",
+            ]
+            for k, v in sorted(params.items()):
+                cmd += ["--param", f"{k}={v}"]
+            subprocess.run(
+                cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
+        inputs.append((target, ppm))
+
+    DECODE_INPUTS_CACHE[key] = inputs
+    return inputs
+
+
+def _types_for_mode(mode: BenchmarkMode) -> list[BenchmarkType]:
+    """Implementation types selected by the ``--mode`` filter."""
+    if mode == BenchmarkMode.ENCODE:
+        return [BenchmarkType.ENCODE]
+    if mode == BenchmarkMode.DECODE:
+        return [BenchmarkType.DECODE]
+    return [BenchmarkType.ENCODE, BenchmarkType.DECODE]
+
+
+def _require_bin(impl: Implementation) -> None:
+    if not os.path.exists(impl.bin):
+        raise RuntimeError(f"Error: Binary not found: {impl.bin}")
+
+
+def _encoder_points(
+    schema: TunableSchema, steps: Optional[int]
+) -> list[tuple[Dict[str, str], str]]:
+    """Operating points ``(params, label)`` for one encoder.
+
+    Lossy → one point per swept quality value (rate-distortion). Lossless with an
+    effort knob → one point per swept effort value (size-vs-effort, issue #26).
+    Knob-less lossless → a single point. Knob-less lossy → no curve (skipped)."""
+    if schema.quality_axis is None:
+        if schema.lossless:
+            return [(schema.perf_params(), LOSSLESS_LABEL)]
+        return []
+    return [
+        (schema.quality_params(value), quality_label(schema.quality_axis, value))
+        for value in select_sweep(schema.quality_sweep, steps)
+    ]
+
+
+def build_sweep(format: ImageFormat, dataset: DatasetId, args: RunArgs) -> BenchList:
+    """Construct the unified operating-point sweep for one format.
+
+    Every task is built once with ``threads=1`` and ``discard_output=False`` so the
+    metric pass can run it a single time and score the written output; its
+    wall-clock is recorded as a relative time (issue #29). The optional
+    rigorous-timing overlay re-runs a selected subset under hyperfine across thread
+    modes (see ``_run_timing_overlay``). Per implementation:
+
+    - *lossy encoder* (a quality axis): one task per swept quality value — a
+      rate-distortion curve (issue #8);
+    - *lossless encoder* with an effort knob (PNG, lossless JXL): one task per
+      swept effort value — a size-vs-effort curve (issue #26);
+    - *lossless encoder* with no knob (spng, image-webp): a single point;
+    - *decoder*: one task per swept input encoding (the format's reference encoder
+      run at each quality level), so decode cost/fidelity trace input bitrate;
+    - *null*: a single timing-only point (no format to score), used only by the
+      rigorous-timing overlay.
+
+    The ``--mode`` filter restricts to encoders and/or decoders. Null baselines
+    are emitted for whichever direction(s) are selected.
+    """
+    types = _types_for_mode(args.mode)
+    steps = 2 if args.quick else args.quality_steps
+    benches: BenchList = []
+
+    def emit(
+        impl: Implementation,
+        params: Dict[str, str],
+        label: str,
+        input_file: str,
+        source_file: str,
+    ) -> None:
+        benches.append(
+            BenchmarkTask(
+                impl=impl,
+                params=params,
+                label=label,
+                input_path=input_file,
+                source_path=source_file,
+                # One pass writes the output so size + IQA can be scored; its
+                # wall-clock is the relative time (issue #29). The timing overlay
+                # clones these with discard + real iteration/thread counts.
+                iterations=1,
+                warmup=0,
+                # Single-threaded: the metric pass runs many tasks concurrently
+                # (one per physical core), so internal codec threads would only
+                # oversubscribe. Output is thread-invariant.
+                threads=1,
+                discard_output=False,
+                measure_memory=False,
+                pin_cores=False,
+            )
+        )
+
+    # --- Encoders: sweep the quality/effort axis (PPM in; scored vs source). ---
+    if BenchmarkType.ENCODE in types:
+        encoders = [
             impl
             for impl in IMPLEMENTATIONS
-            if impl.format == format and impl.type == type
-        ),
-    )
+            if impl.format == format and impl.type == BenchmarkType.ENCODE
+        ]
+        if encoders:
+            enc_inputs = get_input_files(dataset, PPMImageFormat.PPM, args.sample)
+            for impl in encoders:
+                _require_bin(impl)
+                for params, label in _encoder_points(schema_for(impl.name), steps):
+                    for input_file, source_file in enc_inputs:
+                        emit(impl, params, label, input_file, source_file)
 
-    # Construct bench list
-    benches: BenchList = []
-    for impl in implementations:
-        # Verify binary exists
-        if not os.path.exists(impl.bin):
-            raise RuntimeError(f"Error: Binary not found: {impl.bin}")
+    # --- Decoders: sweep the input-encoding axis (scored vs the golden decoder). ---
+    if BenchmarkType.DECODE in types:
+        _build_decoder_sweep(format, dataset, args, steps, emit)
 
-        # Determine correct input format
-        match impl.type:
-            case BenchmarkType.DECODE:
-                input_format = format
-            case BenchmarkType.ENCODE:
-                input_format = PPMImageFormat.PPM
-            case _:
-                raise ValueError(f"Unknown implementation type: {impl.type}")
-
-        # Fixed performance preset for this implementation (empty for decoders /
-        # null / knob-less encoders).
-        params = schema_for(impl.name).perf_params()
-
+    # --- Null: a single timing-only baseline per selected direction. ---
+    for impl in NULL_IMPLEMENTATIONS:
+        if impl.type not in types:
+            continue
+        _require_bin(impl)
+        input_format = (
+            PPMImageFormat.PPM if impl.type == BenchmarkType.ENCODE else format
+        )
         for input_file, source_file in get_input_files(
             dataset, input_format, args.sample
         ):
-            input_path = input_file
-
-            bench = BenchmarkTask(
-                impl=impl,
-                params=params,
-                label="perf",
-                input_path=input_path,
-                source_path=source_file,
-                iterations=args.iterations,
-                warmup=args.warmup,
-                threads=threads,
-                # Timing runs are always compute-only (issue #9): discarding the
-                # output removes filesystem-write variance as a confound. The
-                # metric-collection path overrides this to write a real file.
-                discard_output=True,
-                measure_memory=args.measure_memory,
-                pin_cores=args.pin_cores,
-            )
-            benches.append(bench)
+            emit(impl, {}, "perf", input_file, source_file)
 
     return benches
 
 
-def build_quality_bench_list(
+def _build_decoder_sweep(
     format: ImageFormat,
     dataset: DatasetId,
-    args: QualityArgs,
-) -> BenchList:
-    """Construct quality-suite tasks for one format. For each encoder:
+    args: RunArgs,
+    steps: Optional[int],
+    emit: Callable[[Implementation, Dict[str, str], str, str, str], None],
+) -> None:
+    """Emit decoder tasks across the same operating-point axis as the encoders.
 
-    - *lossy* (a quality axis): one task per swept quality value — a
-      rate-distortion curve (issue #8);
-    - *lossless* with an effort knob (PNG, lossless JXL): one task per swept
-      effort value — a size-vs-effort curve (issue #26);
-    - *lossless* with no knob (spng, image-webp): a single operating point.
-
-    No null/decoder tasks, no thread sweep (output is thread-invariant), and
-    outputs are written (not discarded) so size + IQA can be measured.
-
-    Each task is pinned to a single encode thread (`threads=1`): the suite runs
-    many tasks concurrently (one per physical core), so internal codec threading
-    would only oversubscribe the CPU. Output is thread-invariant, so this changes
-    scheduling, not results."""
-    benches: BenchList = []
-    encoders = [
+    Decoders take no params, so the *input* is what varies: for each operating
+    point of the format's reference encoder (the same quality/effort sweep
+    encoders trace), reference-encode the sources at that point and decode them.
+    Decode cost and fidelity (PSNR vs the golden decoder, scored later) thus trace
+    input bitrate. Knob-less reference encoders contribute a single point."""
+    decoders = [
         impl
         for impl in IMPLEMENTATIONS
-        if impl.format == format and impl.type == BenchmarkType.ENCODE
+        if impl.format == format and impl.type == BenchmarkType.DECODE
     ]
-    input_files = get_input_files(dataset, PPMImageFormat.PPM, args.sample)
+    if not decoders:
+        return
 
-    def emit(impl: Implementation, params: Dict[str, str], label: str) -> None:
-        """Append one task per input image for a single operating point."""
-        for input_file, source_file in input_files:
-            benches.append(
-                BenchmarkTask(
-                    impl=impl,
-                    params=params,
-                    label=label,
-                    input_path=input_file,
-                    source_path=source_file,
-                    # One pass writes the output; its wall-clock is recorded as a
-                    # relative encode time (issue #29), not rigorously timed.
-                    iterations=1,
-                    warmup=0,
-                    # Single-threaded: tasks run in parallel (one per physical
-                    # core), so internal codec threads would oversubscribe.
-                    threads=1,
-                    discard_output=False,
-                    measure_memory=False,
-                    pin_cores=False,
-                )
-            )
+    ref_name = REFERENCE_ENCODERS.get(format)
+    ref_impl = find_implementation_by_name(ref_name) if ref_name else None
+    if not ref_impl:
+        raise RuntimeError(f"No reference encoder defined for {format}")
 
-    for impl in encoders:
-        if not os.path.exists(impl.bin):
-            raise RuntimeError(f"Error: Binary not found: {impl.bin}")
+    points = _encoder_points(schema_for(ref_impl.name), steps)
+    if not points:
+        points = [(schema_for(ref_impl.name).perf_params(), "perf")]
 
-        schema = schema_for(impl.name)
-        if schema.quality_axis is None:
-            # No swept axis. A knob-less *lossless* encoder still contributes a
-            # single operating point at its preset; anything else (decoders, a
-            # lossy encoder with no axis) has no curve to trace and is skipped.
-            if schema.lossless:
-                emit(impl, schema.perf_params(), LOSSLESS_LABEL)
-            continue
-
-        steps = 2 if args.quick else args.quality_steps
-        for value in select_sweep(schema.quality_sweep, steps):
-            emit(
-                impl,
-                schema.quality_params(value),
-                quality_label(schema.quality_axis, value),
-            )
-
-    return benches
+    for params, label in points:
+        inputs = get_decode_inputs(dataset, format, label, params, args.sample)
+        for impl in decoders:
+            _require_bin(impl)
+            for input_file, source_file in inputs:
+                emit(impl, {}, label, input_file, source_file)
 
 
 def _task_metric_fields(task: BenchmarkTask) -> Dict[str, str]:
@@ -520,25 +631,40 @@ def _measure_one(
                 f"output file not found at: {output_path}"
             )
 
-        # 1. Get file size
+        # 1. File size. For an *encoder* the meaningful size is its encoded
+        # output; for a *decoder* it is the encoded *input* it consumed (the
+        # decoded PPM is raw and format-invariant), so bpp tracks input bitrate
+        # either way and decode curves plot against the same axis as encode curves.
+        size_path = (
+            output_path if task.impl.type == BenchmarkType.ENCODE else task.input_path
+        )
         try:
-            filesize = os.path.getsize(output_path)
+            filesize = os.path.getsize(size_path)
         except Exception:
             filesize = 0
 
-        # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM + Butteraugli,
-        # from the iqa crate). iqa consumes raw pixels, so an encoded output is
-        # first decoded to PPM with the format's reference decoder; decode tasks
-        # already produce a PPM. The reference is the original source.
+        # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM + Butteraugli, from
+        # the iqa crate, which consumes raw pixels):
+        #   - Encoders: decode the encoded output with the format's reference
+        #     decoder and score against the original source ("source" basis).
+        #   - Decoders: the output is already a PPM; score it against the *golden*
+        #     (reference) decoder's PPM for the same input ("golden" basis). This
+        #     isolates decoder fidelity from the encoder loss both share, so a
+        #     bit-exact decoder scores ∞ and only approximate paths show a finite
+        #     PSNR.
         if task.impl.type == BenchmarkType.ENCODE:
             distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
             temp_files.append(distorted_ppm)
             _decode_to_ppm(task, output_path, distorted_ppm, env=env)
+            reference_ppm = task.source_path
+            metric_basis = "source"
         else:
             distorted_ppm = output_path
-        score, psnr, ssim, butteraugli = _run_iqa(
-            task.source_path, distorted_ppm, env=env
-        )
+            reference_ppm = os.path.join(temp_dir, f"{identifier}_golden.ppm")
+            temp_files.append(reference_ppm)
+            _decode_to_ppm(task, task.input_path, reference_ppm, env=env)
+            metric_basis = "golden"
+        score, psnr, ssim, butteraugli = _run_iqa(reference_ppm, distorted_ppm, env=env)
 
         # 3. Get image dimensions from source file
         width, height, megapixels, bpp = 0, 0, 0.0, 0.0
@@ -572,6 +698,7 @@ def _measure_one(
             lang=task.impl.lang,
             build=task.impl.build,
             **_task_metric_fields(task),
+            metric_basis=metric_basis,
             input_path=task.input_path,
             source_path=task.source_path,
             filesize=filesize,
@@ -587,7 +714,7 @@ def _measure_one(
             height=height,
             megapixels=megapixels,
             bpp=bpp,
-            encode_time_s=elapsed_time,
+            time_s=elapsed_time,
         )
         return (metric, status)
     except Exception as e:
@@ -612,6 +739,9 @@ def _measure_one(
             lang=task.impl.lang,
             build=task.impl.build,
             **_task_metric_fields(task),
+            metric_basis=(
+                "source" if task.impl.type == BenchmarkType.ENCODE else "golden"
+            ),
             input_path=task.input_path,
             source_path=task.source_path,
             filesize=0,
@@ -627,10 +757,10 @@ def _measure_one(
             height=0,
             megapixels=0.0,
             bpp=0.0,
-            # The encode may have failed before/within the timed pass; the time is
+            # The run may have failed before/within the timed pass; the time is
             # meaningless for a failed row, so record 0.0 (also: elapsed_time may
             # be unbound if subprocess.run raised).
-            encode_time_s=0.0,
+            time_s=0.0,
         )
         return (metric, status)
     finally:
@@ -857,18 +987,162 @@ def _base_manifest() -> dict:
     }
 
 
-def _run_perf_suite(args: PerfArgs, result_dir: str):
-    """Performance suite body: hyperfine timing of encode + decode at each
-    implementation's fixed preset, swept across both threading modes. Timing is
-    always compute-only (--discard); no size/quality metrics are collected here
-    (that is the quality suite's job). Writes its artifacts into `result_dir`;
-    the caller handles building and bundle finalization."""
-    formats = args.formats
-    # Both threading modes; --quick collapses to all-cores only.
+def _resolve_jobs(jobs: Optional[int], task_count: int) -> int:
+    """Parallel scoring workers: physical cores by default (one single-threaded
+    task per core saturates the CPU without oversubscribing), capped at the task
+    count and overridable via --jobs. A non-positive --jobs falls back to the
+    physical-core default."""
+    requested = jobs if (jobs and jobs > 0) else get_physical_cores()
+    return max(1, min(requested, max(1, task_count)))
+
+
+def _anchor_label(impl_name: str, tasks: BenchList) -> str:
+    """The emitted operating-point label closest to this impl's perf preset.
+
+    Chosen from the labels actually emitted for the impl, so it stays valid when
+    ``--quality-steps`` / ``--quick`` subsample the sweep. Prefers an exact match
+    on the preset's quality-axis value, else the numerically nearest swept value;
+    falls back to the first label for single-point / null impls."""
+    labels = list(dict.fromkeys(t.label for t in tasks))
+    if not labels:
+        return ""
+    schema = schema_for(impl_name)
+    axis = schema.quality_axis
+    if axis is None or axis not in schema.perf_preset:
+        return labels[0]
+    target = schema.perf_preset[axis]
+    exact = quality_label(axis, target)
+    if exact in labels:
+        return exact
+    try:
+        target_f = float(target)
+    except ValueError:
+        return labels[0]
+    numeric: list[tuple[str, float]] = []
+    for t in tasks:
+        raw = t.params.get(axis)
+        try:
+            numeric.append((t.label, float(raw)))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+    if not numeric:
+        return labels[0]
+    return min(numeric, key=lambda lv: abs(lv[1] - target_f))[0]
+
+
+def _select_timing_tasks(tasks: BenchList, perf: PerfMode) -> BenchList:
+    """Subset of sweep tasks to time rigorously under hyperfine.
+
+    ``all`` → every operating point; ``anchor`` → per implementation, only the
+    point nearest its perf preset (all images at that point), reproducing the old
+    performance suite's single-preset coverage. Null baselines (a single point)
+    are always included."""
+    if perf == "all":
+        return list(tasks)
+    by_impl: Dict[str, BenchList] = {}
+    for t in tasks:
+        by_impl.setdefault(t.impl.name, []).append(t)
+    chosen: BenchList = []
+    for name, impl_tasks in by_impl.items():
+        anchor = _anchor_label(name, impl_tasks)
+        chosen.extend(t for t in impl_tasks if t.label == anchor)
+    return chosen
+
+
+def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[str]:
+    """Quality + relative-timing pass over every scorable task (null skipped).
+
+    Runs each task once (encoders: IQA vs source; decoders: PSNR vs the golden
+    decoder) and records its single-pass wall-clock as a relative time (issue
+    #29). Writes metrics.json, a manifest, and the per-pass summary.
+
+    Returns the names of any runs that failed (empty if all succeeded). On failure
+    the summary is skipped — the sweep has holes — and the caller aborts without
+    finalizing the bundle."""
+    print("=" * 70)
+    print("QUALITY SWEEP (metric pass)")
+    print("=" * 70)
+
+    metric_tasks = [t for t in tasks if t.impl.format is not None]
+    if not metric_tasks:
+        print("\nError: No scorable benchmarks to run!")
+        sys.exit(1)
+
+    # Record which quality-axis values each impl actually swept (for the
+    # reproducibility manifest and downstream rate-distortion plots).
+    sweeps: Dict[str, list[str]] = {}
+    for task in metric_tasks:
+        sweeps.setdefault(task.impl.name, [])
+        axis = schema_for(task.impl.name).quality_axis
+        value = task.params.get(axis, "") if axis else ""
+        if value and value not in sweeps[task.impl.name]:
+            sweeps[task.impl.name].append(value)
+
+    max_workers = _resolve_jobs(args.jobs, len(metric_tasks))
+
+    manifest = {
+        **_base_manifest(),
+        "benchmark_config": {
+            "suite": "quality",
+            "dataset": args.dataset,
+            "formats": args.formats,
+            "mode": args.mode,
+            "quality_steps": args.quality_steps,
+            "quality_sweeps": sweeps,
+            "quick": args.quick,
+            "jobs": max_workers,
+        },
+    }
+    with open(f"{result_dir}/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n✓ Manifest written to {result_dir}/manifest.json")
+    print(f"\n✓ {len(metric_tasks)} quality measurement(s) across the sweep\n")
+
+    metrics = generate_metrics(metric_tasks, result_dir, max_workers, args.keep_temp)
+    metrics_path = f"{result_dir}/metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"\n✓ Metrics saved to {metrics_path}")
+
+    failures = [m["name"] for m in metrics if m["error"] is not None]
+    if failures:
+        return failures
+
+    generate_summary(result_dir, None, metrics)
+    return []
+
+
+def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> None:
+    """Rigorous (hyperfine) timing overlay over the selected subset of the sweep.
+
+    Always compute-only (``--discard``): discarding output removes filesystem-write
+    variance as a confound (issue #9). ``--perf anchor`` times each impl's preset
+    point; ``--perf all`` times every operating point. Each selected task runs at
+    both threading modes (--quick collapses to all-cores). Writes raw.json, a
+    manifest, and the per-pass timing summary into `result_dir`."""
     thread_modes = [0] if args.quick else list(THREAD_MODES)
+    selected = _select_timing_tasks(tasks, args.perf)
+
+    # Clone each selected task per thread mode, baking in the real iteration/warmup
+    # counts and the discard policy so name() and cmd() reflect the timed run.
+    timing: BenchList = []
+    for task in selected:
+        for threads in thread_modes:
+            timing.append(
+                task.model_copy(
+                    update={
+                        "threads": threads,
+                        "iterations": args.iterations,
+                        "warmup": args.warmup,
+                        "discard_output": True,
+                        "measure_memory": args.measure_memory,
+                        "pin_cores": args.pin_cores,
+                    }
+                )
+            )
 
     print("=" * 70)
-    print("PERFORMANCE SUITE")
+    print("PERFORMANCE OVERLAY (rigorous timing)")
     print("=" * 70)
 
     manifest = {
@@ -876,9 +1150,9 @@ def _run_perf_suite(args: PerfArgs, result_dir: str):
         "benchmark_config": {
             "suite": "performance",
             "dataset": args.dataset,
-            "formats": formats,
+            "formats": args.formats,
             "mode": args.mode,
-            "operating_point": "perf-preset",
+            "perf": args.perf,
             "thread_modes": thread_modes,
             "discard_output": True,
             "iterations": args.iterations,
@@ -891,29 +1165,11 @@ def _run_perf_suite(args: PerfArgs, result_dir: str):
         json.dump(manifest, f, indent=2)
     print(f"\n✓ Manifest written to {result_dir}/manifest.json")
 
-    types_to_run = []
-    if args.mode in (BenchmarkMode.ENCODE, BenchmarkMode.BOTH):
-        types_to_run.append(BenchmarkType.ENCODE)
-    if args.mode in (BenchmarkMode.DECODE, BenchmarkMode.BOTH):
-        types_to_run.append(BenchmarkType.DECODE)
+    if not timing:
+        print("\nNo timing tasks selected; skipping rigorous timing.")
+        return
 
-    benches: BenchList = []
-    for bench_type in types_to_run:
-        for format in formats:
-            for threads in thread_modes:
-                benches += build_bench_list(
-                    bench_type, format, args.dataset, threads, args
-                )
-
-    if not benches:
-        print("\nError: No benchmarks to run!")
-        sys.exit(1)
-
-    print(f"\n✓ {len(benches)} timing benchmark(s) ready to run\n")
-    print("=" * 70)
-    print("RUNNING TIMING BENCHMARKS")
-    print("=" * 70)
-    print()
+    print(f"\n✓ {len(timing)} timing benchmark(s) ready to run\n")
 
     json_output = f"{result_dir}/raw.json"
     if not args.quick:
@@ -938,9 +1194,9 @@ def _run_perf_suite(args: PerfArgs, result_dir: str):
             "--export-json",
             json_output,
         ]
-    for task in benches:
+    for task in timing:
         hyperfine_cmd.extend(["--command-name", task.name()])
-    hyperfine_cmd.extend([task.cmd("/dev/null") for task in benches])
+    hyperfine_cmd.extend([task.cmd("/dev/null") for task in timing])
     if args.debug:
         hyperfine_cmd.append("--show-output")
 
@@ -954,101 +1210,55 @@ def _run_perf_suite(args: PerfArgs, result_dir: str):
         print(f"Test command: {' '.join(hyperfine_cmd)}")
         sys.exit(1)
 
-    # Timing-only summary (no IQA/size metrics in the performance suite).
     generate_summary(result_dir, json_output, None)
 
     if args.measure_memory:
         mem_commands = [
-            task.cmd("/dev/null", iterations=1, warmup=0) for task in benches
+            task.cmd("/dev/null", iterations=1, warmup=0) for task in timing
         ]
-        mem_names = [task.name() for task in benches]
+        mem_names = [task.name() for task in timing]
         measure_memory(result_dir, mem_commands, mem_names)
 
 
-def _run_quality_suite(args: QualityArgs, result_dir: str) -> list[str]:
-    """Quality suite body: sweep each lossy encoder's quality axis to trace a
-    rate-distortion curve (issue #8) and measure each lossless encoder's
-    compression efficiency (issue #26), recording file size + IQA (SSIMULACRA2,
-    PSNR, ...) per operating point, plus each point's single-pass wall-clock as a
-    relative encode time (issue #29). Encoders only; no warmup/repeats, no thread
-    sweep.
-    Writes its artifacts into `result_dir`; the caller handles building and
-    bundle finalization.
+def run_sweep(args: RunArgs) -> None:
+    """Run the unified sweep into a fresh bundle.
 
-    Returns the names of any runs that failed (empty if all succeeded). On
-    failure the per-suite summary is skipped — the sweep has holes, so the
-    caller must abort without finalizing the bundle."""
-    formats = args.formats
+    Always runs the metric pass (quality + a one-pass relative time for every
+    operating point). When ``--perf`` is not ``off``, layers a rigorous hyperfine
+    timing overlay on the selected subset (each impl's preset point for ``anchor``,
+    every point for ``all``) across both thread modes. Both halves cover the *same*
+    operating-point sweep, so quality and performance are reported together."""
+    if not args.skip_build:
+        build_projects(args.formats)
+    else:
+        print("Skipping build step (--skip-build)...")
 
-    print("=" * 70)
-    print("QUALITY SUITE")
-    print("=" * 70)
+    bundle = _new_result_dir()
 
-    benches: BenchList = []
-    for format in formats:
-        benches += build_quality_bench_list(format, args.dataset, args)
-
-    if not benches:
-        print("\nError: No quality benchmarks to run (no encoders selected)!")
+    tasks: BenchList = []
+    for fmt in args.formats:
+        tasks += build_sweep(fmt, args.dataset, args)
+    if not tasks:
+        print("\nError: No benchmarks to run!")
         sys.exit(1)
 
-    # Record which quality-axis values each encoder actually swept (for the
-    # reproducibility manifest and downstream rate-distortion plots).
-    sweeps: Dict[str, list[str]] = {}
-    for task in benches:
-        sweeps.setdefault(task.impl.name, [])
-        axis = schema_for(task.impl.name).quality_axis
-        value = task.params.get(axis, "") if axis else ""
-        if value and value not in sweeps[task.impl.name]:
-            sweeps[task.impl.name].append(value)
-
-    # Parallel encode workers: physical cores by default (one single-threaded
-    # encode per core saturates the CPU without oversubscribing), capped at the
-    # task count and overridable via --jobs. A non-positive --jobs falls back to
-    # the physical-core default.
-    max_workers = max(
-        1,
-        min(
-            args.jobs if (args.jobs and args.jobs > 0) else get_physical_cores(),
-            len(benches),
-        ),
-    )
-
-    manifest = {
-        **_base_manifest(),
-        "benchmark_config": {
-            "suite": "quality",
-            "dataset": args.dataset,
-            "formats": formats,
-            "quality_steps": args.quality_steps,
-            "quality_sweeps": sweeps,
-            "quick": args.quick,
-            "jobs": max_workers,
-        },
-    }
-    with open(f"{result_dir}/manifest.json", "w") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"\n✓ Manifest written to {result_dir}/manifest.json")
-    print(f"\n✓ {len(benches)} quality measurement(s) across the sweep\n")
-
-    metrics = generate_metrics(benches, result_dir, max_workers, args.keep_temp)
-    metrics_path = f"{result_dir}/metrics.json"
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"\n✓ Metrics saved to {metrics_path}")
-
-    # A failed run leaves a hole in the rate-distortion sweep, so the summary and
-    # report would be incomplete/misleading. Keep the raw metrics.json (error
-    # rows included for debugging) but skip report generation and signal failure
-    # to the caller, which aborts before finalizing the bundle.
-    failures = [m["name"] for m in metrics if m["error"] is not None]
+    # 1. Metric pass (always): quality + relative timing for every scorable task.
+    qual_dir = os.path.join(bundle, "quality")
+    os.makedirs(qual_dir, exist_ok=True)
+    failures = _run_metric_pass(args, tasks, qual_dir)
     if failures:
-        return failures
+        _abort_on_quality_failures(failures, bundle)
+    suites = ["quality"]
 
-    # IQA/size summary plus per-point relative encode times (issue #29); no
-    # rigorous timing in this suite.
-    generate_summary(result_dir, None, metrics)
-    return []
+    # 2. Rigorous timing overlay (optional, secondary).
+    if args.perf != "off":
+        perf_dir = os.path.join(bundle, "performance")
+        os.makedirs(perf_dir, exist_ok=True)
+        _run_timing_overlay(args, tasks, perf_dir)
+        suites.append("performance")
+
+    _finalize_bundle(bundle, suites)
+    _print_bundle(bundle, suites)
 
 
 def _finalize_bundle(bundle_dir: str, suites: list[str]):
@@ -1097,20 +1307,6 @@ def _print_bundle(bundle_dir: str, suites: list[str]):
     print()
 
 
-def run_perf(args: PerfArgs):
-    """Run the performance suite into a fresh bundle (performance/ subfolder)."""
-    if not args.skip_build:
-        build_projects(args.formats)
-    else:
-        print("Skipping build step (--skip-build)...")
-    bundle = _new_result_dir()
-    perf_dir = os.path.join(bundle, "performance")
-    os.makedirs(perf_dir, exist_ok=True)
-    _run_perf_suite(args, perf_dir)
-    _finalize_bundle(bundle, ["performance"])
-    _print_bundle(bundle, ["performance"])
-
-
 def _abort_on_quality_failures(failures: list[str], bundle: str):
     """Print which quality runs failed and exit non-zero. Called instead of
     finalizing the bundle when the rate-distortion sweep has holes."""
@@ -1127,67 +1323,6 @@ def _abort_on_quality_failures(failures: list[str], bundle: str):
         print(f"  {Fore.RED}✗{Style.RESET_ALL} {name}")
     print()
     sys.exit(1)
-
-
-def run_quality(args: QualityArgs):
-    """Run the quality suite into a fresh bundle (quality/ subfolder)."""
-    if not args.skip_build:
-        build_projects(args.formats)
-    else:
-        print("Skipping build step (--skip-build)...")
-    bundle = _new_result_dir()
-    qual_dir = os.path.join(bundle, "quality")
-    os.makedirs(qual_dir, exist_ok=True)
-    failures = _run_quality_suite(args, qual_dir)
-    if failures:
-        _abort_on_quality_failures(failures, bundle)
-    _finalize_bundle(bundle, ["quality"])
-    _print_bundle(bundle, ["quality"])
-
-
-def run_all(args: AllArgs):
-    """Run both suites into one bundle (performance/ + quality/ subfolders)."""
-    if not args.skip_build:
-        build_projects(args.formats)
-    else:
-        print("Skipping build step (--skip-build)...")
-    bundle = _new_result_dir()
-    perf_dir = os.path.join(bundle, "performance")
-    qual_dir = os.path.join(bundle, "quality")
-    os.makedirs(perf_dir, exist_ok=True)
-    os.makedirs(qual_dir, exist_ok=True)
-
-    # Suites skip their own build (done once above) via skip_build=True.
-    perf_args = PerfArgs(
-        formats=args.formats,
-        dataset=args.dataset,
-        mode=args.mode,
-        iterations=args.iterations,
-        warmup=args.warmup,
-        sample=args.sample,
-        pin_cores=args.pin_cores,
-        quick=args.quick,
-        measure_memory=args.measure_memory,
-        skip_build=True,
-        debug=args.debug,
-    )
-    quality_args = QualityArgs(
-        formats=args.formats,
-        dataset=args.dataset,
-        sample=args.sample,
-        quality_steps=args.quality_steps,
-        quick=args.quick,
-        jobs=args.jobs,
-        keep_temp=args.keep_temp,
-        skip_build=True,
-        debug=args.debug,
-    )
-    _run_perf_suite(perf_args, perf_dir)
-    failures = _run_quality_suite(quality_args, qual_dir)
-    if failures:
-        _abort_on_quality_failures(failures, bundle)
-    _finalize_bundle(bundle, ["performance", "quality"])
-    _print_bundle(bundle, ["performance", "quality"])
 
 
 def run_compile(args: CompileArgs):

@@ -27,6 +27,9 @@
   // Precomputed lossless compression-efficiency summary (issue #26):
   // { impl: {format, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
   var LOSSLESS = readJSON("quality-lossless") || {};
+  // Precomputed decoder fidelity/speed summary:
+  // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, points} }.
+  var DECODERS = readJSON("quality-decoders") || {};
 
   var METRIC_INFO = {
     ssimulacra2: { key: "ssimulacra2", name: "SSIMULACRA2", y: "SSIMULACRA2 (higher is better)" },
@@ -68,7 +71,7 @@
       var s = (steps[m.label] = steps[m.label] ||
         { bpp: 0, y: 0, n: 0, t: 0, label: m.label, q: m.quality_value });
       s.bpp += m.bpp; s.y += y; s.n += 1;
-      s.t += isNum(m.encode_time_s) ? m.encode_time_s : 0;
+      s.t += isNum(m.time_s) ? m.time_s : 0;
     });
     var out = {};
     Object.keys(byFmt).forEach(function (fmt) {
@@ -622,11 +625,48 @@
     host.appendChild(dl);
   }
 
+  // ---- decoder fidelity & speed -------------------------------------------
+
+  // Decoders carry no rate-distortion tradeoff: a faithful decoder matches the
+  // golden (reference) decoder bit-for-bit (PSNR vs golden = ∞), so this is a
+  // speed + fidelity leaderboard rather than a curve. Sorted by format then
+  // ascending mean decode time (fastest first).
+  function renderDecoders() {
+    var host = document.getElementById("q-decoders");
+    if (!host) return;
+    var impls = Object.keys(DECODERS);
+    if (!impls.length) {
+      host.innerHTML = '<p class="q-note">No decoders measured.</p>';
+      return;
+    }
+    impls.sort(function (a, b) {
+      var da = DECODERS[a], db = DECODERS[b];
+      if (da.format !== db.format) return da.format < db.format ? -1 : 1;
+      return da.mean_time_s - db.mean_time_s;
+    });
+    var html = '<table class="q-table"><thead><tr>' +
+      "<th>Format</th><th>Decoder</th><th>Mean decode</th>" +
+      "<th>Mean input bpp</th><th>Fidelity vs golden</th></tr></thead><tbody>";
+    impls.forEach(function (impl) {
+      var d = DECODERS[impl];
+      var fid = d.bit_exact
+        ? '<span class="good">∞ (bit-exact)</span>'
+        : '<span class="bad">' + d.worst_psnr.toFixed(2) + " dB (worst)</span>";
+      html += "<tr><td>" + esc(d.format.toUpperCase()) + "</td><td>" + esc(impl) +
+        '</td><td class="num">' + fmtTime(d.mean_time_s) +
+        '</td><td class="num">' + d.mean_bpp.toFixed(3) + "</td><td>" + fid +
+        "</td></tr>";
+    });
+    html += "</tbody></table>";
+    host.innerHTML = html;
+  }
+
   function init() {
     if (!document.getElementById("quality-app")) return;
     renderControls();
     renderAll();
     renderLossless();
+    renderDecoders();
     renderBdRate();
   }
 
