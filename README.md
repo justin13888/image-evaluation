@@ -429,6 +429,7 @@ We include modern formats and their most competitive implementations.
 | :------------- | :------- | :---------------------------- |
 | **libwebp**    | C        | Reference implementation      |
 | **image-webp** | Rust     | *Lossless-only (crate limitation) — no quality axis; contributes a single lossless operating point to the compression-efficiency view.* |
+| **zenwebp**    | Rust     | Pure-Rust WebP from [imazen/zenwebp](https://github.com/imazen/zenwebp). **AGPL-3.0.** Lossy VP8 (quality + method) and lossless VP8L (separate `zenwebp-lossless` series) encoders, plus a decoder. |
 
 ### AVIF
 
