@@ -205,8 +205,12 @@ inline RGBImage decode_ppm_rgb8(const std::string& input_path) {
          (data[pos] == ' ' || data[pos] == '\n' || data[pos] == '\r'))
     pos++;
   while (pos < buffer.size() && data[pos] >= '0' && data[pos] <= '9') pos++;
-  while (pos < buffer.size() &&
-         (data[pos] == ' ' || data[pos] == '\n' || data[pos] == '\r'))
+  // Exactly one whitespace character separates the maxval from the raster.
+  // Do NOT skip further: the first pixel byte may itself be a whitespace
+  // value (e.g. 0x0a/0x0d/0x20), which a greedy skip would wrongly consume.
+  if (pos < buffer.size() &&
+      (data[pos] == ' ' || data[pos] == '\n' || data[pos] == '\r' ||
+       data[pos] == '\t'))
     pos++;
 
   std::vector<uint8_t> rgb_data(
