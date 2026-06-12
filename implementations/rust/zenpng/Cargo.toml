@@ -1,0 +1,25 @@
+[package]
+name = "bench-zenpng"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-zenpng-encode"
+path = "src/encode.rs"
+
+[[bin]]
+name = "bench-zenpng-decode"
+path = "src/decode.rs"
+
+[dependencies]
+benchmark-harness = { path = "../../../harness/rust" }
+# Pure-Rust lossless PNG codec (AGPL-3.0). zopfli feature left off (Crush/Maniac/
+# Brag fall back to Intense) to keep encode times bounded for the sweep.
+zenpng = "0.1"
+# PixelBuffer -> Rgb8 conversion for the decode path.
+zenpixels-convert = { version = "0.2", features = ["imgref"] }
+enough = "0.4"
+imgref = "1"
+rgb = { version = "0.8", default-features = false, features = ["as-bytes"] }
+bytemuck = "1"
+anyhow = "1.0"

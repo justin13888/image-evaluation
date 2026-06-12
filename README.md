@@ -423,6 +423,7 @@ We include modern formats and their most competitive implementations.
 | **spng**       | C        | "Simple PNG", speed-optimized. *Encoder does not expose a compression-level control.* |
 | **png**        | Rust     | Standard `image-rs` crate                 |
 | **zune-png**   | Rust     | Highly optimized pure Rust implementation |
+| **zenpng**     | Rust     | Pure-Rust lossless codec from [imazen/zenpng](https://github.com/imazen/zenpng). **AGPL-3.0.** Encoder + decoder; swept over its 0–200 compression-effort axis (`zopfli` feature off, so the multi-minute high-effort presets are excluded from the sweep). |
 
 ### WEBP
 

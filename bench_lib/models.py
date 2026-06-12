@@ -365,6 +365,23 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.PNG,
     ),
+    # zenpng: pure-Rust lossless PNG codec (AGPL-3.0, imazen/zenpng).
+    Implementation(
+        name="zenpng-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenpng-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.PNG,
+    ),
+    Implementation(
+        name="zenpng-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenpng-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.PNG,
+    ),
     Implementation(
         name="libpng-decode",
         build="cpp",
@@ -628,6 +645,10 @@ _JXL_DISTANCE_SWEEP = [
 _PNG_ZLIB_SWEEP = [str(i) for i in range(10)]  # zlib level / effort 0-9
 _IMAGE_PNG_COMPRESSION_SWEEP = ["fast", "default", "best"]  # image crate preset
 _JXL_EFFORT_SWEEP = [str(i) for i in range(1, 10)]  # libjxl effort 1-9
+# zenpng effort 0-200; sweep the named-preset points of the standard pipeline
+# (None..Intense). 31+ needs the zopfli feature / runs minutes per MP, so it is
+# left out of the swept range (still reachable via --param effort=N).
+_ZENPNG_EFFORT_SWEEP = ["0", "1", "2", "7", "13", "17", "19", "22", "24"]
 
 
 def _jpeg_full_schema() -> "TunableSchema":
@@ -817,6 +838,24 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_axis="effort",
         quality_sweep=_PNG_ZLIB_SWEEP,
         perf_preset={"effort": "4"},
+        lossless=True,
+    ),
+    # zenpng: lossless; the swept axis is its 0-200 compression effort. Default 13
+    # is the `Balanced` preset. Filter selection is automatic (no knob).
+    "zenpng-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="effort",
+                kind="int",
+                default="13",
+                min=0,
+                max=200,
+                description="zenpng compression effort (0-200)",
+            )
+        ],
+        quality_axis="effort",
+        quality_sweep=_ZENPNG_EFFORT_SWEEP,
+        perf_preset={"effort": "13"},
         lossless=True,
     ),
     "libpng-encode": TunableSchema(
