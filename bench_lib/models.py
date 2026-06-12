@@ -482,6 +482,24 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.AVIF,
     ),
+    # zenavif: pure-Rust AVIF codec (AGPL-3.0, imazen/zenavif). Decode via
+    # rav1d-safe, encode via zenravif.
+    Implementation(
+        name="zenavif-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenavif-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.AVIF,
+    ),
+    Implementation(
+        name="zenavif-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenavif-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.AVIF,
+    ),
     Implementation(
         name="libavif-decode",
         build="cpp",
@@ -815,6 +833,23 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     ),
     "libavif-encode": _avif_schema(),
     "svt-av1-encode": _avif_schema(),
+    # zenavif 0.1.x exposes quality + speed (no public chroma-subsampling knob).
+    "zenavif-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="quality",
+                kind="int",
+                default="65",
+                min=1,
+                max=100,
+                description="AVIF quality 1-100 (mapped to AV1 quantizer)",
+            ),
+            Tunable(name="speed", kind="int", default="6", min=1, max=10),
+        ],
+        quality_axis="quality",
+        quality_sweep=_AVIF_QUALITY_SWEEP,
+        perf_preset={"quality": "65", "speed": "6"},
+    ),
     # --- JXL ---
     "libjxl-encode": TunableSchema(
         params=[

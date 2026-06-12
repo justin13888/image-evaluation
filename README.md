@@ -443,6 +443,7 @@ We include modern formats and their most competitive implementations.
 | **SVT-AV1**    | C        | Encoder via libavif (SVT-AV1 backend)     |
 | **rav1e**      | Rust     | Encoder. *Film grain synthesis not yet implemented (tracked as a TODO).* |
 | **rav1d**      | Rust     | Decoder (Rust port of dav1d). *Drop-in dav1d replacement; linked at binary level.* |
+| **zenavif**    | Rust     | Pure-Rust AVIF from [imazen/zenavif](https://github.com/imazen/zenavif) (decode via rav1d-safe, encode via zenravif). **AGPL-3.0.** Encoder (quality + speed) and decoder. *v0.1.x exposes no chroma-subsampling knob.* |
 
 ### JPEG XL
 

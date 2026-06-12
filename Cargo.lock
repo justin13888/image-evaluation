@@ -167,6 +167,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
+
+[[package]]
+name = "atomig"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd0f41f4bb89f5c6450325e283fb78c4a3d042181b54f3855ee2f872919f9863"
+dependencies = [
+ "atomig-macro",
+]
+
+[[package]]
+name = "atomig-macro"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49c98dba06b920588de7d63f6acc23f1e6a9fade5fd6198e564506334fb5a4f5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -318,6 +344,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-zenavif"
+version = "0.1.0"
+dependencies = [
+ "almost-enough",
+ "anyhow",
+ "benchmark-harness",
+ "bytemuck",
+ "imgref",
+ "rgb",
+ "zenavif",
+ "zenpixels-convert",
+]
+
+[[package]]
 name = "bench-zenjpeg"
 version = "0.1.0"
 dependencies = [
@@ -403,6 +443,15 @@ name = "bitflags"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
+
+[[package]]
+name = "bitreader"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "886559b1e163d56c765bc3a985febb4eee8009f625244511d8ee3c432e08c066"
+dependencies = [
+ "cfg-if",
+]
 
 [[package]]
 name = "bitstream-io"
@@ -716,6 +765,12 @@ dependencies = [
  "smallvec",
  "zune-inflate",
 ]
+
+[[package]]
+name = "fallible_collections"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dab93c7205280c4785c44517fe84d99751b81f6deb8450cb196da6be88e332bb"
 
 [[package]]
 name = "fax"
@@ -1297,6 +1352,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
+name = "leb128"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cc46bac87ef8093eed6f272babb833b6443374399985ac8ed28471ee0918545"
+
+[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1383,10 +1444,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
-name = "log"
-version = "0.4.28"
+name = "lock_api"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
+name = "log"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "loop9"
@@ -1561,6 +1631,29 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "smallvec",
+ "windows-link",
+]
 
 [[package]]
 name = "paste"
@@ -1742,6 +1835,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "rav1d-disjoint-mut"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d5f921332331631dd8716a93d81aef9ac21245da74af62bc14000a4fd7fdbfd"
+dependencies = [
+ "aligned",
+ "aligned-vec",
+ "zerocopy",
+]
+
+[[package]]
+name = "rav1d-safe"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "717c3ef9a98101f3d2e33c4a8a4d1fd8b4fb0d39fa67a838e3308386ad9e7a1a"
+dependencies = [
+ "aligned",
+ "archmage",
+ "assert_matches",
+ "atomig",
+ "bitflags",
+ "cc",
+ "cfg-if",
+ "nasm-rs",
+ "parking_lot",
+ "paste",
+ "rav1d-disjoint-mut",
+ "raw-cpuid",
+ "safe_unaligned_simd",
+ "strum",
+ "to_method",
+ "zerocopy",
+]
+
+[[package]]
 name = "rav1e"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1804,6 +1932,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "rayon"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1821,6 +1958,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "redox_syscall"
+version = "0.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]
@@ -1871,6 +2017,12 @@ name = "scan_fmt"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b53b0a5db882a8e2fdaae0a43f7b39e7e9082389e978398bdf223a55b581248"
+
+[[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "serde"
@@ -1959,6 +2111,27 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "syn"
@@ -2070,6 +2243,12 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "to_method"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c4ceeeca15c8384bbc3e011dbd8fccb7f068a440b752b7d9b32ceb0ca0e2e8"
 
 [[package]]
 name = "tracing"
@@ -2451,6 +2630,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenavif"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d998e2cd26b3f82d0cf7fd5f36b3d81dd07184b90c2f53328df05fdcaabf6cb"
+dependencies = [
+ "almost-enough",
+ "archmage",
+ "bytemuck",
+ "enough",
+ "imgref",
+ "linear-srgb",
+ "log",
+ "magetypes",
+ "rav1d-safe",
+ "rgb",
+ "safe_unaligned_simd",
+ "thiserror 2.0.18",
+ "whereat",
+ "yuv",
+ "zenavif-parse",
+ "zenpixels",
+ "zenpixels-convert",
+ "zenravif",
+]
+
+[[package]]
+name = "zenavif-parse"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35ea3a5640719078e3d91e5feab60dd5d7cff3c34bf5c666925044745c58569d"
+dependencies = [
+ "arrayvec",
+ "bitreader",
+ "byteorder",
+ "enough",
+ "fallible_collections",
+ "leb128",
+ "log",
+ "zencodec",
+]
+
+[[package]]
+name = "zenavif-serialize"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbc63468f1ad230080baa8f87b0bf1b6aad9987f85e533566337181e0a5349c6"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "zencodec"
 version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2566,6 +2796,54 @@ dependencies = [
  "num-traits",
  "rgb",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "zenrav1e"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c2f798defdace5a2d991e4f679697768cf256a3cef130bfa2d84702cebf3a76"
+dependencies = [
+ "aligned-vec",
+ "arbitrary",
+ "arg_enum_proc_macro",
+ "arrayvec",
+ "av1-grain",
+ "bitstream-io",
+ "built",
+ "cfg-if",
+ "enough",
+ "interpolate_name",
+ "itertools 0.14.0",
+ "libfuzzer-sys",
+ "log",
+ "maybe-rayon",
+ "noop_proc_macro",
+ "num-derive",
+ "num-traits",
+ "pastey",
+ "profiling",
+ "rand",
+ "rand_chacha",
+ "simd_helpers",
+ "thiserror 2.0.18",
+ "v_frame",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "zenravif"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51edf23ff0690e4a7c3c7df67ee2143709f9bf33ecb8785cfffa33bba95ac314"
+dependencies = [
+ "almost-enough",
+ "imgref",
+ "loop9",
+ "quick-error",
+ "rgb",
+ "zenavif-serialize",
+ "zenrav1e",
 ]
 
 [[package]]
