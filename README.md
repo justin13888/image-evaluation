@@ -464,6 +464,10 @@ We include modern formats and their most competitive implementations.
 
 6. **IQA metrics are approximations.** SSIMULACRA2, PSNR, SSIM and Butteraugli are automated estimators of perceived quality, each with its own assumptions and blind spots (see [Image Quality Assessment](#image-quality-assessment)). They are a reproducible guide for narrowing options, **not** a replacement for a controlled human subjective study (e.g. MOS) when determining the genuinely best-looking option.
 
+7. **imazen "zen" implementations — AGPL + integration caveats** *(as of 2026-06-11)*. The `zen*` implementations ([zenjpeg](https://github.com/imazen/zenjpeg), [zenpng](https://github.com/imazen/zenpng), [zenwebp](https://github.com/imazen/zenwebp), [zenavif](https://github.com/imazen/zenavif), [zenjxl](https://github.com/imazen/zenjxl)) are **AGPL-3.0** ([issue #34](https://github.com/justin13888/image-implementation-benchmark/issues/34)). The harness and repository remain MIT-licensed, but any benchmark binary that links a `zen*` library is an AGPL-derived work, so redistributing built binaries must honour the AGPL. Two integration caveats apply as of this date — see [`docs/zen-integration.md`](docs/zen-integration.md) for the live status:
+   - **zenjxl is blocked** and not yet built: `zenjxl 0.2.1` requires `jxl-encoder ^0.3.2`, which is not published to crates.io (max published is 0.3.1), so the workspace cannot resolve it. Re-check once `jxl-encoder 0.3.2` is released.
+   - **zenavif chroma subsampling is not exposed**: the latest published `zenavif` (0.1.6) offers only `quality` + `speed` knobs; 4:2:0/4:4:4 selection was added upstream after 0.1.6 and is omitted here until a release exposes it.
+
 ## Contributing
 
 Contributions are welcome!
