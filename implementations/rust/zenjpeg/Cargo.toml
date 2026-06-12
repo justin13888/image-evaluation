@@ -1,0 +1,19 @@
+[package]
+name = "bench-zenjpeg"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-zenjpeg-encode"
+path = "src/encode.rs"
+
+[[bin]]
+name = "bench-zenjpeg-decode"
+path = "src/decode.rs"
+
+[dependencies]
+benchmark-harness = { path = "../../../harness/rust" }
+# Pure-Rust JPEG codec ported from jpegli (AGPL-3.0). The `decoder` feature is
+# non-default and enables the prerelease `zenjpeg::decoder` module.
+zenjpeg = { version = "0.8", features = ["decoder"] }
+anyhow = "1.0"

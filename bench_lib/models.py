@@ -275,6 +275,23 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.JPEG,
     ),
+    # zenjpeg: pure-Rust jpegli port (AGPL-3.0, imazen/zenjpeg).
+    Implementation(
+        name="zenjpeg-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjpeg-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.JPEG,
+    ),
+    Implementation(
+        name="zenjpeg-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjpeg-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.JPEG,
+    ),
     Implementation(
         name="libjpeg-turbo-decode",
         build="cpp",
@@ -688,6 +705,9 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_JPEG_QUALITY_SWEEP,
         perf_preset={"quality": "80"},
     ),
+    # zenjpeg exposes quality + progressive + chroma subsampling, like the other
+    # full-featured JPEG encoders.
+    "zenjpeg-encode": _jpeg_full_schema(),
     # --- WEBP ---
     "libwebp-encode": TunableSchema(
         params=[
