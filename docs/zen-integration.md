@@ -1,9 +1,14 @@
 # imazen "zen" codec integration (issue #34)
 
 Tracking branch for integrating imazen's five AGPL-3.0 pure-Rust image codecs so they
-can be benchmarked against the golden (reference C) implementations. Each library lands
-as its own PR targeting this branch; this branch is the accumulator and the source of
-the draft PR to `master`.
+can be benchmarked against the golden (reference C) implementations. Each library was
+first developed on its own branch/PR; the buildable ones are now consolidated here.
+
+**Status (2026-06-11):** the four buildable libraries — **zenjpeg, zenpng, zenwebp,
+zenavif** (9 implementations total) — are merged into this branch; the full Rust
+workspace builds and every encode/decode round-trip passes (PNG and lossless-WebP
+verified byte-exact). **zenjxl is not merged** — it is blocked (see below) and remains
+the draft PR #40 against this branch, to be merged once it can resolve.
 
 ## Libraries & sub-PRs
 
