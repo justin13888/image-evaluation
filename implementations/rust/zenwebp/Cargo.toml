@@ -1,0 +1,22 @@
+[package]
+name = "bench-zenwebp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-zenwebp-encode"
+path = "src/encode.rs"
+
+[[bin]]
+name = "bench-zenwebp-lossless-encode"
+path = "src/encode_lossless.rs"
+
+[[bin]]
+name = "bench-zenwebp-decode"
+path = "src/decode.rs"
+
+[dependencies]
+benchmark-harness = { path = "../../../harness/rust" }
+# Pure-Rust WebP codec (lossy VP8 + lossless VP8L), AGPL-3.0.
+zenwebp = "0.4"
+anyhow = "1.0"

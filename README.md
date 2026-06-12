@@ -413,6 +413,7 @@ We include modern formats and their most competitive implementations.
 | **zune-jpeg**     | Rust     | Pure-Rust JPEG decoder used in [zune-image](https://github.com/etemesi254/zune-image)                                       |
 | **jpeg-encoder**  | Rust     | Pure-Rust JPEG encoder used in [zune-image](https://github.com/etemesi254/zune-image). AVX2 (SIMD) feature flag is enabled. |
 | **image-jpeg**    | Rust     | JPEG encoder from the `image` crate (`image::codecs::jpeg::JpegEncoder`). Encoder-only; no progressive or subsampling control. |
+| **zenjpeg**       | Rust     | Pure-Rust [jpegli](https://github.com/libjxl/libjxl/tree/main/lib/jpegli) port from [imazen/zenjpeg](https://github.com/imazen/zenjpeg). **AGPL-3.0.** Encoder (quality/progressive/subsampling) and decoder (decoder is prerelease). |
 
 ### PNG
 
@@ -422,6 +423,7 @@ We include modern formats and their most competitive implementations.
 | **spng**       | C        | "Simple PNG", speed-optimized. *Encoder does not expose a compression-level control.* |
 | **png**        | Rust     | Standard `image-rs` crate                 |
 | **zune-png**   | Rust     | Highly optimized pure Rust implementation |
+| **zenpng**     | Rust     | Pure-Rust lossless codec from [imazen/zenpng](https://github.com/imazen/zenpng). **AGPL-3.0.** Encoder + decoder; swept over its 0–200 compression-effort axis (`zopfli` feature off, so the multi-minute high-effort presets are excluded from the sweep). |
 
 ### WEBP
 
@@ -429,6 +431,7 @@ We include modern formats and their most competitive implementations.
 | :------------- | :------- | :---------------------------- |
 | **libwebp**    | C        | Reference implementation      |
 | **image-webp** | Rust     | *Lossless-only (crate limitation) — no quality axis; contributes a single lossless operating point to the compression-efficiency view.* |
+| **zenwebp**    | Rust     | Pure-Rust WebP from [imazen/zenwebp](https://github.com/imazen/zenwebp). **AGPL-3.0.** Lossy VP8 (quality + method) and lossless VP8L (separate `zenwebp-lossless` series) encoders, plus a decoder. |
 
 ### AVIF
 
@@ -440,6 +443,7 @@ We include modern formats and their most competitive implementations.
 | **SVT-AV1**    | C        | Encoder via libavif (SVT-AV1 backend)     |
 | **rav1e**      | Rust     | Encoder. *Film grain synthesis not yet implemented (tracked as a TODO).* |
 | **rav1d**      | Rust     | Decoder (Rust port of dav1d). *Drop-in dav1d replacement; linked at binary level.* |
+| **zenavif**    | Rust     | Pure-Rust AVIF from [imazen/zenavif](https://github.com/imazen/zenavif) (decode via rav1d-safe, encode via zenravif). **AGPL-3.0.** Encoder (quality + speed) and decoder. *v0.1.x exposes no chroma-subsampling knob.* |
 
 ### JPEG XL
 
@@ -463,6 +467,10 @@ We include modern formats and their most competitive implementations.
 5. **8-bit only pipeline.** All intermediate PPM files are normalized to 8-bit depth (max value 255). 16-bit images are not tested as they increase complexity of pipeline and do not provide meaningful extra data points.
 
 6. **IQA metrics are approximations.** SSIMULACRA2, PSNR, SSIM and Butteraugli are automated estimators of perceived quality, each with its own assumptions and blind spots (see [Image Quality Assessment](#image-quality-assessment)). They are a reproducible guide for narrowing options, **not** a replacement for a controlled human subjective study (e.g. MOS) when determining the genuinely best-looking option.
+
+7. **imazen "zen" implementations — AGPL + integration caveats** *(as of 2026-06-11)*. The `zen*` implementations ([zenjpeg](https://github.com/imazen/zenjpeg), [zenpng](https://github.com/imazen/zenpng), [zenwebp](https://github.com/imazen/zenwebp), [zenavif](https://github.com/imazen/zenavif), [zenjxl](https://github.com/imazen/zenjxl)) are **AGPL-3.0** ([issue #34](https://github.com/justin13888/image-implementation-benchmark/issues/34)). The harness and repository remain MIT-licensed, but any benchmark binary that links a `zen*` library is an AGPL-derived work, so redistributing built binaries must honour the AGPL. Two integration caveats apply as of this date — see [`docs/zen-integration.md`](docs/zen-integration.md) for the live status:
+   - **zenjxl is blocked** and not yet built: `zenjxl 0.2.1` requires `jxl-encoder ^0.3.2`, which is not published to crates.io (max published is 0.3.1), so the workspace cannot resolve it. Re-check once `jxl-encoder 0.3.2` is released.
+   - **zenavif chroma subsampling is not exposed**: the latest published `zenavif` (0.1.6) offers only `quality` + `speed` knobs; 4:2:0/4:4:4 selection was added upstream after 0.1.6 and is omitted here until a release exposes it.
 
 ## Contributing
 

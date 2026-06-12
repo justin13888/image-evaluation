@@ -275,6 +275,23 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.JPEG,
     ),
+    # zenjpeg: pure-Rust jpegli port (AGPL-3.0, imazen/zenjpeg).
+    Implementation(
+        name="zenjpeg-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjpeg-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.JPEG,
+    ),
+    Implementation(
+        name="zenjpeg-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenjpeg-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.JPEG,
+    ),
     Implementation(
         name="libjpeg-turbo-decode",
         build="cpp",
@@ -348,6 +365,23 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.PNG,
     ),
+    # zenpng: pure-Rust lossless PNG codec (AGPL-3.0, imazen/zenpng).
+    Implementation(
+        name="zenpng-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenpng-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.PNG,
+    ),
+    Implementation(
+        name="zenpng-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenpng-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.PNG,
+    ),
     Implementation(
         name="libpng-decode",
         build="cpp",
@@ -397,6 +431,32 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.WEBP,
     ),
+    # zenwebp: pure-Rust WebP codec (AGPL-3.0, imazen/zenwebp). Lossy VP8 +
+    # lossless VP8L as separate encode series, plus a decoder.
+    Implementation(
+        name="zenwebp-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenwebp-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.WEBP,
+    ),
+    Implementation(
+        name="zenwebp-lossless-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenwebp-lossless-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.WEBP,
+    ),
+    Implementation(
+        name="zenwebp-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenwebp-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.WEBP,
+    ),
     Implementation(
         name="libwebp-decode",
         build="cpp",
@@ -420,6 +480,24 @@ IMPLEMENTATIONS: list[Implementation] = [
         lang="rust",
         bin="target/release/bench-rav1e-encode",
         type=BenchmarkType.ENCODE,
+        format=ImageFormat.AVIF,
+    ),
+    # zenavif: pure-Rust AVIF codec (AGPL-3.0, imazen/zenavif). Decode via
+    # rav1d-safe, encode via zenravif.
+    Implementation(
+        name="zenavif-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenavif-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.AVIF,
+    ),
+    Implementation(
+        name="zenavif-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenavif-decode",
+        type=BenchmarkType.DECODE,
         format=ImageFormat.AVIF,
     ),
     Implementation(
@@ -581,6 +659,9 @@ THREAD_MODES: list[int] = [1, 0]
 # Shared quality-axis sweeps (ordered low-quality -> high-quality).
 _JPEG_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "85", "90", "95"]
 _WEBP_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "90", "95"]
+# WebP encoder effort/speed method (0=fast/larger .. 6=slow/smaller). Used as the
+# effort axis for lossless VP8L.
+_WEBP_METHOD_SWEEP = ["0", "1", "2", "3", "4", "5", "6"]
 _AVIF_QUALITY_SWEEP = ["20", "30", "40", "50", "60", "70", "80", "90"]
 # JXL distance: higher distance = lower quality. Full *lossy* range from very low
 # quality (15.0) down to near-lossless (0.1). Dense near the high-quality end
@@ -611,6 +692,10 @@ _JXL_DISTANCE_SWEEP = [
 _PNG_ZLIB_SWEEP = [str(i) for i in range(10)]  # zlib level / effort 0-9
 _IMAGE_PNG_COMPRESSION_SWEEP = ["fast", "default", "best"]  # image crate preset
 _JXL_EFFORT_SWEEP = [str(i) for i in range(1, 10)]  # libjxl effort 1-9
+# zenpng effort 0-200; sweep the named-preset points of the standard pipeline
+# (None..Intense). 31+ needs the zopfli feature / runs minutes per MP, so it is
+# left out of the swept range (still reachable via --param effort=N).
+_ZENPNG_EFFORT_SWEEP = ["0", "1", "2", "7", "13", "17", "19", "22", "24"]
 
 
 def _jpeg_full_schema() -> "TunableSchema":
@@ -688,6 +773,9 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_JPEG_QUALITY_SWEEP,
         perf_preset={"quality": "80"},
     ),
+    # zenjpeg exposes quality + progressive + chroma subsampling, like the other
+    # full-featured JPEG encoders.
+    "zenjpeg-encode": _jpeg_full_schema(),
     # --- WEBP ---
     "libwebp-encode": TunableSchema(
         params=[
@@ -703,6 +791,28 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     # knob, so it has no rate-distortion curve. Flagged lossless (issue #26) so it
     # contributes one operating point to the lossless compression-efficiency view.
     "image-webp-encode": TunableSchema(lossless=True),
+    # zenwebp lossy VP8: quality (0-100) + speed/quality method (0-6).
+    "zenwebp-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="float", default="75", min=0, max=100),
+            Tunable(name="method", kind="int", default="4", min=0, max=6),
+        ],
+        quality_axis="quality",
+        quality_sweep=_WEBP_QUALITY_SWEEP,
+        perf_preset={"quality": "75", "method": "4"},
+    ),
+    # zenwebp lossless VP8L: pixel-identical; quality is pinned high (max entropy
+    # reduction) and the swept axis is the encoder `method` (effort).
+    "zenwebp-lossless-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="float", default="100", min=0, max=100),
+            Tunable(name="method", kind="int", default="4", min=0, max=6),
+        ],
+        quality_axis="method",
+        quality_sweep=_WEBP_METHOD_SWEEP,
+        perf_preset={"quality": "100", "method": "4"},
+        lossless=True,
+    ),
     # --- AVIF ---
     "rav1e-encode": TunableSchema(
         params=[
@@ -723,6 +833,23 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     ),
     "libavif-encode": _avif_schema(),
     "svt-av1-encode": _avif_schema(),
+    # zenavif 0.1.x exposes quality + speed (no public chroma-subsampling knob).
+    "zenavif-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="quality",
+                kind="int",
+                default="65",
+                min=1,
+                max=100,
+                description="AVIF quality 1-100 (mapped to AV1 quantizer)",
+            ),
+            Tunable(name="speed", kind="int", default="6", min=1, max=10),
+        ],
+        quality_axis="quality",
+        quality_sweep=_AVIF_QUALITY_SWEEP,
+        perf_preset={"quality": "65", "speed": "6"},
+    ),
     # --- JXL ---
     "libjxl-encode": TunableSchema(
         params=[
@@ -797,6 +924,24 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_axis="effort",
         quality_sweep=_PNG_ZLIB_SWEEP,
         perf_preset={"effort": "4"},
+        lossless=True,
+    ),
+    # zenpng: lossless; the swept axis is its 0-200 compression effort. Default 13
+    # is the `Balanced` preset. Filter selection is automatic (no knob).
+    "zenpng-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="effort",
+                kind="int",
+                default="13",
+                min=0,
+                max=200,
+                description="zenpng compression effort (0-200)",
+            )
+        ],
+        quality_axis="effort",
+        quality_sweep=_ZENPNG_EFFORT_SWEEP,
+        perf_preset={"effort": "13"},
         lossless=True,
     ),
     "libpng-encode": TunableSchema(
