@@ -413,6 +413,7 @@ We include modern formats and their most competitive implementations.
 | **zune-jpeg**     | Rust     | Pure-Rust JPEG decoder used in [zune-image](https://github.com/etemesi254/zune-image)                                       |
 | **jpeg-encoder**  | Rust     | Pure-Rust JPEG encoder used in [zune-image](https://github.com/etemesi254/zune-image). AVX2 (SIMD) feature flag is enabled. |
 | **image-jpeg**    | Rust     | JPEG encoder from the `image` crate (`image::codecs::jpeg::JpegEncoder`). Encoder-only; no progressive or subsampling control. |
+| **zenjpeg**       | Rust     | Pure-Rust [jpegli](https://github.com/libjxl/libjxl/tree/main/lib/jpegli) port from [imazen/zenjpeg](https://github.com/imazen/zenjpeg). **AGPL-3.0.** Encoder (quality/progressive/subsampling) and decoder (decoder is prerelease). |
 
 ### PNG
 
