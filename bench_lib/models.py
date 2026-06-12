@@ -431,6 +431,32 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.WEBP,
     ),
+    # zenwebp: pure-Rust WebP codec (AGPL-3.0, imazen/zenwebp). Lossy VP8 +
+    # lossless VP8L as separate encode series, plus a decoder.
+    Implementation(
+        name="zenwebp-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenwebp-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.WEBP,
+    ),
+    Implementation(
+        name="zenwebp-lossless-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenwebp-lossless-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.WEBP,
+    ),
+    Implementation(
+        name="zenwebp-decode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-zenwebp-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.WEBP,
+    ),
     Implementation(
         name="libwebp-decode",
         build="cpp",
@@ -615,6 +641,9 @@ THREAD_MODES: list[int] = [1, 0]
 # Shared quality-axis sweeps (ordered low-quality -> high-quality).
 _JPEG_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "85", "90", "95"]
 _WEBP_QUALITY_SWEEP = ["10", "20", "30", "40", "50", "60", "70", "80", "90", "95"]
+# WebP encoder effort/speed method (0=fast/larger .. 6=slow/smaller). Used as the
+# effort axis for lossless VP8L.
+_WEBP_METHOD_SWEEP = ["0", "1", "2", "3", "4", "5", "6"]
 _AVIF_QUALITY_SWEEP = ["20", "30", "40", "50", "60", "70", "80", "90"]
 # JXL distance: higher distance = lower quality. Full *lossy* range from very low
 # quality (15.0) down to near-lossless (0.1). Dense near the high-quality end
@@ -744,6 +773,28 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     # knob, so it has no rate-distortion curve. Flagged lossless (issue #26) so it
     # contributes one operating point to the lossless compression-efficiency view.
     "image-webp-encode": TunableSchema(lossless=True),
+    # zenwebp lossy VP8: quality (0-100) + speed/quality method (0-6).
+    "zenwebp-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="float", default="75", min=0, max=100),
+            Tunable(name="method", kind="int", default="4", min=0, max=6),
+        ],
+        quality_axis="quality",
+        quality_sweep=_WEBP_QUALITY_SWEEP,
+        perf_preset={"quality": "75", "method": "4"},
+    ),
+    # zenwebp lossless VP8L: pixel-identical; quality is pinned high (max entropy
+    # reduction) and the swept axis is the encoder `method` (effort).
+    "zenwebp-lossless-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="float", default="100", min=0, max=100),
+            Tunable(name="method", kind="int", default="4", min=0, max=6),
+        ],
+        quality_axis="method",
+        quality_sweep=_WEBP_METHOD_SWEEP,
+        perf_preset={"quality": "100", "method": "4"},
+        lossless=True,
+    ),
     # --- AVIF ---
     "rav1e-encode": TunableSchema(
         params=[
