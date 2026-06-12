@@ -83,10 +83,16 @@ class DatasetId(str, Enum):
 
 class Dataset:
     def __init__(
-        self, description: str, files: Union[list[str], Callable[[], list[str]]]
+        self,
+        description: str,
+        files: Union[list[str], Callable[[], list[str]]],
+        homepage: Optional[str] = None,
     ):
         self.description = description
         self._files = files
+        # Canonical public page for the dataset (provenance / "where it came
+        # from"); surfaced in the report. None for locally generated datasets.
+        self.homepage = homepage
 
     @property
     def files(self) -> list[str]:
@@ -111,10 +117,12 @@ DATASETS: Dict[str, Dataset] = {
     "kodak": Dataset(
         description="KODAK PhotoCD dataset (24 images, ~0.4MP)",
         files=lambda: [f"data/kodak/kodim{i:02d}.png" for i in range(1, 25)],
+        homepage="https://r0k.us/graphics/kodak/",
     ),
     "div2k": Dataset(
         description="DIV2K selected subset (20 diverse high-res images)",
         files=_get_div2k_files,
+        homepage="https://data.vision.ee.ethz.ch/cvl/DIV2K/",
     ),
     "pathological": Dataset(
         description="Pathological test cases (4 synthetic images)",

@@ -987,6 +987,23 @@ def _base_manifest() -> dict:
     }
 
 
+def _dataset_manifest(args: RunArgs) -> dict:
+    """Dataset provenance for the run's benchmark_config: the id, its human
+    description, the canonical homepage (None for generated datasets), and the
+    sample cap. Lets the report describe *what* was benchmarked and link to it
+    without re-importing the dataset registry."""
+    # DATASETS is keyed by the dataset's string value; the str-Enum member hashes
+    # and compares equal to it, so look it up directly (str() would yield the
+    # "DatasetId.X" repr and miss).
+    ds = DATASETS.get(args.dataset)
+    return {
+        "dataset": args.dataset,
+        "dataset_description": ds.description if ds else None,
+        "dataset_homepage": ds.homepage if ds else None,
+        "sample": args.sample,
+    }
+
+
 def _resolve_jobs(jobs: Optional[int], task_count: int) -> int:
     """Parallel scoring workers: physical cores by default (one single-threaded
     task per core saturates the CPU without oversubscribing), capped at the task
@@ -1084,7 +1101,7 @@ def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[s
         **_base_manifest(),
         "benchmark_config": {
             "suite": "quality",
-            "dataset": args.dataset,
+            **_dataset_manifest(args),
             "formats": args.formats,
             "mode": args.mode,
             "quality_steps": args.quality_steps,
@@ -1149,7 +1166,7 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
         **_base_manifest(),
         "benchmark_config": {
             "suite": "performance",
-            "dataset": args.dataset,
+            **_dataset_manifest(args),
             "formats": args.formats,
             "mode": args.mode,
             "perf": args.perf,

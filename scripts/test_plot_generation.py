@@ -146,23 +146,92 @@ def test_report_html():
     with open(os.path.join(perf, "jpeg_encode_perf_results.png"), "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n placeholder")
     # Real quality metrics (incl. SSIM higher-better and Butteraugli lower-better)
-    # so all four metric series are exercised in the interactive path.
-    metrics = [
+    # so all four metric series are exercised in the interactive path. Two
+    # distinct images per operating point so the aggregation path (mean across
+    # >1 image) and the distinct-image count are exercised.
+    metrics = []
+    for img in ("img_a.png", "img_b.png"):
+        metrics += [
+            _metric(
+                "libjpeg-turbo-encode",
+                "jpeg",
+                "quality-60",
+                0.30,
+                60.0,
+                30.0,
+                0.95,
+                2.1,
+                img=img,
+            ),
+            _metric(
+                "libjpeg-turbo-encode",
+                "jpeg",
+                "quality-90",
+                1.00,
+                90.0,
+                42.0,
+                0.99,
+                0.6,
+                img=img,
+            ),
+            _metric(
+                "mozjpeg-encode",
+                "jpeg",
+                "quality-60",
+                0.25,
+                60.0,
+                30.0,
+                0.95,
+                2.0,
+                img=img,
+            ),
+            _metric(
+                "mozjpeg-encode",
+                "jpeg",
+                "quality-90",
+                0.85,
+                90.0,
+                42.0,
+                0.99,
+                0.5,
+                img=img,
+            ),
+        ]
+    # A legitimate low-quality point with negative SSIMULACRA2 — must survive.
+    metrics.append(
         _metric(
-            "libjpeg-turbo-encode", "jpeg", "quality-60", 0.30, 60.0, 30.0, 0.95, 2.1
-        ),
-        _metric(
-            "libjpeg-turbo-encode", "jpeg", "quality-90", 1.00, 90.0, 42.0, 0.99, 0.6
-        ),
-        _metric("mozjpeg-encode", "jpeg", "quality-60", 0.25, 60.0, 30.0, 0.95, 2.0),
-        _metric("mozjpeg-encode", "jpeg", "quality-90", 0.85, 90.0, 42.0, 0.99, 0.5),
-        # A legitimate low-quality point with negative SSIMULACRA2 — must survive.
-        _metric(
-            "jpeg-encoder-encode", "jpeg", "quality-10", 1.10, -40.0, 11.0, 0.40, 12.0
-        ),
-    ]
+            "jpeg-encoder-encode",
+            "jpeg",
+            "quality-10",
+            1.10,
+            -40.0,
+            11.0,
+            0.40,
+            12.0,
+            img="img_a.png",
+        )
+    )
     with open(os.path.join(qual, "metrics.json"), "w") as f:
         json.dump(metrics, f)
+    # A manifest carrying the run's benchmark_config so the report can describe
+    # the dataset (name + source link) and run configuration.
+    with open(os.path.join(qual, "manifest.json"), "w") as f:
+        json.dump(
+            {
+                "benchmark_config": {
+                    "suite": "quality",
+                    "dataset": "div2k",
+                    "dataset_description": "DIV2K selected subset",
+                    "dataset_homepage": "https://data.vision.ee.ethz.ch/cvl/DIV2K/",
+                    "sample": None,
+                    "formats": ["jpeg"],
+                    "mode": "both",
+                    "quality_steps": None,
+                    "quick": False,
+                }
+            },
+            f,
+        )
 
     out = generate_report_html(bundle, generated_at="2026-01-01T00:00:00Z")
     html = open(out).read()
@@ -191,6 +260,23 @@ def test_report_html():
     assert "q-metric-grid" in html, (
         "per-format section must render the all-metrics small-multiples grid"
     )
+    # Dataset & run configuration: the report must describe what was benchmarked
+    # and link to the dataset's source.
+    assert "Dataset &amp; run configuration" in html, (
+        "report must surface the dataset / run configuration"
+    )
+    assert "div2k" in html, "dataset name must be shown"
+    assert "https://data.vision.ee.ethz.ch/cvl/DIV2K/" in html, (
+        "dataset source link must be shown"
+    )
+    assert "jpeg" in html and "Formats" in html, "run formats must be shown"
+    # Aggregation disclosure: the mount point exists and the engine knows how to
+    # state mean-across-N-images vs single-image, with known-range axes.
+    assert "id='q-aggregation'" in html or 'id="q-aggregation"' in html, (
+        "aggregation note mount point must be present"
+    )
+    assert "arithmetic average" in html, "aggregation note must explain the mean"
+    assert "hardHi" in html, "known-range axis scaling must be wired into the engine"
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 
