@@ -636,9 +636,7 @@ def _measure_one(
         # decoded PPM is raw and format-invariant), so bpp tracks input bitrate
         # either way and decode curves plot against the same axis as encode curves.
         size_path = (
-            output_path
-            if task.impl.type == BenchmarkType.ENCODE
-            else task.input_path
+            output_path if task.impl.type == BenchmarkType.ENCODE else task.input_path
         )
         try:
             filesize = os.path.getsize(size_path)
@@ -666,9 +664,7 @@ def _measure_one(
             temp_files.append(reference_ppm)
             _decode_to_ppm(task, task.input_path, reference_ppm, env=env)
             metric_basis = "golden"
-        score, psnr, ssim, butteraugli = _run_iqa(
-            reference_ppm, distorted_ppm, env=env
-        )
+        score, psnr, ssim, butteraugli = _run_iqa(reference_ppm, distorted_ppm, env=env)
 
         # 3. Get image dimensions from source file
         width, height, megapixels, bpp = 0, 0, 0.0, 0.0
