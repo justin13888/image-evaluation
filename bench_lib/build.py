@@ -35,12 +35,48 @@ IQA_CLI_VERSION = "0.2.0"
 _build_dir_locks: dict[str, threading.Lock] = {}
 _build_dir_locks_lock = threading.Lock()
 
+# Build directories already (re)built during this process. Multiple
+# implementations (e.g. a codec's encode and decode binaries) share a build
+# directory, and `make` builds every target in it, so the second implementation
+# can skip. We track this per-run rather than checking whether the binary exists
+# on disk, so that source or harness-header changes are still recompiled on the
+# next `./bench run`.
+_built_dirs: set[str] = set()
+_built_dirs_lock = threading.Lock()
+
 
 def _get_build_dir_lock(build_dir: str) -> threading.Lock:
     with _build_dir_locks_lock:
         if build_dir not in _build_dir_locks:
             _build_dir_locks[build_dir] = threading.Lock()
         return _build_dir_locks[build_dir]
+
+
+def _drop_stale_cmake_cache(build_dir: str):
+    """Remove CMakeCache.txt/CMakeFiles only when the cache was generated for a
+    different source tree (e.g. the repo moved from /var/data/... to
+    /var/home/...). Keeping a valid cache lets `make` rebuild incrementally and
+    pick up changed sources without a full clean rebuild every run."""
+    cmake_cache = os.path.join(build_dir, "CMakeCache.txt")
+    cmake_files = os.path.join(build_dir, "CMakeFiles")
+    if not os.path.exists(cmake_cache):
+        return
+
+    expected_src = os.path.abspath(os.path.dirname(build_dir))
+    cached_src = None
+    try:
+        with open(cmake_cache) as f:
+            for line in f:
+                if line.startswith("CMAKE_HOME_DIRECTORY:"):
+                    cached_src = line.split("=", 1)[1].strip()
+                    break
+    except OSError:
+        cached_src = None
+
+    if cached_src is None or os.path.abspath(cached_src) != expected_src:
+        os.remove(cmake_cache)
+        if os.path.exists(cmake_files):
+            shutil.rmtree(cmake_files)
 
 
 def run_build_command(command, cwd, step_name, max_lines=100, env=None):
@@ -136,23 +172,22 @@ def build_cpp_project(impl):
 
     safe_print(f"{Fore.CYAN}{prefix} Starting build...")
 
-    build_lock = _get_build_dir_lock(os.path.abspath(build_dir))
+    abs_build_dir = os.path.abspath(build_dir)
+    build_lock = _get_build_dir_lock(abs_build_dir)
     try:
         with build_lock:
-            # If another thread already built this shared directory, skip.
-            if os.path.exists(bin_path):
+            # If this shared directory was already (re)built this run, skip:
+            # `make` built every target in it, including this binary.
+            with _built_dirs_lock:
+                already_built = abs_build_dir in _built_dirs
+            if already_built:
                 safe_print(f"{Fore.GREEN}{prefix} ✓ Build complete (shared build dir).")
-                return True
+                return os.path.exists(bin_path)
 
-            # Remove stale CMakeCache to avoid "different source directory" errors
-            # (e.g. after the project moves from /var/data/... to /var/home/...).
-            cmake_cache = os.path.join(build_dir, "CMakeCache.txt")
-            cmake_files = os.path.join(build_dir, "CMakeFiles")
-            if os.path.exists(cmake_cache):
-                os.remove(cmake_cache)
-            if os.path.exists(cmake_files):
-                shutil.rmtree(cmake_files)
             os.makedirs(build_dir, exist_ok=True)
+            # Drop the CMake cache only if it points at a different source tree
+            # (e.g. the repo moved); otherwise keep it for incremental rebuilds.
+            _drop_stale_cmake_cache(build_dir)
 
             cmake_prefix = _get_vendor_prefix_path(impl.name)
             pkg_config_path = _get_pkg_config_path(VENDOR_COMMON)
@@ -188,6 +223,8 @@ def build_cpp_project(impl):
                 safe_print(f"{Fore.RED}{prefix} ✗ Binary not found: {bin_path}")
                 return False
             else:
+                with _built_dirs_lock:
+                    _built_dirs.add(abs_build_dir)
                 safe_print(f"{Fore.GREEN}{prefix} ✓ Build complete.")
                 return True
 

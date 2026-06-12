@@ -2,6 +2,7 @@
 
 import csv
 import datetime
+import errno
 import glob
 import json
 import os
@@ -1129,6 +1130,57 @@ def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[s
     return []
 
 
+def _run_hyperfine_chunk(
+    chunk: list, base_flags: list[str], export_path: str, debug: bool
+) -> list:
+    """Time one chunk of benchmarks under hyperfine and return its ``results`` list.
+
+    The combined argv is sized to stay under ARG_MAX by the caller, but the byte
+    estimate is conservative rather than exact. If ``execve`` still rejects it with
+    E2BIG, the estimate undershot: bisect the chunk, time each half independently,
+    and merge — so the safeguard degrades gracefully instead of crashing. A chunk
+    that's already a single benchmark cannot be split further, so re-raise with a
+    clear message in that case."""
+    hyperfine_cmd = ["hyperfine", *base_flags, "--export-json", export_path]
+    for task in chunk:
+        hyperfine_cmd.extend(["--command-name", task.name()])
+    hyperfine_cmd.extend([task.cmd("/dev/null") for task in chunk])
+    if debug:
+        hyperfine_cmd.append("--show-output")
+
+    try:
+        subprocess.run(hyperfine_cmd, check=True)
+    except FileNotFoundError:
+        print("\nError: 'hyperfine' not found")
+        sys.exit(1)
+    except OSError as e:
+        if e.errno != errno.E2BIG:
+            raise
+        if len(chunk) <= 1:
+            print(
+                "\nError: a single benchmark's command exceeds the OS argv limit "
+                "(ARG_MAX); cannot split further"
+            )
+            sys.exit(1)
+        # Estimate undershot ARG_MAX — bisect and time each half on its own.
+        mid = len(chunk) // 2
+        results: list = []
+        for half_idx, half in enumerate((chunk[:mid], chunk[mid:])):
+            half_path = f"{export_path}.h{half_idx}"
+            results.extend(_run_hyperfine_chunk(half, base_flags, half_path, debug))
+            os.remove(half_path)
+        with open(export_path, "w") as f:
+            json.dump({"results": results}, f)
+        return results
+    except subprocess.CalledProcessError:
+        print("\nError: Benchmark execution failed")
+        print(f"Test command: {' '.join(hyperfine_cmd)}")
+        sys.exit(1)
+
+    with open(export_path) as f:
+        return json.load(f).get("results", [])
+
+
 def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> None:
     """Rigorous (hyperfine) timing overlay over the selected subset of the sweep.
 
@@ -1189,43 +1241,53 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
     print(f"\n✓ {len(timing)} timing benchmark(s) ready to run\n")
 
     json_output = f"{result_dir}/raw.json"
-    if not args.quick:
-        hyperfine_cmd = [
-            "hyperfine",
-            "--warmup",
-            "3",
-            "--min-runs",
-            "10",
-            "--export-json",
-            json_output,
-        ]
-    else:
-        hyperfine_cmd = [
-            "hyperfine",
-            "--warmup",
-            "0",
-            "--min-runs",
-            "1",
-            "--max-runs",
-            "1",
-            "--export-json",
-            json_output,
-        ]
-    for task in timing:
-        hyperfine_cmd.extend(["--command-name", task.name()])
-    hyperfine_cmd.extend([task.cmd("/dev/null") for task in timing])
-    if args.debug:
-        hyperfine_cmd.append("--show-output")
+    base_flags = (
+        ["--warmup", "3", "--min-runs", "10"]
+        if not args.quick
+        else ["--warmup", "0", "--min-runs", "1", "--max-runs", "1"]
+    )
 
-    try:
-        subprocess.run(hyperfine_cmd, check=True)
-    except FileNotFoundError:
-        print("\nError: 'hyperfine' not found")
-        sys.exit(1)
-    except subprocess.CalledProcessError:
-        print("\nError: Benchmark execution failed")
-        print(f"Test command: {' '.join(hyperfine_cmd)}")
-        sys.exit(1)
+    # hyperfine takes every benchmark as positional argv, so a large sweep over a
+    # dataset with long file paths (e.g. clic2025's 64-hex-hash names) can blow
+    # past the OS argv limit (ARG_MAX) in a single invocation (Errno 7, E2BIG).
+    # Split the benchmarks into chunks whose combined argv stays well under the
+    # limit, run hyperfine per chunk, and merge the per-chunk JSON. Each benchmark
+    # is timed independently, and the summary recomputes relative speed from the
+    # absolute per-benchmark stats, so chunking does not affect the results.
+    ARGV_BUDGET = 128_000  # bytes; conservative vs ARG_MAX (>=256 KiB everywhere)
+    chunks: list[list] = []
+    current: list = []
+    current_len = 0
+    for task in timing:
+        # Each task contributes three argv entries: --command-name, the name, and
+        # the command string (+ a little slack for separators/quoting).
+        cost = len(task.name()) + len(task.cmd("/dev/null")) + 24
+        if current and current_len + cost > ARGV_BUDGET:
+            chunks.append(current)
+            current, current_len = [], 0
+        current.append(task)
+        current_len += cost
+    if current:
+        chunks.append(current)
+
+    if len(chunks) > 1:
+        print(f"Splitting into {len(chunks)} hyperfine runs to stay under ARG_MAX\n")
+
+    merged_results: list = []
+    for idx, chunk in enumerate(chunks):
+        single = len(chunks) == 1
+        # Single chunk writes straight to raw.json (hyperfine's native export);
+        # multi-chunk runs go to part files that are merged and then removed.
+        part_path = json_output if single else f"{result_dir}/raw.part{idx}.json"
+        results = _run_hyperfine_chunk(chunk, base_flags, part_path, args.debug)
+        if not single:
+            merged_results.extend(results)
+            os.remove(part_path)
+
+    # Stitch the per-chunk exports back into the single raw.json the summary reads.
+    if len(chunks) > 1:
+        with open(json_output, "w") as f:
+            json.dump({"results": merged_results}, f, indent=2)
 
     generate_summary(result_dir, json_output, None)
 

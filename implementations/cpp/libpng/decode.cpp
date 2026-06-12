@@ -61,6 +61,12 @@ class LibPngBench : public BenchmarkImplementation {
     png_byte color_type = png_get_color_type(png_ptr, info_ptr);
     png_byte bit_depth = png_get_bit_depth(png_ptr, info_ptr);
 
+    // Expand palette (indexed) images to RGB. Encoders under test may legitimately
+    // emit a palette PNG (e.g. zune-png/zenpng picks an indexed colortype when the
+    // image has <=256 colours); without this libpng returns 1 byte/pixel (the
+    // palette index) and encode_ppm_rgb8() sees a third of the RGB bytes it expects.
+    if (color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png_ptr);
+
     // Expand low-bit-depth grayscale images to 8 bits
     if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
       png_set_expand_gray_1_2_4_to_8(png_ptr);

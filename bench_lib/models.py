@@ -113,11 +113,26 @@ def _get_div2k_files() -> list[str]:
     return []
 
 
-def _glob_files(pattern: str) -> list[str]:
-    """Sorted files matching a glob (stable ordering for reproducible runs)."""
+def _corpus_sources(directory: str, ext: str = "png") -> list[str]:
+    """Sorted original images in a corpus directory, excluding generated files.
+
+    The benchmark caches reference-encoded decode inputs (``<stem>.<label>.<ext>``)
+    and PPM/format intermediates next to the originals for reuse across runs.
+    Corpus originals have a single-component stem (a content hash or numeric id),
+    so any file whose stem already contains a '.' is a generated intermediate and
+    must be excluded from the source list. Otherwise it is re-discovered as a
+    source and re-encoded, chaining suffixes combinatorially
+    (e.g. ``X.compression-0.compression-1.png``) until the disk fills.
+    """
     from glob import glob
 
-    return sorted(glob(pattern))
+    sources = []
+    for path in glob(os.path.join(directory, f"*.{ext}")):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if "." in stem:
+            continue  # generated intermediate (e.g. X.compression-0.png), not an original
+        sources.append(path)
+    return sorted(sources)
 
 
 def _get_tecnick_files() -> list[str]:
@@ -155,19 +170,19 @@ DATASETS: Dict[str, Dataset] = {
     ),
     "clic2025": Dataset(
         description="CLIC 2025 final-test (30 modern high-res photos, ~2048px)",
-        files=lambda: _glob_files("vendor/codec-corpus/clic2025/final-test/*.png"),
+        files=lambda: _corpus_sources("vendor/codec-corpus/clic2025/final-test"),
         homepage="https://clic2025.compression.cc/",
     ),
     "cid22": Dataset(
         description="CID22 validation references (41 images, 512px; SSIMULACRA2 set)",
-        files=lambda: _glob_files(
-            "vendor/codec-corpus/CID22/CID22-512/validation/*.png"
+        files=lambda: _corpus_sources(
+            "vendor/codec-corpus/CID22/CID22-512/validation"
         ),
         homepage="https://cloudinary.com/labs/cid22",
     ),
     "screen": Dataset(
         description="GB82-SC real screen content (10 UI/text/graphics images)",
-        files=lambda: _glob_files("vendor/codec-corpus/gb82-sc/*.png"),
+        files=lambda: _corpus_sources("vendor/codec-corpus/gb82-sc"),
         homepage="https://github.com/imazen/codec-corpus",
     ),
     "tecnick": Dataset(
@@ -532,24 +547,6 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.AVIF,
     ),
-    # zenavif: pure-Rust AVIF codec (AGPL-3.0, imazen/zenavif). Decode via
-    # rav1d-safe, encode via zenravif.
-    Implementation(
-        name="zenavif-encode",
-        build="rust",
-        lang="rust",
-        bin="target/release/bench-zenavif-encode",
-        type=BenchmarkType.ENCODE,
-        format=ImageFormat.AVIF,
-    ),
-    Implementation(
-        name="zenavif-decode",
-        build="rust",
-        lang="rust",
-        bin="target/release/bench-zenavif-decode",
-        type=BenchmarkType.DECODE,
-        format=ImageFormat.AVIF,
-    ),
     Implementation(
         name="libavif-decode",
         build="cpp",
@@ -883,23 +880,6 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     ),
     "libavif-encode": _avif_schema(),
     "svt-av1-encode": _avif_schema(),
-    # zenavif 0.1.x exposes quality + speed (no public chroma-subsampling knob).
-    "zenavif-encode": TunableSchema(
-        params=[
-            Tunable(
-                name="quality",
-                kind="int",
-                default="65",
-                min=1,
-                max=100,
-                description="AVIF quality 1-100 (mapped to AV1 quantizer)",
-            ),
-            Tunable(name="speed", kind="int", default="6", min=1, max=10),
-        ],
-        quality_axis="quality",
-        quality_sweep=_AVIF_QUALITY_SWEEP,
-        perf_preset={"quality": "65", "speed": "6"},
-    ),
     # --- JXL ---
     "libjxl-encode": TunableSchema(
         params=[

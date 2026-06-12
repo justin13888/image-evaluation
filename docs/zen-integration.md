@@ -4,11 +4,14 @@ Tracking branch for integrating imazen's five AGPL-3.0 pure-Rust image codecs so
 can be benchmarked against the golden (reference C) implementations. Each library was
 first developed on its own branch/PR; the buildable ones are now consolidated here.
 
-**Status (2026-06-11):** the four buildable libraries — **zenjpeg, zenpng, zenwebp,
-zenavif** (9 implementations total) — are merged into this branch; the full Rust
-workspace builds and every encode/decode round-trip passes (PNG and lossless-WebP
-verified byte-exact). **zenjxl is not merged** — it is blocked (see below) and remains
-the draft PR #40 against this branch, to be merged once it can resolve.
+**Status (2026-06-11):** three buildable libraries — **zenjpeg, zenpng, zenwebp**
+(7 implementations total) — are merged into this branch; the full Rust workspace builds
+and every encode/decode round-trip passes (PNG and lossless-WebP verified byte-exact).
+**zenavif was dropped (2026-06-12)** — it is a thin wrapper over `rav1d-safe`, whose
+multithreaded CDEF SIMD path panics intermittently on AVIF decode (see below); AVIF is
+already covered by the libavif/rav1e/SVT-AV1 + dav1d/rav1d/libgav1 implementations.
+**zenjxl is not merged** — it is blocked (see below) and remains the draft PR #40 against
+this branch, to be merged once it can resolve.
 
 ## Libraries & sub-PRs
 
@@ -17,7 +20,7 @@ the draft PR #40 against this branch, to be merged once it can resolve.
 | [zenjpeg](https://github.com/imazen/zenjpeg) | JPEG | `zenjpeg-encode` (quality/progressive/subsampling), `zenjpeg-decode` | ✅ 0.8 | #36 | ✅ built + round-trip verified |
 | [zenpng](https://github.com/imazen/zenpng) | PNG | `zenpng-encode` (effort, lossless), `zenpng-decode` | ✅ 0.1 | #37 | ✅ built + lossless-exact verified |
 | [zenwebp](https://github.com/imazen/zenwebp) | WebP | `zenwebp-encode` (lossy), `zenwebp-lossless-encode`, `zenwebp-decode` | ✅ 0.4 | #38 | ✅ built + round-trip verified |
-| [zenavif](https://github.com/imazen/zenavif) | AVIF | `zenavif-encode` (quality/speed), `zenavif-decode` | ✅ 0.1 | #39 | ✅ built + round-trip verified |
+| [zenavif](https://github.com/imazen/zenavif) | AVIF | ~~`zenavif-encode` (quality/speed), `zenavif-decode`~~ | ✅ 0.1 | #39 | ⛔ dropped 2026-06-12 (`rav1d-safe` decode flake) |
 | [zenjxl](https://github.com/imazen/zenjxl) | JPEG XL | `zenjxl-encode` (distance), `zenjxl-lossless-encode`, `zenjxl-decode` | ❌ git-only | #40 | ⛔ blocked (draft) |
 
 ## Integration shape
@@ -46,10 +49,14 @@ These are time-sensitive — re-check the dates against upstream releases before
    (never compiled). Unblock by waiting for `jxl-encoder 0.3.2` to publish (`cargo update -p
    zenjxl`) or adding a root `[patch.crates-io]` for `jxl-encoder` (and `zenjpeg`/
    `zenjxl-decoder` if needed). PR #40 stays a draft until then.
-3. **zenavif chroma subsampling not exposed (PR #39).** *(2026-06-11)* The latest published
-   `zenavif` (0.1.6) exposes only `quality` + `speed`; the 4:2:0/4:4:4 `chroma_subsampling`
-   knob was added upstream after 0.1.6, so the `zenavif-encode` series omits it until a release
-   exposes it. (The benchmark still sweeps quality; the encoder uses its default chroma format.)
+3. **zenavif dropped — `rav1d-safe` decode flake (PR #39).** *(2026-06-12)* `zenavif-decode`
+   is a thin wrapper over the pure-Rust `rav1d-safe` AV1 decoder, whose multithreaded CDEF SIMD
+   path panics intermittently (`overlapping DisjointMut` in `rav1d-safe-0.5.7/src/safe_simd/
+   cdef_arm.rs`, ~10% of AVIF-decode tasks, exit 134). Since AVIF is already covered by the
+   libavif/rav1e/SVT-AV1 encoders and the dav1d/rav1d/libgav1 decoders, the wrapper added
+   flakiness without new coverage, so both `zenavif-*` implementations and the
+   `implementations/rust/zenavif/` crate were removed. (Separately, `zenavif 0.1.6` also never
+   exposed a chroma-subsampling knob.) Re-add once the upstream `rav1d-safe` race is fixed.
 
 ## Notes
 

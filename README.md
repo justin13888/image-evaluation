@@ -469,7 +469,6 @@ We include modern formats and their most competitive implementations.
 | **SVT-AV1**    | C        | Encoder via libavif (SVT-AV1 backend)     |
 | **rav1e**      | Rust     | Encoder. *Film grain synthesis not yet implemented (tracked as a TODO).* |
 | **rav1d**      | Rust     | Decoder (Rust port of dav1d). *Drop-in dav1d replacement; linked at binary level.* |
-| **zenavif**    | Rust     | Pure-Rust AVIF from [imazen/zenavif](https://github.com/imazen/zenavif) (decode via rav1d-safe, encode via zenravif). **AGPL-3.0.** Encoder (quality + speed) and decoder. *v0.1.x exposes no chroma-subsampling knob.* |
 
 ### JPEG XL
 
@@ -494,9 +493,9 @@ We include modern formats and their most competitive implementations.
 
 6. **IQA metrics are approximations.** SSIMULACRA2, PSNR, SSIM and Butteraugli are automated estimators of perceived quality, each with its own assumptions and blind spots (see [Image Quality Assessment](#image-quality-assessment)). They are a reproducible guide for narrowing options, **not** a replacement for a controlled human subjective study (e.g. MOS) when determining the genuinely best-looking option.
 
-7. **imazen "zen" implementations — AGPL + integration caveats** *(as of 2026-06-11)*. The `zen*` implementations ([zenjpeg](https://github.com/imazen/zenjpeg), [zenpng](https://github.com/imazen/zenpng), [zenwebp](https://github.com/imazen/zenwebp), [zenavif](https://github.com/imazen/zenavif), [zenjxl](https://github.com/imazen/zenjxl)) are **AGPL-3.0** ([issue #34](https://github.com/justin13888/image-implementation-benchmark/issues/34)). The harness and repository remain MIT-licensed, but any benchmark binary that links a `zen*` library is an AGPL-derived work, so redistributing built binaries must honour the AGPL. Two integration caveats apply as of this date — see [`docs/zen-integration.md`](docs/zen-integration.md) for the live status:
+7. **imazen "zen" implementations — AGPL + integration caveats** *(as of 2026-06-11)*. The `zen*` implementations ([zenjpeg](https://github.com/imazen/zenjpeg), [zenpng](https://github.com/imazen/zenpng), [zenwebp](https://github.com/imazen/zenwebp), [zenjxl](https://github.com/imazen/zenjxl)) are **AGPL-3.0** ([issue #34](https://github.com/justin13888/image-implementation-benchmark/issues/34)). The harness and repository remain MIT-licensed, but any benchmark binary that links a `zen*` library is an AGPL-derived work, so redistributing built binaries must honour the AGPL. Two integration caveats apply as of this date — see [`docs/zen-integration.md`](docs/zen-integration.md) for the live status:
    - **zenjxl is blocked** and not yet built: `zenjxl 0.2.1` requires `jxl-encoder ^0.3.2`, which is not published to crates.io (max published is 0.3.1), so the workspace cannot resolve it. Re-check once `jxl-encoder 0.3.2` is released.
-   - **zenavif chroma subsampling is not exposed**: the latest published `zenavif` (0.1.6) offers only `quality` + `speed` knobs; 4:2:0/4:4:4 selection was added upstream after 0.1.6 and is omitted here until a release exposes it.
+   - **zenavif was dropped**: it is a thin wrapper over the pure-Rust `rav1d-safe` decoder, whose multithreaded CDEF SIMD path panics intermittently (`overlapping DisjointMut` in `cdef_arm.rs`) on AVIF decode. AVIF is already covered by libavif/rav1e/SVT-AV1 and the dav1d/rav1d/libgav1 decoders, so the wrapper added flakiness without coverage. Re-add once the upstream `rav1d-safe` race is fixed.
 
 ## Contributing
 
