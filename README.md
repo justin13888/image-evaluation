@@ -60,23 +60,27 @@ All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng,
    uv sync  # Creates .venv with pillow, imagehash, numpy
    ```
 
-3. **Download benchmark datasets** (~3.5GB):
+3. **Download benchmark datasets**:
 
    ```bash
-   ./bench setup              # All datasets (KODAK, DIV2K, pathological, test)
+   ./bench setup              # All datasets
 
    # Or set up specific datasets:
-   ./bench setup -d kodak         # Only KODAK
-   ./bench setup -d div2k         # Only DIV2K
-   ./bench setup -d pathological  # Only pathological tests
-   ./bench setup -d test          # Only test image
+   ./bench setup -d kodak         # KODAK (24 natural photos)
+   ./bench setup -d div2k         # DIV2K (20 diverse 2K/4K, ~3.5GB download)
+   ./bench setup -d pathological  # Synthetic stress tests
+   ./bench setup -d test          # Single legacy test image
+   ./bench setup -d clic2025      # CLIC 2025 (codec-corpus submodule)
+   ./bench setup -d cid22         # CID22 validation refs (codec-corpus submodule)
+   ./bench setup -d screen        # GB82-SC real screen content (codec-corpus submodule)
+   ./bench setup -d tecnick       # Tecnick SAMPLING (~614MB download)
 
    # Other options:
    ./bench setup --force          # Force re-download/regenerate
    ./bench setup --verify-only    # Check integrity only
    ```
 
-   > **Note:** `./bench run` automatically sets up required datasets on first use, so an explicit `./bench setup` step is optional.
+   > **Note:** `./bench run` automatically sets up required datasets on first use, so an explicit `./bench setup` step is optional. The `clic2025`/`cid22`/`screen` sets live in the [`imazen/codec-corpus`](https://github.com/imazen/codec-corpus) submodule and are fetched on demand via `git submodule update --init --depth 1 vendor/codec-corpus` (run automatically by setup). To fetch only those three subdirs instead of the full ~600MB corpus: `git -C vendor/codec-corpus sparse-checkout set clic2025/final-test CID22/CID22-512/validation gb82-sc`.
 
 4. **Build implementations** (vendored libraries + all implementations built automatically via `./bench compile`)
 
@@ -166,17 +170,33 @@ The benchmarks use a tiered collection of images to test different performance c
    * Natural photography with varied content
 
 2. **DIV2K (`--dataset div2k`)** — [DIV2K dataset](https://data.vision.ee.ethz.ch/cvl/DIV2K/) (20 selected images, 2K/4K resolution)
-   * Selected via `scripts/select_div2k.py` using perceptual hash diversity sampling
+   * Selected via perceptual-hash diversity sampling (`_select_diverse_images`)
    * Tests memory bandwidth, allocator pressure, and large buffer performance
    * High-resolution, diverse content
 
-3. **Pathological (`--dataset pathological`)** — Synthetic stress tests (4 images)
+3. **CLIC 2025 (`--dataset clic2025`)** — [CLIC 2025](https://clic2025.compression.cc/) final-test set (30 images, ~2048px) — _Unsplash License_
+   * Modern high-resolution photographic content; the current de-facto codec-evaluation corpus
+   * Vendored via the `imazen/codec-corpus` submodule (auto-initialized by setup)
+
+4. **CID22 (`--dataset cid22`)** — [CID22](https://cloudinary.com/labs/cid22) validation references (41 images, 512px) — _CC BY-SA 4.0_
+   * The dataset SSIMULACRA2 (this benchmark's primary quality metric) was validated against — perceptually authoritative
+   * Vendored via the `imazen/codec-corpus` submodule
+
+5. **Tecnick (`--dataset tecnick`)** — [TESTIMAGES SAMPLING](https://testimages.org/) (24 diverse 1200×1200 images) — _CC BY-NC-SA 4.0_
+   * Classic higher-resolution supplement to KODAK; diversity-selected from 100 sources
+   * Downloaded on demand (~614MB archive); **not** redistributed — its non-commercial license keeps it out of the repo
+
+6. **Screen content (`--dataset screen`)** — [GB82-SC](https://github.com/imazen/codec-corpus) (10 real screenshots/UI/text images) — _CC0_
+   * Screen content compresses very differently from photos; complements the synthetic `pathological/screenshot_4k.png`
+   * Vendored via the `imazen/codec-corpus` submodule
+
+7. **Pathological (`--dataset pathological`)** — Synthetic stress tests (4 images)
    * `solid_4k.png` — Solid color (tests RLE/skip optimizations)
    * `noise_4k.png` — Gaussian noise (worst-case for all compressors)
    * `screenshot_4k.png` — UI screenshot with text and flat regions
    * `alpha_gradient_4k.png` — Transparency gradient (for formats supporting alpha)
 
-4. **Test (`--dataset test`)** — Single test file (legacy, minimal coverage)
+8. **Test (`--dataset test`)** — Single test file (legacy, minimal coverage)
    * For quick smoke tests only
    * Not recommended for comprehensive benchmarking
 
@@ -191,10 +211,16 @@ Choose your dataset based on your benchmarking goals:
 
 * **Performance Optimization (`kodak`)** — Best for micro-optimizations and instruction-level tuning. Images fit in cache, minimizing memory system variance.
 * **Real-World Throughput (`div2k`)** — Best for measuring production performance. Tests memory bandwidth, allocator efficiency, and scaling behavior.
+* **Perceptual Quality / Rate-Distortion (`cid22`)** — Best for trustworthy quality comparisons: it is the SSIMULACRA2 validation corpus, so RD curves on it are perceptually well-calibrated.
+* **Modern Photographic Content (`clic2025`)** — Best for representative results on contemporary high-resolution photos; the current community-standard codec-evaluation set.
+* **Screen Content (`screen`)** — Best when codecs target UI/text/graphics, which compress very differently from photos.
+* **Higher-Resolution Photography (`tecnick`)** — A classic 1200×1200 supplement to KODAK for resolution sensitivity.
 * **Edge Case Validation (`pathological`)** — Best for finding corner cases, testing worst-case performance, and validating optimizations don't break on synthetic inputs.
 * **Quick Validation (`test`)** — Single-image smoke tests only. Not suitable for performance comparison.
 
-**Recommendation:** Run `kodak` for initial development and optimization work, then validate with `div2k` and `pathological` before publishing results.
+**Recommendation:** Run `kodak` for initial development and optimization work, then validate quality on `cid22`/`clic2025` (and `screen` for screen-content codecs) and robustness on `div2k`/`pathological` before publishing results.
+
+**Licensing:** dataset images carry their own licenses (see each entry above). `cid22` is CC BY-SA 4.0 — attribute Cloudinary's CID22 when redistributing results derived from it. `tecnick` is CC BY-NC-SA 4.0 (non-commercial); it is downloaded on demand and never committed to this repository.
 
 ### Tunables & Operating Points
 

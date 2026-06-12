@@ -43,3 +43,7 @@
 [submodule "vendor/jxl-rs"]
 	path = vendor/jxl-rs
 	url = https://github.com/libjxl/jxl-rs.git
+[submodule "vendor/codec-corpus"]
+	path = vendor/codec-corpus
+	url = https://github.com/imazen/codec-corpus.git
+	ignore = untracked
