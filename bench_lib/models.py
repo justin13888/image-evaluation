@@ -79,6 +79,10 @@ class DatasetId(str, Enum):
     KODAK = "kodak"
     DIV2K = "div2k"
     PATHOLOGICAL = "pathological"
+    CLIC2025 = "clic2025"
+    CID22 = "cid22"
+    SCREEN = "screen"
+    TECNICK = "tecnick"
 
 
 class Dataset:
@@ -109,6 +113,22 @@ def _get_div2k_files() -> list[str]:
     return []
 
 
+def _glob_files(pattern: str) -> list[str]:
+    """Sorted files matching a glob (stable ordering for reproducible runs)."""
+    from glob import glob
+
+    return sorted(glob(pattern))
+
+
+def _get_tecnick_files() -> list[str]:
+    # selected.txt holds repo-relative-to-data/tecnick paths (one per line).
+    p = Path("data/tecnick/selected.txt")
+    if p.exists():
+        lines = p.read_text().splitlines()
+        return [f"data/tecnick/{name}" for name in lines if name.strip()]
+    return []
+
+
 DATASETS: Dict[str, Dataset] = {
     "test": Dataset(
         description="Single test file (legacy)",
@@ -132,6 +152,28 @@ DATASETS: Dict[str, Dataset] = {
             "data/pathological/screenshot_4k.png",
             "data/pathological/alpha_gradient_4k.png",
         ],
+    ),
+    "clic2025": Dataset(
+        description="CLIC 2025 final-test (30 modern high-res photos, ~2048px)",
+        files=lambda: _glob_files("vendor/codec-corpus/clic2025/final-test/*.png"),
+        homepage="https://clic2025.compression.cc/",
+    ),
+    "cid22": Dataset(
+        description="CID22 validation references (41 images, 512px; SSIMULACRA2 set)",
+        files=lambda: _glob_files(
+            "vendor/codec-corpus/CID22/CID22-512/validation/*.png"
+        ),
+        homepage="https://cloudinary.com/labs/cid22",
+    ),
+    "screen": Dataset(
+        description="GB82-SC real screen content (10 UI/text/graphics images)",
+        files=lambda: _glob_files("vendor/codec-corpus/gb82-sc/*.png"),
+        homepage="https://github.com/imazen/codec-corpus",
+    ),
+    "tecnick": Dataset(
+        description="Tecnick TESTIMAGES SAMPLING (24 diverse 1200x1200 images)",
+        files=_get_tecnick_files,
+        homepage="https://testimages.org/",
     ),
 }
 

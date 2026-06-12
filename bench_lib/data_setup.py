@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import subprocess
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -22,6 +24,23 @@ TEST_GENERATOR_VERSION = 1
 KODAK_BASE_URL = "http://r0k.us/graphics/kodak/kodak/"
 DIV2K_URL = "http://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_train_HR.zip"
 DIV2K_SELECT_N = 20
+
+# Tecnick TESTIMAGES SAMPLING (8-bit RGB, 1200x1200). CC BY-NC-SA 4.0 — downloaded
+# on demand (never vendored) to keep non-commercial content out of the repo.
+TECNICK_URL = (
+    "https://downloads.sourceforge.net/project/testimages/"
+    "SAMPLING/8BIT/RGB/SAMPLING_8BIT_RGB_1200x1200.tar.bz2"
+)
+TECNICK_SELECT_N = 24
+
+# imazen/codec-corpus is vendored as a git submodule (not committed into this repo).
+# These datasets reference subdirectories of that submodule's checkout.
+CODEC_CORPUS_DIR = Path("vendor/codec-corpus")
+CODEC_CORPUS_SUBDIRS = {
+    DatasetId.CLIC2025: "clic2025/final-test",
+    DatasetId.CID22: "CID22/CID22-512/validation",
+    DatasetId.SCREEN: "gb82-sc",
+}
 
 
 # ============================================================================
@@ -153,14 +172,27 @@ def _setup_kodak(force: bool = False) -> dict[str, str]:
 # ============================================================================
 
 
-def _select_diverse_images(image_dir: Path, n: int = 20) -> list[str]:
-    """Select n diverse images using greedy farthest-first traversal (perceptual hash)."""
+def _select_diverse_images(
+    image_dir: Path,
+    n: int = 20,
+    patterns: tuple[str, ...] = ("*.png",),
+    recursive: bool = False,
+) -> list[str]:
+    """Select n diverse images using greedy farthest-first traversal (perceptual hash).
+
+    Returns paths relative to ``image_dir`` (POSIX). For a flat directory this is just
+    the basename, so existing callers (DIV2K) are unaffected; ``recursive``/``patterns``
+    let nested archives with non-PNG sources (Tecnick TIFFs) be selected too.
+    """
     try:
         import imagehash
     except ImportError:
         raise RuntimeError("imagehash not installed. Run: uv sync")
 
-    images = list(image_dir.glob("*.png"))
+    images: list[Path] = []
+    for pat in patterns:
+        images.extend(image_dir.rglob(pat) if recursive else image_dir.glob(pat))
+    images = sorted(set(images))
     if len(images) < n:
         print(f"  Warning: Only {len(images)} images found, selecting all")
         n = len(images)
@@ -194,7 +226,7 @@ def _select_diverse_images(image_dir: Path, n: int = 20) -> list[str]:
             f"  Selected {len(selected)}/{n}: {selected[-1].name} (diversity: {max_dist})"
         )
 
-    return [img.name for img in selected]
+    return [img.relative_to(image_dir).as_posix() for img in selected]
 
 
 def _setup_div2k(force: bool = False) -> dict[str, str]:
@@ -352,6 +384,128 @@ def _setup_test(force: bool = False) -> dict[str, str]:
 
 
 # ============================================================================
+# codec-corpus datasets (CLIC 2025, CID22, GB82-SC) — vendored as a submodule
+# ============================================================================
+
+
+def _ensure_codec_corpus_submodule(subdir: str) -> None:
+    """Ensure the imazen/codec-corpus submodule is checked out for ``subdir``.
+
+    On a fresh clone the submodule is just a gitlink, so this drives
+    ``git submodule update --init`` to fetch it on demand (vs. Kodak's HTTP pull).
+    """
+    target = CODEC_CORPUS_DIR / subdir
+    if target.is_dir() and any(target.iterdir()):
+        return
+
+    print(f"  Initializing {CODEC_CORPUS_DIR} submodule (this fetches images)...")
+    try:
+        subprocess.run(
+            [
+                "git",
+                "submodule",
+                "update",
+                "--init",
+                "--depth",
+                "1",
+                str(CODEC_CORPUS_DIR),
+            ],
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RuntimeError(
+            f"Failed to initialize the codec-corpus submodule ({e}).\n"
+            f"Run it manually: git submodule update --init --depth 1 {CODEC_CORPUS_DIR}"
+        ) from e
+
+    if not (target.is_dir() and any(target.iterdir())):
+        raise RuntimeError(
+            f"codec-corpus submodule initialized but '{target}' is empty.\n"
+            f"If sparse-checkout is configured, include this path or disable it:\n"
+            f"  git -C {CODEC_CORPUS_DIR} sparse-checkout disable"
+        )
+
+
+def _setup_codec_corpus_subset(subdir: str, label: str) -> dict[str, str]:
+    """Verify a codec-corpus subdir is present (initializing the submodule if
+    needed) and return ``{path: sha256}`` for its PNGs."""
+    print(f"Setting up {label} dataset (codec-corpus submodule)...")
+    _ensure_codec_corpus_submodule(subdir)
+
+    files = sorted((CODEC_CORPUS_DIR / subdir).glob("*.png"))
+    if not files:
+        raise RuntimeError(f"No PNG images found in {CODEC_CORPUS_DIR / subdir}")
+
+    file_checksums = {str(p): _compute_sha256(p) for p in files}
+    print(f"  ✓ {label} dataset ready ({len(file_checksums)} images)")
+    return file_checksums
+
+
+# ============================================================================
+# Tecnick (TESTIMAGES SAMPLING) dataset — downloaded, never vendored (CC BY-NC)
+# ============================================================================
+
+
+def _setup_tecnick(force: bool = False) -> dict[str, str]:
+    """Download Tecnick SAMPLING (8-bit RGB, 1200x1200), select a diverse subset."""
+    print("Setting up Tecnick (TESTIMAGES SAMPLING) dataset...")
+    base = Path("data/tecnick")
+    base.mkdir(parents=True, exist_ok=True)
+
+    archive = base / "SAMPLING_8BIT_RGB_1200x1200.tar.bz2"
+    selected_txt = base / "selected.txt"
+    img_patterns = ("*.tif", "*.tiff", "*.png")
+
+    # Download
+    if not archive.exists() or force:
+        print("  Downloading Tecnick SAMPLING 8BIT RGB 1200x1200 (~614MB)...")
+        _download_with_progress(TECNICK_URL, archive, "Tecnick")
+        print("  ✓ Tecnick archive downloaded")
+    else:
+        print("  ✓ Tecnick archive already downloaded")
+
+    # Extract (if no source images present yet)
+    present = any(next(base.rglob(p), None) is not None for p in img_patterns)
+    if not present or force:
+        print("  Extracting Tecnick archive...")
+        with tarfile.open(archive, "r:bz2") as tf:
+            try:
+                tf.extractall(base, filter="data")  # py>=3.12
+            except TypeError:
+                tf.extractall(base)
+        print("  ✓ Tecnick extracted")
+    else:
+        print("  ✓ Tecnick already extracted")
+
+    # Select diverse subset
+    if not selected_txt.exists() or force:
+        print("  Selecting diverse images...")
+        selected = _select_diverse_images(
+            base, TECNICK_SELECT_N, patterns=img_patterns, recursive=True
+        )
+        selected_txt.write_text("\n".join(selected) + "\n")
+        print(f"  ✓ Selected {len(selected)} images → {selected_txt}")
+    else:
+        print("  ✓ Tecnick selection already exists")
+        selected = [
+            line.strip()
+            for line in selected_txt.read_text().splitlines()
+            if line.strip()
+        ]
+
+    file_checksums: dict[str, str] = {}
+    for rel in selected:
+        p = base / rel
+        if p.exists():
+            file_checksums[f"data/tecnick/{rel}"] = _compute_sha256(p)
+        else:
+            print(f"  Warning: Selected file not found: {p}")
+
+    print(f"  ✓ Tecnick dataset ready ({len(file_checksums)} selected images)")
+    return file_checksums
+
+
+# ============================================================================
 # Public API
 # ============================================================================
 
@@ -412,6 +566,19 @@ def ensure_dataset(dataset_id: DatasetId, force: bool = False) -> None:
             "generator_version": TEST_GENERATOR_VERSION,
             "setup_complete": True,
         }
+    elif dataset_id in CODEC_CORPUS_SUBDIRS:
+        labels = {
+            DatasetId.CLIC2025: "CLIC 2025",
+            DatasetId.CID22: "CID22",
+            DatasetId.SCREEN: "Screen content (GB82-SC)",
+        }
+        files = _setup_codec_corpus_subset(
+            CODEC_CORPUS_SUBDIRS[dataset_id], labels[dataset_id]
+        )
+        datasets_manifest[dataset_key] = {"files": files, "setup_complete": True}
+    elif dataset_id == DatasetId.TECNICK:
+        files = _setup_tecnick(force)
+        datasets_manifest[dataset_key] = {"files": files, "setup_complete": True}
     else:
         raise ValueError(f"Unknown dataset: {dataset_id}")
 
