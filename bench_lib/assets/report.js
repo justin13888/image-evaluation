@@ -31,11 +31,22 @@
   // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, points} }.
   var DECODERS = readJSON("quality-decoders") || {};
 
+  // Each metric's y-axis is anchored to the metric's *known* range rather than to
+  // the data, so the same metric reads on identical axes across every chart (and
+  // whether you ran one image or a whole dataset). iqa-cli does not report the
+  // theoretical bounds, so they are hard-coded here:
+  //   lo/hi      preferred display band; the axis expands past it only to keep
+  //              out-of-band points on screen (never clips).
+  //   hardLo/hi  absolute theoretical bound the axis must never cross (null =
+  //              that side is unbounded, so it tracks the data).
+  // SSIMULACRA2: ≤100 (100=perfect; 90 visually-lossless, 70 high, 50 medium,
+  // 30 low), unbounded below. SSIM: 0..1. PSNR: dB, ≥0, no fixed ceiling.
+  // Butteraugli: ≥0 (0=identical), no fixed ceiling.
   var METRIC_INFO = {
-    ssimulacra2: { key: "ssimulacra2", name: "SSIMULACRA2", y: "SSIMULACRA2 (higher is better)" },
-    psnr: { key: "psnr", name: "PSNR", y: "PSNR dB (higher is better)" },
-    ssim: { key: "ssim", name: "SSIM", y: "SSIM (higher is better)" },
-    butteraugli: { key: "butteraugli", name: "Butteraugli", y: "Butteraugli (lower is better)" },
+    ssimulacra2: { key: "ssimulacra2", name: "SSIMULACRA2", y: "SSIMULACRA2 (higher is better)", lo: 0, hi: 100, hardLo: null, hardHi: 100 },
+    psnr: { key: "psnr", name: "PSNR", y: "PSNR dB (higher is better)", lo: 20, hi: 50, hardLo: 0, hardHi: null },
+    ssim: { key: "ssim", name: "SSIM", y: "SSIM (higher is better)", lo: 0, hi: 1, hardLo: 0, hardHi: 1 },
+    butteraugli: { key: "butteraugli", name: "Butteraugli", y: "Butteraugli (lower is better)", lo: 0, hi: 3, hardLo: 0, hardHi: null },
   };
 
   var state = { metric: "ssimulacra2", xscale: "linear" };
@@ -69,8 +80,8 @@
       var impls = (byFmt[m.format] = byFmt[m.format] || {});
       var steps = (impls[m.impl] = impls[m.impl] || {});
       var s = (steps[m.label] = steps[m.label] ||
-        { bpp: 0, y: 0, n: 0, t: 0, label: m.label, q: m.quality_value });
-      s.bpp += m.bpp; s.y += y; s.n += 1;
+        { bpp: 0, y: 0, y2: 0, n: 0, t: 0, label: m.label, q: m.quality_value });
+      s.bpp += m.bpp; s.y += y; s.y2 += y * y; s.n += 1;
       s.t += isNum(m.time_s) ? m.time_s : 0;
     });
     var out = {};
@@ -79,7 +90,11 @@
         var steps = byFmt[fmt][impl];
         var points = Object.keys(steps).map(function (k) {
           var s = steps[k];
-          return { x: s.bpp / s.n, y: s.y / s.n, label: s.label, q: s.q, count: s.n, t: s.t / s.n };
+          var mean = s.y / s.n;
+          // Population std of the metric across images at this operating point —
+          // 0 for a single image. Conveys how much the mean curve summarises.
+          var std = s.n > 1 ? Math.sqrt(Math.max(0, s.y2 / s.n - mean * mean)) : 0;
+          return { x: s.bpp / s.n, y: mean, std: std, label: s.label, q: s.q, count: s.n, t: s.t / s.n };
         }).sort(function (a, b) { return a.x - b.x; });
         return { impl: impl, points: points };
       }).filter(function (s) { return s.points.length > 0; });
@@ -171,8 +186,17 @@
         xticks = linTicks(xmin, xmax, 6);
         dxmin = Math.min(xmin, xticks[0]); dxmax = Math.max(xmax, xticks[xticks.length - 1]);
       }
-      var yticks = linTicks(ymin, ymax, 6);
-      var dymin = Math.min(ymin, yticks[0]), dymax = Math.max(ymax, yticks[yticks.length - 1]);
+      // Metric (y) axis: anchor to the metric's known range, expanding only to
+      // fit out-of-band points, then clamp to the theoretical bounds. This keeps
+      // the axis identical across charts/formats and single-image vs dataset.
+      var ylo = (info.lo != null) ? Math.min(info.lo, ymin) : ymin;
+      var yhi = (info.hi != null) ? Math.max(info.hi, ymax) : ymax;
+      if (info.hardLo != null) ylo = Math.max(ylo, info.hardLo);
+      if (info.hardHi != null) yhi = Math.min(yhi, info.hardHi);
+      var yticks = linTicks(ylo, yhi, 6);
+      var dymin = Math.min(ylo, yticks[0]), dymax = Math.max(yhi, yticks[yticks.length - 1]);
+      if (info.hardLo != null) dymin = Math.max(dymin, info.hardLo);
+      if (info.hardHi != null) dymax = Math.min(dymax, info.hardHi);
       if (dymax === dymin) dymax = dymin + 1;
 
       var lx0 = log ? Math.log10(dxmin) : dxmin, lx1 = log ? Math.log10(dxmax) : dxmax;
@@ -210,7 +234,7 @@
         s.points.forEach(function (p, i) {
           var px = sx(p.x), py = sy(p.y);
           d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
-          hits.push({ sx: px, sy: py, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, t: p.t });
+          hits.push({ sx: px, sy: py, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, std: p.std, t: p.t });
         });
         svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
         s.points.forEach(function (p) {
@@ -238,7 +262,7 @@
       chip.addEventListener("click", function () {
         var k = chip.getAttribute("data-key");
         if (hidden[k]) delete hidden[k]; else hidden[k] = 1;
-        renderRDChart(container, series, chartId);
+        renderRDChart(container, series, chartId, metric);
       });
     });
 
@@ -261,12 +285,14 @@
           hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
           var crect = container.getBoundingClientRect();
           tip.hidden = false;
+          var agg = best.count > 1;
           tip.innerHTML = "<b>" + esc(best.label) + "</b><br>" +
             '<span class="k">step</span> ' + esc(best.step) + "<br>" +
-            '<span class="k">bpp</span> ' + best.x.toFixed(3) + "<br>" +
-            '<span class="k">' + esc(info.name) + "</span> " + best.y.toFixed(2) +
+            '<span class="k">bpp</span> ' + best.x.toFixed(3) + (agg ? " (mean)" : "") + "<br>" +
+            '<span class="k">' + esc(info.name) + (agg ? " (mean)" : "") + "</span> " + best.y.toFixed(2) +
+            (agg && best.std > 0 ? " ± " + best.std.toFixed(2) : "") +
             (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
-            (best.count > 1 ? '<br><span class="k">images</span> ' + best.count : "");
+            '<br><span class="k">images</span> ' + (agg ? best.count : "1 (single)");
           var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
           if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
           tip.style.left = Math.max(0, tx) + "px";
@@ -370,6 +396,41 @@
     var rows = validRows(METRICS);
     renderCombined(aggregate(rows, state.metric));
     renderPerFormat(rows, availableMetrics());
+  }
+
+  // ---- aggregation disclosure ----------------------------------------------
+
+  // Distinct source images scored — the set every plotted point is averaged
+  // over. The charts collapse this to one mean curve, so a single-image run and
+  // a whole-dataset run draw the same shape; this number is what tells them
+  // apart, so it is stated up front (and per-point in tooltips).
+  function imageCount() {
+    var seen = {};
+    METRICS.forEach(function (m) {
+      if (!m || m.error) return;
+      var p = m.source_path || m.input_path;
+      if (p) seen[p] = 1;
+    });
+    return Object.keys(seen).length;
+  }
+
+  function renderAggregationNote() {
+    var host = document.getElementById("q-aggregation");
+    if (!host) return;
+    var n = imageCount();
+    var cfg = (readJSON("quality-manifest") || {}).benchmark_config || {};
+    var ds = cfg.dataset ? "the <b>" + esc(String(cfg.dataset)) + "</b> dataset" : "the dataset";
+    if (n <= 1) {
+      host.innerHTML = "<b>Single image.</b> Every plotted point is that one " +
+        "image's measured value at one operating point — not an average. Run " +
+        "over a multi-image dataset to summarise across images.";
+    } else {
+      host.innerHTML = "Every plotted point is the <b>mean (arithmetic average)</b> " +
+        "of the metric across the <b>" + n + " images</b> in " + ds + ", at one " +
+        "operating point (bpp is likewise the per-image mean). Hover a point for " +
+        "its image count and spread (±1σ across images); BD-rate below is computed " +
+        "per image, then averaged.";
+    }
   }
 
   // ---- BD-rate table (sortable) -------------------------------------------
@@ -664,6 +725,7 @@
   function init() {
     if (!document.getElementById("quality-app")) return;
     renderControls();
+    renderAggregationNote();
     renderAll();
     renderLossless();
     renderDecoders();

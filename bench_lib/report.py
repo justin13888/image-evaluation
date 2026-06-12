@@ -68,6 +68,103 @@ def _load_json(path: str) -> Optional[Any]:
         return None
 
 
+def _benchmark_config(bundle_dir: str) -> Optional[dict]:
+    """The run's ``benchmark_config`` (dataset, formats, mode, …) from whichever
+    manifest carries it. Quality is preferred since it always runs."""
+    for rel in ("quality/manifest.json", "performance/manifest.json", "manifest.json"):
+        m = _load_json(os.path.join(bundle_dir, rel))
+        if isinstance(m, dict) and isinstance(m.get("benchmark_config"), dict):
+            return m["benchmark_config"]
+    return None
+
+
+def _distinct_image_count(bundle_dir: str) -> Optional[int]:
+    """Number of distinct source images actually scored, from the embedded
+    metrics — the ground truth of what the curves aggregate over. ``None`` if no
+    metrics are present."""
+    metrics = _load_json(os.path.join(bundle_dir, "quality", "metrics.json"))
+    if not isinstance(metrics, list):
+        return None
+    images = {
+        os.path.basename(m.get("source_path") or m.get("input_path") or "")
+        for m in metrics
+        if isinstance(m, dict) and not m.get("error")
+    }
+    images.discard("")
+    return len(images) or None
+
+
+def _config_section(bundle_dir: str) -> list[str]:
+    """A 'Dataset & run configuration' table: what was benchmarked, how many
+    images the curves aggregate over, and a link to the dataset's source. Empty
+    when no benchmark_config manifest is available (e.g. a bare metrics bundle)."""
+    cfg = _benchmark_config(bundle_dir)
+    if not cfg:
+        return []
+    n_images = _distinct_image_count(bundle_dir)
+
+    rows: list[str] = []
+
+    def row(label: str, value: str) -> None:
+        rows.append(f"<tr><th>{html.escape(label)}</th><td>{value}</td></tr>")
+
+    dataset = cfg.get("dataset")
+    if dataset:
+        homepage = cfg.get("dataset_homepage")
+        name = html.escape(str(dataset))
+        if homepage:
+            name = (
+                f'<a href="{html.escape(str(homepage))}" '
+                f'rel="noopener noreferrer">{name}</a>'
+            )
+        desc = cfg.get("dataset_description")
+        if desc:
+            name += f" &mdash; {html.escape(str(desc))}"
+        row("Dataset", name)
+
+    if n_images is not None:
+        sample = cfg.get("sample")
+        note = (
+            " (single image &mdash; values are that image's measurement, not an "
+            "average)"
+            if n_images == 1
+            else " (each plotted point is the mean across these images)"
+        )
+        sample_note = (
+            f" &middot; sampled from a larger set (--sample {html.escape(str(sample))})"
+            if sample
+            else ""
+        )
+        row("Images", f"{n_images}{note}{sample_note}")
+
+    formats = cfg.get("formats")
+    if formats:
+        row(
+            "Formats",
+            html.escape(
+                ", ".join(str(f) for f in formats)
+                if isinstance(formats, list)
+                else str(formats)
+            ),
+        )
+    if cfg.get("mode"):
+        row("Mode", html.escape(str(cfg["mode"])))
+    qsteps = cfg.get("quality_steps")
+    row(
+        "Quality points",
+        "every declared point" if qsteps in (None, 0) else html.escape(str(qsteps)),
+    )
+    if cfg.get("quick"):
+        row("Quick mode", "yes (2 quality points/impl)")
+
+    if not rows:
+        return []
+    return [
+        "<h2>Dataset &amp; run configuration</h2>",
+        "<table>" + "".join(rows) + "</table>",
+    ]
+
+
 def _manifest_summary(bundle_dir: str) -> str:
     """A short system/config summary from whichever manifest is available."""
     for rel in ("performance/manifest.json", "quality/manifest.json", "manifest.json"):
@@ -148,6 +245,7 @@ def _quality_section(qual_dir: str) -> list[str]:
     parts.append(
         "<div id='quality-app'>"
         "<div id='q-controls'></div>"
+        "<div id='q-aggregation' class='q-agg'></div>"
         "<h3>Cross-format Pareto front — best encoders of each format</h3>"
         "<p class='q-note'>Each curve is a format's Pareto-optimal encoder(s) "
         "(non-dominated in bpp vs quality), coloured by format. Up and to the "
@@ -155,8 +253,10 @@ def _quality_section(qual_dir: str) -> list[str]:
         "<div id='q-combined'></div>"
         "<h3>Rate-distortion by format</h3>"
         "<p class='q-note'>A small-multiples grid per format: every encoder's "
-        "quality sweep aggregated to a clean mean curve across the dataset, shown "
-        "for every available metric (SSIMULACRA2, PSNR, SSIM, Butteraugli).</p>"
+        "quality sweep aggregated to a mean curve over the images (see the "
+        "aggregation note above), shown for every available metric (SSIMULACRA2, "
+        "PSNR, SSIM, Butteraugli). Each metric's y-axis is fixed to that metric's "
+        "known range, so formats are directly comparable.</p>"
         "<div id='q-charts'></div>"
         "<h3>Lossless compression efficiency</h3>"
         "<p class='q-note'>Lossless encoders produce a pixel-identical image, so "
@@ -213,6 +313,8 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
     ]
     if generated_at:
         parts.append(f"<p class='muted'>Generated: {html.escape(generated_at)}</p>")
+
+    parts.extend(_config_section(bundle_dir))
 
     manifest_html = _manifest_summary(bundle_dir)
     if manifest_html:
