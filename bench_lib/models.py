@@ -580,6 +580,19 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.ENCODE,
         format=ImageFormat.WEBP,
     ),
+    # libwebp in lossless mode (VP8L). Reuses the same binary as libwebp-encode;
+    # the distinct name makes it a separate series so the lossless operating point
+    # is not conflated with the lossy VP8 quality sweep (mirrors
+    # libjxl-lossless-encode). Used as the WebP lossless reference encoder so the
+    # decoder sweep also exercises the VP8L decode path (issue #21).
+    Implementation(
+        name="libwebp-lossless-encode",
+        build="cpp",
+        lang="c",
+        bin="implementations/cpp/libwebp/build/bench-libwebp-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.WEBP,
+    ),
     # AVIF
     Implementation(
         name="rav1e-encode",
@@ -712,6 +725,17 @@ REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
     ImageFormat.AVIF: "libavif-encode",
     ImageFormat.JXL: "libjxl-encode",
     PPMImageFormat.PPM: "null-cpp-encode",
+}
+
+# Lossless reference encoders, used only to generate the *lossless* decode-path
+# inputs for the decoder sweep (issue #21): formats with both a lossy and a
+# lossless mode (WebP VP8L, JXL distance-0) must exercise both decode paths, not
+# just the lossy one from REFERENCE_ENCODERS. A format absent here has no separate
+# lossless decode path — JPEG is lossy-only, PNG is already lossless-only (its sole
+# REFERENCE_ENCODERS entry covers it), and AVIF has no lossless encoder yet.
+LOSSLESS_REFERENCE_ENCODERS: Dict[ImageFormats, str] = {
+    ImageFormat.WEBP: "libwebp-lossless-encode",
+    ImageFormat.JXL: "libjxl-lossless-encode",
 }
 
 # Reference decoders, used to turn an encoded output back into a PPM so iqa-cli
@@ -1002,6 +1026,28 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_axis="method",
         quality_sweep=_WEBP_METHOD_SWEEP,
         perf_preset={"quality": "100", "method": "4"},
+        lossless=True,
+    ),
+    # libwebp lossless VP8L: same binary as libwebp-encode with the `lossless` flag
+    # pinned on. Quality is pinned high and the swept axis is the encoder `method`
+    # (effort), tracing size-vs-effort; it also feeds the VP8L decode path of the
+    # decoder sweep (issue #21). `lossless` is pinned in perf_preset so the binary
+    # actually receives `--param lossless=true` (only preset keys are emitted).
+    "libwebp-lossless-encode": TunableSchema(
+        params=[
+            Tunable(name="quality", kind="float", default="100", min=0, max=100),
+            Tunable(name="method", kind="int", default="4", min=0, max=6),
+            Tunable(
+                name="lossless",
+                kind="bool",
+                default="true",
+                skip_reason="pinned on: this series IS the lossless VP8L pipeline "
+                "(lossless=false would just duplicate libwebp-encode's lossy VP8)",
+            ),
+        ],
+        quality_axis="method",
+        quality_sweep=_WEBP_METHOD_SWEEP,
+        perf_preset={"quality": "100", "method": "4", "lossless": "true"},
         lossless=True,
     ),
     # --- AVIF ---
@@ -1654,6 +1700,11 @@ class BenchmarkTask(BaseModel):
     discard_output: bool
     measure_memory: bool
     pin_cores: bool
+    # Decode-only: True when the encoded input was produced by the format's
+    # dedicated lossless reference encoder (LOSSLESS_REFERENCE_ENCODERS, issue #21),
+    # so the added lossless decode path is distinguishable from the lossy one in the
+    # metrics. Always False for encoder/null tasks and for mono-mode formats.
+    input_lossless: bool = False
 
     def format_as_str(self) -> str:
         """
@@ -1799,7 +1850,11 @@ class BenchmarkMetrics(TypedDict):
     format: str
     # True for a lossless encoder's rows (issue #26): pixel-identical round-trip,
     # so excluded from rate-distortion charts / BD-rate / Pareto and shown in the
-    # lossless compression-efficiency view instead.
+    # lossless compression-efficiency view instead. For a *decode* row this instead
+    # marks that the input came from the format's dedicated lossless reference encoder
+    # (issue #21), separating the added lossless decode path from the lossy one;
+    # encoder-side views ignore decode rows (they gate on type == "encode"), so the
+    # reuse is unambiguous.
     lossless: bool
     # Image dimension metrics
     width: int

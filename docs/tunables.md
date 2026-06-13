@@ -35,6 +35,7 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 | `zenwebp-encode` | rust | `quality` — 10→95 (10 pts, quality) | — | — | `method`=4 |
 | `zenwebp-lossless-encode` | rust | `method` — 0→6 (7 pts, effort, lossless) | — | — | `quality`=100 |
 | `libwebp-encode` | c | `quality` — 10→95 (10 pts, quality) | — | — | `method`=4†, `lossless`=false† |
+| `libwebp-lossless-encode` | c | `method` — 0→6 (7 pts, effort, lossless) | — | — | `quality`=100, `lossless`=true† |
 
 ### AVIF
 
@@ -64,6 +65,7 @@ Knobs the implementation *reads* but is deliberately pinned (`pinned`), plus lib
 | `libwebp-encode` | `method` | pinned (wired) | effort/speed knob — covered by the performance overlay, not a default RD series |
 | `libwebp-encode` | `lossless` | pinned (wired) | mode toggle: lossless WebP is a distinct pipeline (see image-webp-encode), not a knob on the lossy RD curve |
 | `libwebp-encode` | `filter/sns/segments/near_lossless/use_sharp_yuv/preprocessing` | not wired | irrelevant: large WebPConfig tail with low RD value vs quality; alpha/target-size knobs N/A for opaque RGB / deterministic runs |
+| `libwebp-lossless-encode` | `lossless` | pinned (wired) | pinned on: this series IS the lossless VP8L pipeline (lossless=false would just duplicate libwebp-encode's lossy VP8) |
 | `rav1e-encode` | `speed` | pinned (wired) | speed is a quality/throughput trade — covered by the performance overlay, not a default RD series |
 | `rav1e-encode` | `tune` | not wired | deferred: Psnr-vs-Psychovisual tuning entangles the IQA metric choice |
 | `rav1e-encode` | `tiling` | not wired | irrelevant: tile_rows/tile_cols affect parallelism, not RD |

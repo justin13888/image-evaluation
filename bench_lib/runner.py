@@ -45,6 +45,7 @@ from bench_lib.models import (
     ImageFormats,
     Implementation,
     LOSSLESS_LABEL,
+    LOSSLESS_REFERENCE_ENCODERS,
     PerfMode,
     PPMImageFormat,
     RunArgs,
@@ -244,9 +245,10 @@ def _source_to_ppm(f: str) -> str:
     return ppm
 
 
-# Decode inputs are reference-encoded once per (dataset, format, operating point).
+# Decode inputs are reference-encoded once per (dataset, format, reference encoder,
+# operating point).
 DECODE_INPUTS_CACHE: Dict[
-    tuple[DatasetId, ImageFormats, str, Optional[int]],
+    tuple[DatasetId, ImageFormats, str, str, Optional[int]],
     Sequence[tuple[str, str]],
 ] = {}
 
@@ -254,22 +256,26 @@ DECODE_INPUTS_CACHE: Dict[
 def get_decode_inputs(
     dataset_name: DatasetId,
     format: ImageFormat,
+    ref_name: str,
     label: str,
     params: Dict[str, str],
     limit: Optional[int] = None,
 ) -> Sequence[tuple[str, str]]:
     """Reference-encoded decode inputs for one operating point of the sweep.
 
-    For each (sampled) source image, encode it with `format`'s reference encoder
+    For each (sampled) source image, encode it with the `ref_name` reference encoder
     at `params` — the same quality/effort axis the encoder sweep uses — returning
-    (encoded_path, source_ppm_path) pairs. The encoded file is named with the
-    operating-point `label` so different quality levels never collide, and the
-    list is cached per (dataset, format, label, limit).
+    (encoded_path, source_ppm_path) pairs. `ref_name` is the format's lossy reference
+    encoder, or its lossless one when generating the lossless decode path (issue #21).
+    The encoded file is named with the operating-point `label` so different quality
+    levels never collide (the lossy and lossless references use distinct label axes,
+    e.g. `quality-*` vs `method-*`), and the list is cached per (dataset, format,
+    ref_name, label, limit).
 
     The decoder under test reads `encoded_path`; fidelity is scored against the
     format's golden decoder of the same input (not against the source), so
     `source_ppm_path` is returned only for reference/round-trip use."""
-    key = (dataset_name, format, label, limit)
+    key = (dataset_name, format, ref_name, label, limit)
     if key in DECODE_INPUTS_CACHE:
         return DECODE_INPUTS_CACHE[key]
 
@@ -279,9 +285,6 @@ def get_decode_inputs(
         rnd = random.Random(f"{dataset_name}_{limit}")
         dataset_files = rnd.sample(dataset_files, limit)
 
-    ref_name = REFERENCE_ENCODERS.get(format)
-    if not ref_name:
-        raise RuntimeError(f"No reference encoder defined for {format}")
     ref_impl = find_implementation_by_name(ref_name)
     if not ref_impl:
         raise RuntimeError(f"Reference encoder {ref_name} not found")
@@ -406,6 +409,7 @@ def build_sweep(format: ImageFormat, dataset: DatasetId, args: RunArgs) -> Bench
         label: str,
         input_file: str,
         source_file: str,
+        input_lossless: bool = False,
     ) -> None:
         benches.append(
             BenchmarkTask(
@@ -414,6 +418,7 @@ def build_sweep(format: ImageFormat, dataset: DatasetId, args: RunArgs) -> Bench
                 label=label,
                 input_path=input_file,
                 source_path=source_file,
+                input_lossless=input_lossless,
                 # One pass writes the output so size + IQA can be scored; its
                 # wall-clock is the relative time (issue #29). The timing overlay
                 # clones these with discard + real iteration/thread counts.
@@ -469,7 +474,7 @@ def _build_decoder_sweep(
     dataset: DatasetId,
     args: RunArgs,
     steps: Optional[int],
-    emit: Callable[[Implementation, Dict[str, str], str, str, str], None],
+    emit: Callable[..., None],
 ) -> None:
     """Emit decoder tasks across the same operating-point axis as the encoders.
 
@@ -477,7 +482,13 @@ def _build_decoder_sweep(
     point of the format's reference encoder (the same quality/effort sweep
     encoders trace), reference-encode the sources at that point and decode them.
     Decode cost and fidelity (PSNR vs the golden decoder, scored later) thus trace
-    input bitrate. Knob-less reference encoders contribute a single point."""
+    input bitrate. Knob-less reference encoders contribute a single point.
+
+    Formats with both a lossy and a lossless mode (WebP, JXL) are swept against
+    *both* their lossy (REFERENCE_ENCODERS) and lossless (LOSSLESS_REFERENCE_ENCODERS)
+    reference encoders, so every decode path is exercised, not just the lossy one
+    (issue #21). The lossless path is additive: if its reference binary cannot be
+    built it is skipped so the lossy sweep still runs."""
     decoders = [
         impl
         for impl in IMPLEMENTATIONS
@@ -486,21 +497,52 @@ def _build_decoder_sweep(
     if not decoders:
         return
 
-    ref_name = REFERENCE_ENCODERS.get(format)
-    ref_impl = find_implementation_by_name(ref_name) if ref_name else None
-    if not ref_impl:
+    ref_names: list[str] = []
+    lossy_ref = REFERENCE_ENCODERS.get(format)
+    if lossy_ref:
+        ref_names.append(lossy_ref)
+    lossless_ref = LOSSLESS_REFERENCE_ENCODERS.get(format)
+    if lossless_ref and lossless_ref not in ref_names:
+        ref_names.append(lossless_ref)
+    if not ref_names:
         raise RuntimeError(f"No reference encoder defined for {format}")
 
-    points = _encoder_points(schema_for(ref_impl.name), steps)
-    if not points:
-        points = [(schema_for(ref_impl.name).perf_params(), "perf")]
+    for ref_name in ref_names:
+        ref_impl = find_implementation_by_name(ref_name)
+        if not ref_impl:
+            raise RuntimeError(f"Reference encoder {ref_name} not found")
+        if not os.path.exists(ref_impl.bin):
+            build_project(ref_impl)
+        if not os.path.exists(ref_impl.bin):
+            # Additive lossless path: skip so the lossy decode sweep still runs.
+            print(f"Skipping decode inputs from {ref_name}: binary unavailable")
+            continue
 
-    for params, label in points:
-        inputs = get_decode_inputs(dataset, format, label, params, args.sample)
-        for impl in decoders:
-            _require_bin(impl)
-            for input_file, source_file in inputs:
-                emit(impl, {}, label, input_file, source_file)
+        # Mark the dedicated lossless reference's inputs as the lossless decode path
+        # (issue #21), so the report separates it from the lossy path. Keyed on the
+        # reference's identity, not its schema.lossless, so a lossless-only format
+        # like PNG (whose sole reference is lossless) is not spuriously split.
+        is_lossless_path = ref_name == lossless_ref
+        schema = schema_for(ref_impl.name)
+        points = _encoder_points(schema, steps)
+        if not points:
+            points = [(schema.perf_params(), "perf")]
+
+        for params, label in points:
+            inputs = get_decode_inputs(
+                dataset, format, ref_name, label, params, args.sample
+            )
+            for impl in decoders:
+                _require_bin(impl)
+                for input_file, source_file in inputs:
+                    emit(
+                        impl,
+                        {},
+                        label,
+                        input_file,
+                        source_file,
+                        input_lossless=is_lossless_path,
+                    )
 
 
 def _task_metric_fields(task: BenchmarkTask) -> Dict[str, str]:
@@ -622,7 +664,10 @@ def _measure_one(
 
     # Lossless encoders (issue #26) are flagged on every row so the report/summary
     # can route them to the compression-efficiency view and out of the RD analytics.
-    lossless = schema_for(task.impl.name).lossless
+    # For a decode row the encoder schema is empty, so the flag instead marks that the
+    # input came from a lossless reference encoder (issue #21), separating the lossless
+    # decode path from the lossy one.
+    lossless = schema_for(task.impl.name).lossless or task.input_lossless
 
     # Temp files this task writes into the shared staging dir; removed in `finally`
     # (unless --keep-temp). Filenames carry a random suffix via identifier(), so

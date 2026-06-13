@@ -206,9 +206,15 @@ def decoder_fidelity(
     bit-exact, and a ``points`` list (decode time + PSNR vs input bpp) for the
     speed-vs-bitrate chart.
 
-    Returns ``{impl: {format, mean_time_s, mean_bpp, count, bit_exact,
-    worst_psnr, points:[{bpp, time_s, psnr, label}]}}``. Decoders with no valid
-    golden-basis row are omitted."""
+    Formats with both a lossy and a lossless mode (WebP, JXL) decode inputs from
+    both paths (issue #21); the two are reported separately — bit-exact lossless
+    points (PSNR ∞) would otherwise mask an approximate lossy path in the same
+    decoder's aggregate. The lossless path is keyed ``"<impl> (lossless)"``.
+
+    Returns ``{key: {format, mean_time_s, mean_bpp, count, bit_exact,
+    worst_psnr, points:[{bpp, time_s, psnr, label}]}}`` where ``key`` is the decoder
+    name (lossy path) or ``"<impl> (lossless)"`` (lossless path). Decoders with no
+    valid golden-basis row are omitted."""
     rows = [
         m
         for m in metrics
@@ -217,7 +223,8 @@ def decoder_fidelity(
         and not m.get("error")
     ]
     result: Dict[str, Dict[str, Any]] = {}
-    for impl, impl_rows in _group_by(rows, lambda m: m["impl"]).items():
+    grouped = _group_by(rows, lambda m: (m["impl"], bool(m.get("lossless"))))
+    for (impl, is_lossless), impl_rows in grouped.items():
         times = [
             m["time_s"] for m in impl_rows if isinstance(m.get("time_s"), (int, float))
         ]
@@ -239,7 +246,10 @@ def decoder_fidelity(
             ),
             key=lambda p: p["bpp"],
         )
-        result[impl] = {
+        # Lossy path keeps the bare impl name; the lossless path (issue #21) is a
+        # distinct, self-describing row so the two are not conflated.
+        display = f"{impl} (lossless)" if is_lossless else impl
+        result[display] = {
             "format": impl_rows[0]["format"],
             "mean_time_s": (sum(times) / len(times)) if times else 0.0,
             "mean_bpp": (sum(bpps) / len(bpps)) if bpps else 0.0,
