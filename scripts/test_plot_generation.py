@@ -280,10 +280,65 @@ def test_report_html():
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 
+def test_variant_series_roundtrip():
+    """Secondary-knob variants (issue #4) are distinct series: their ``base@tag``
+    impl name must survive the ``BenchmarkTask.name()`` -> ``_parse_command_name``
+    round-trip (so report/summary recover the right series, not a corrupted base
+    curve), and ``schema_for`` must resolve them with the override folded in."""
+    from bench_lib.models import IMPLEMENTATIONS, BenchmarkTask, schema_for
+    from bench_lib.summary import _parse_command_name
+
+    assert [i for i in IMPLEMENTATIONS if i.variant_kind == "curated"], (
+        "expected curated variants from _expand_variants()"
+    )
+    assert [i for i in IMPLEMENTATIONS if i.variant_kind == "oat"], (
+        "expected one-at-a-time (oat) variants from _expand_variants()"
+    )
+    impl = next(i for i in IMPLEMENTATIONS if i.name == "libjxl-encode@progressive-on")
+    schema = schema_for(impl.name)
+    assert schema.quality_axis == "distance", "variant keeps the base quality axis"
+    assert schema.perf_preset.get("progressive") == "1", "override folded into preset"
+    task = BenchmarkTask(
+        impl=impl,
+        params=schema.quality_params("1.0"),
+        label="distance-1.0",
+        input_path="data/img.png",
+        source_path="data/img.png",
+        iterations=1,
+        warmup=0,
+        threads=1,
+        discard_output=False,
+        measure_memory=False,
+        pin_cores=False,
+    )
+    parsed = _parse_command_name(task.name())
+    assert parsed is not None, f"variant task name did not parse: {task.name()!r}"
+    assert parsed["impl"] == "libjxl-encode@progressive-on", parsed
+    assert parsed["format"] == "jxl" and parsed["type"] == "encode", parsed
+    assert parsed["label"] == "distance-1.0" and parsed["threads"] == 1, parsed
+    print("✓ variant series round-trip:", parsed["impl"])
+
+
+def test_tunables_doc_in_sync():
+    """docs/tunables.md must match what the schemas generate — the overview is the
+    single in-code source of truth, so drift fails CI (run ./bench docs to fix)."""
+    from bench_lib.tunables_doc import render_tunables_markdown
+
+    path = os.path.join(repo_root, "docs", "tunables.md")
+    assert os.path.exists(path), "docs/tunables.md missing — run ./bench docs"
+    committed = open(path).read()
+    assert committed == render_tunables_markdown(), (
+        "docs/tunables.md is out of sync with TUNABLE_SCHEMAS; run ./bench docs"
+    )
+    print("✓ tunables overview in sync with TUNABLE_SCHEMAS")
+
+
 def main():
     test_timing_summary()
     test_quality_summary()
     test_report_html()
+    test_variant_series_roundtrip()
+    test_tunables_doc_in_sync()
     print("\nAll plot/report generation checks passed.")
 
 

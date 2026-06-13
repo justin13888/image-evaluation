@@ -14,10 +14,12 @@ class MozjpegEncodeBench : public BenchmarkImplementation {
     height = img.height;
     input_data = std::move(img.data);
 
-    // Tunables: quality (1-100), progressive scan, chroma subsampling.
+    // Tunables: quality (1-100), progressive scan, chroma subsampling, and
+    // mozjpeg's trellis quantization (on by default; issue #4 tests it off).
     quality = param_int(args, "quality", 80);
     progressive = param_bool(args, "progressive", true);
     use_444 = (param_str(args, "subsampling", "420") == "444");
+    trellis = param_bool(args, "trellis", true);
   }
 
   std::vector<uint8_t> run(const Args &args) override {
@@ -39,6 +41,13 @@ class MozjpegEncodeBench : public BenchmarkImplementation {
 
     jpeg_set_defaults(&cinfo);
     jpeg_set_quality(&cinfo, quality, TRUE);
+
+    // Trellis quantization is a mozjpeg extension (on by default). Toggle both
+    // the AC and DC trellis passes so trellis-off is a clean comparison point.
+    jpeg_c_set_bool_param(&cinfo, JBOOLEAN_TRELLIS_QUANT,
+                          trellis ? TRUE : FALSE);
+    jpeg_c_set_bool_param(&cinfo, JBOOLEAN_TRELLIS_QUANT_DC,
+                          trellis ? TRUE : FALSE);
 
     if (progressive) {
       jpeg_simple_progression(&cinfo);
@@ -83,6 +92,7 @@ class MozjpegEncodeBench : public BenchmarkImplementation {
   int quality;
   bool progressive;
   bool use_444;
+  bool trellis;
 };
 
 int main(int argc, char **argv) {

@@ -175,9 +175,7 @@ DATASETS: Dict[str, Dataset] = {
     ),
     "cid22": Dataset(
         description="CID22 validation references (41 images, 512px; SSIMULACRA2 set)",
-        files=lambda: _corpus_sources(
-            "vendor/codec-corpus/CID22/CID22-512/validation"
-        ),
+        files=lambda: _corpus_sources("vendor/codec-corpus/CID22/CID22-512/validation"),
         homepage="https://cloudinary.com/labs/cid22",
     ),
     "screen": Dataset(
@@ -207,6 +205,16 @@ class Implementation(BaseModel):
     type: BenchmarkType
     # Image format supported. None implies any format (e.g., null implementation)
     format: Optional[ImageFormat]
+    # Provenance for derived secondary-knob series (see `Variant` / `_expand_variants`):
+    # None  -> a hand-written base implementation;
+    # "curated" -> a default-on variant (--params variants);
+    # "oat"  -> a one-at-a-time variant only run under --params all.
+    # Variants reuse their base's `bin`, so they add no build target.
+    variant_kind: Optional[Literal["curated", "oat"]] = None
+
+    @property
+    def is_variant(self) -> bool:
+        return self.variant_kind is not None
 
 
 class Tunable(BaseModel):
@@ -224,6 +232,31 @@ class Tunable(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     choices: Optional[list[str]] = None
+    description: str = ""
+    # When set, this knob IS read by the binary but is deliberately NOT varied by
+    # the sweep (it stays pinned at its perf_preset/default). The reason is
+    # surfaced verbatim in the generated tunables overview so every intentional
+    # "we don't test this" decision lives in code (issue #4). None = either swept
+    # (the quality axis) or exercised via a `variant`.
+    skip_reason: Optional[str] = None
+
+
+class Variant(BaseModel):
+    """A named secondary operating point of a base encoder: a fixed override of
+    one or more non-quality knobs, layered on top of the schema's perf_preset.
+
+    Each variant derives a distinct Implementation that REUSES the base binary
+    (exactly like the hand-written ``libjxl-lossless-encode``) plus a derived
+    schema, so it becomes its own series end-to-end — its own rate-distortion
+    curve, BD-rate row, and Pareto candidacy — without polluting the base
+    encoder's curve (every report/plot path groups by ``impl`` name). The quality
+    axis is still swept *within* each variant, tracing a full curve at the fixed
+    secondary setting."""
+
+    # Short, grammar-safe tag (no ", ", " (", or "="); see `variant_impl_name`).
+    tag: str
+    # Knob -> fixed value, applied on top of perf_preset for this variant.
+    overrides: Dict[str, str]
     description: str = ""
 
 
@@ -257,6 +290,15 @@ class TunableSchema(BaseModel):
     # compression-efficiency view instead of the rate-distortion charts / BD-rate
     # / Pareto front. `quality_axis` (if set) is then an effort axis, not quality.
     lossless: bool = False
+    # Curated secondary operating points run by default (--params variants): each
+    # derives a distinct base@tag series (issue #4). Empty for decoders, knob-less
+    # encoders, and the derived variant schemas themselves.
+    variants: list[Variant] = []
+    # Library features this implementation deliberately does NOT wire as a knob at
+    # all (so there is no `Tunable` to carry a `skip_reason`). (name, reason) pairs,
+    # surfaced in the generated overview so the "intentionally skipped as
+    # irrelevant" decisions live in code (issue #4).
+    skipped: list[Tuple[str, str]] = []
 
     def perf_params(self) -> Dict[str, str]:
         """Concrete params for the performance suite (the fixed preset)."""
@@ -745,9 +787,25 @@ _JXL_EFFORT_SWEEP = [str(i) for i in range(1, 10)]  # libjxl effort 1-9
 _ZENPNG_EFFORT_SWEEP = ["0", "1", "2", "7", "13", "17", "19", "22", "24"]
 
 
-def _jpeg_full_schema() -> "TunableSchema":
+# Curated JPEG secondary operating points (issue #4). 4:4:4 vs the default 4:2:0
+# is the single highest-value chroma axis; sequential vs progressive is added only
+# for the reference-class encoders to bound the default series count.
+_JPEG_444_VARIANT = Variant(
+    tag="subsampling-444",
+    overrides={"subsampling": "444"},
+    description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
+)
+_JPEG_SEQUENTIAL_VARIANT = Variant(
+    tag="progressive-off",
+    overrides={"progressive": "false"},
+    description="Sequential (baseline) vs the default progressive scan",
+)
+
+
+def _jpeg_full_schema(variants: Optional[list["Variant"]] = None) -> "TunableSchema":
     """JPEG encoders exposing quality + progressive + chroma subsampling
-    (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder)."""
+    (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder, zenjpeg). `variants` selects the
+    curated secondary series; defaults to the 4:4:4 chroma variant."""
     return TunableSchema(
         params=[
             Tunable(
@@ -775,12 +833,46 @@ def _jpeg_full_schema() -> "TunableSchema":
         quality_axis="quality",
         quality_sweep=_JPEG_QUALITY_SWEEP,
         perf_preset={"quality": "80", "progressive": "true", "subsampling": "420"},
+        variants=[_JPEG_444_VARIANT] if variants is None else variants,
     )
 
 
+def _mozjpeg_schema() -> "TunableSchema":
+    """mozjpeg = the full JPEG schema plus mozjpeg's headline extension, trellis
+    quantization (on by default; the meaningful test is turning it OFF)."""
+    schema = _jpeg_full_schema(
+        variants=[
+            _JPEG_444_VARIANT,
+            _JPEG_SEQUENTIAL_VARIANT,
+            Variant(
+                tag="trellis-off",
+                overrides={"trellis": "false"},
+                description="Disable mozjpeg trellis quantization (on by default)",
+            ),
+        ]
+    )
+    schema.params.append(
+        Tunable(
+            name="trellis",
+            kind="bool",
+            default="true",
+            description="Trellis quantization (mozjpeg-specific; default on)",
+        )
+    )
+    schema.perf_preset["trellis"] = "true"
+    # mozjpeg-specific knobs we read about but deliberately do not sweep.
+    schema.skipped = [
+        ("optimize_scans", "irrelevant: scan-order micro-opt, not RD-relevant here"),
+        ("dc_scan_opt_mode", "irrelevant: DC scan tuning, marginal vs quality"),
+        ("base_quant_tbl_idx", "irrelevant: alternate quant tables, niche"),
+    ]
+    return schema
+
+
 def _avif_schema() -> "TunableSchema":
-    """AVIF encoders via libavif (libavif, svt-av1) and rav1e share a 0-100
-    quality knob plus a speed preset and chroma format."""
+    """AVIF encoders via libavif (libavif, svt-av1) share a 0-100 quality knob plus
+    a speed preset and chroma format. `speed` is a quality/throughput trade left to
+    the performance overlay; 4:4:4 chroma is the curated secondary series."""
     return TunableSchema(
         params=[
             Tunable(
@@ -791,7 +883,15 @@ def _avif_schema() -> "TunableSchema":
                 max=100,
                 description="AVIF quality (0-100)",
             ),
-            Tunable(name="speed", kind="int", default="6", min=0, max=10),
+            Tunable(
+                name="speed",
+                kind="int",
+                default="6",
+                min=0,
+                max=10,
+                skip_reason="speed is a quality/throughput trade — covered by the "
+                "performance overlay, not a default RD series",
+            ),
             Tunable(
                 name="yuv",
                 kind="enum",
@@ -803,13 +903,36 @@ def _avif_schema() -> "TunableSchema":
         quality_axis="quality",
         quality_sweep=_AVIF_QUALITY_SWEEP,
         perf_preset={"quality": "65", "speed": "6", "yuv": "420"},
+        variants=[
+            Variant(
+                tag="yuv-444",
+                overrides={"yuv": "444"},
+                description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
+            )
+        ],
+        skipped=[
+            (
+                "codec-specific-options",
+                "deferred: aom/svt keys (tune/aq-mode/sharpness/denoise) via "
+                "avifEncoderSetCodecSpecificOption are backend- and "
+                "version-specific; tracked for follow-up",
+            ),
+            (
+                "tiling",
+                "irrelevant: tileRowsLog2/tileColsLog2 affect parallelism, not RD",
+            ),
+            ("min/maxQuantizer", "deprecated by libavif in favour of `quality`"),
+        ],
     )
 
 
 TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     # --- JPEG ---
-    "libjpeg-turbo-encode": _jpeg_full_schema(),
-    "mozjpeg-encode": _jpeg_full_schema(),
+    # Reference-class encoders also get the sequential (progressive-off) series.
+    "libjpeg-turbo-encode": _jpeg_full_schema(
+        variants=[_JPEG_444_VARIANT, _JPEG_SEQUENTIAL_VARIANT]
+    ),
+    "mozjpeg-encode": _mozjpeg_schema(),
     "jpegli-encode": _jpeg_full_schema(),
     "jpeg-encoder-encode": _jpeg_full_schema(),
     "image-jpeg-encode": TunableSchema(
@@ -827,12 +950,33 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     "libwebp-encode": TunableSchema(
         params=[
             Tunable(name="quality", kind="float", default="75", min=0, max=100),
-            Tunable(name="method", kind="int", default="4", min=0, max=6),
-            Tunable(name="lossless", kind="bool", default="false"),
+            Tunable(
+                name="method",
+                kind="int",
+                default="4",
+                min=0,
+                max=6,
+                skip_reason="effort/speed knob — covered by the performance overlay, "
+                "not a default RD series",
+            ),
+            Tunable(
+                name="lossless",
+                kind="bool",
+                default="false",
+                skip_reason="mode toggle: lossless WebP is a distinct pipeline "
+                "(see image-webp-encode), not a knob on the lossy RD curve",
+            ),
         ],
         quality_axis="quality",
         quality_sweep=_WEBP_QUALITY_SWEEP,
         perf_preset={"quality": "75", "method": "4", "lossless": "false"},
+        skipped=[
+            (
+                "filter/sns/segments/near_lossless/use_sharp_yuv/preprocessing",
+                "irrelevant: large WebPConfig tail with low RD value vs quality; "
+                "alpha/target-size knobs N/A for opaque RGB / deterministic runs",
+            )
+        ],
     ),
     # image-webp encodes lossless WebP only (crate limitation) and exposes no
     # knob, so it has no rate-distortion curve. Flagged lossless (issue #26) so it
@@ -871,16 +1015,47 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
                 max=100,
                 description="AVIF quality 0-100 (mapped to rav1e quantizer)",
             ),
-            Tunable(name="speed", kind="int", default="6", min=0, max=10),
+            Tunable(
+                name="speed",
+                kind="int",
+                default="6",
+                min=0,
+                max=10,
+                skip_reason="speed is a quality/throughput trade — covered by the "
+                "performance overlay, not a default RD series",
+            ),
             Tunable(name="chroma", kind="enum", default="420", choices=["420", "444"]),
         ],
         quality_axis="quality",
         quality_sweep=_AVIF_QUALITY_SWEEP,
         perf_preset={"quality": "65", "speed": "6", "chroma": "420"},
+        variants=[
+            Variant(
+                tag="chroma-444",
+                overrides={"chroma": "444"},
+                description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
+            )
+        ],
+        skipped=[
+            (
+                "tune",
+                "deferred: Psnr-vs-Psychovisual tuning entangles the IQA metric choice",
+            ),
+            ("tiling", "irrelevant: tile_rows/tile_cols affect parallelism, not RD"),
+            (
+                "film_grain",
+                "deferred: needs calibrated noise params (TODO in encode.rs)",
+            ),
+        ],
     ),
     "libavif-encode": _avif_schema(),
     "svt-av1-encode": _avif_schema(),
     # --- JXL ---
+    # Issue #4 explicitly calls out JXL "progressive decoding and various quality
+    # constraint settings". libjxl-encode wires the encode-side levers
+    # (progressive AC, modular mode, plus responsive/progressive-DC/decoding-speed)
+    # via JxlEncoderFrameSettingsSetOption; `progressive` and `modular` get curated
+    # variant series, the rest are wired-but-documented-skipped to bound the PR.
     "libjxl-encode": TunableSchema(
         params=[
             Tunable(
@@ -892,10 +1067,71 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
                 description="Butteraugli distance; 0 = lossless",
             ),
             Tunable(name="effort", kind="int", default="7", min=1, max=9),
+            Tunable(
+                name="progressive",
+                kind="enum",
+                default="-1",
+                choices=["-1", "0", "1"],
+                description="Spectral progressive AC (-1 auto / 0 off / 1 on)",
+            ),
+            Tunable(
+                name="modular",
+                kind="enum",
+                default="-1",
+                choices=["-1", "0", "1"],
+                description="Force modular(1)/VarDCT(0) encoding; -1 = encoder chooses",
+            ),
+            Tunable(
+                name="responsive",
+                kind="enum",
+                default="-1",
+                choices=["-1", "0", "1"],
+                skip_reason="irrelevant: modular-mode progressive; not RD-relevant "
+                "for VarDCT photos",
+            ),
+            Tunable(
+                name="progressive_dc",
+                kind="enum",
+                default="-1",
+                choices=["-1", "0", "1", "2"],
+                skip_reason="irrelevant: low-res DC passes barely move final size",
+            ),
+            Tunable(
+                name="decoding_speed",
+                kind="int",
+                default="0",
+                min=0,
+                max=4,
+                skip_reason="irrelevant: trades density for decode speed, scored on "
+                "the encode side here",
+            ),
         ],
         quality_axis="distance",
         quality_sweep=_JXL_DISTANCE_SWEEP,
         perf_preset={"distance": "1.0", "effort": "7"},
+        variants=[
+            Variant(
+                tag="progressive-on",
+                overrides={"progressive": "1"},
+                description="Spectral progressive AC enabled",
+            ),
+            Variant(
+                tag="modular-on",
+                overrides={"modular": "1"},
+                description="Force modular-mode encoding",
+            ),
+        ],
+        skipped=[
+            (
+                "epf/gaborish/photon_noise/dots/patches",
+                "irrelevant: long-tail VarDCT artefact controls; the named "
+                "progressive/modular levers cover the issue's intent",
+            ),
+            (
+                "color_transform",
+                "irrelevant: XYB is the correct high-quality lossy path",
+            ),
+        ],
     ),
     # Lossless libjxl: distance pinned to 0 (true-lossless path, original profile
     # not XYB). Its quality-suite axis is *effort* (issue #26): a size-vs-effort
@@ -917,6 +1153,13 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_JXL_EFFORT_SWEEP,
         perf_preset={"distance": "0.0", "effort": "7"},
         lossless=True,
+        skipped=[
+            (
+                "progressive/modular/responsive/decoding_speed",
+                "wired in the shared libjxl binary but exercised only by the lossy "
+                "libjxl-encode series; the lossless path uses encoder defaults",
+            )
+        ],
     ),
     "zune-jpegxl-encode": TunableSchema(
         params=[
@@ -948,6 +1191,13 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_IMAGE_PNG_COMPRESSION_SWEEP,
         perf_preset={"compression": "default", "filter": "adaptive"},
         lossless=True,
+        variants=[
+            Variant(
+                tag="filter-none",
+                overrides={"filter": "none"},
+                description="No row filtering vs the default adaptive filter",
+            )
+        ],
     ),
     "zune-png-encode": TunableSchema(
         params=[Tunable(name="effort", kind="int", default="4", min=0, max=9)],
@@ -993,6 +1243,126 @@ def schema_for(impl_name: str) -> "TunableSchema":
     lossless encoders (spng, image-webp) carry an explicit `lossless=True`
     schema so they are still picked up by the quality suite."""
     return TUNABLE_SCHEMAS.get(impl_name, TunableSchema())
+
+
+# Decoders take no params in this harness (they consume the bitstream as-is and
+# are scored vs the format's golden decoder), so library decode knobs that exist
+# but are intentionally not exercised live here, surfaced in the overview. Keyed
+# by decoder impl name; only entries worth calling out are listed.
+DECODER_SKIP_NOTES: Dict[str, list[Tuple[str, str]]] = {
+    "libjxl-decode": [
+        (
+            "progressive decode",
+            "out of scope: the harness scores full-decode fidelity vs golden; "
+            "partial/progressive-decode quality needs a different rig",
+        ),
+    ],
+    "dav1d-decode": [
+        (
+            "apply_grain / inloop_filters",
+            "conformance/post-processing, not a fidelity knob here",
+        ),
+    ],
+    "rav1d-decode": [
+        (
+            "apply_grain / inloop_filters",
+            "conformance/post-processing, not a fidelity knob here",
+        ),
+    ],
+    "libgav1-decode": [
+        ("post_filter_mask", "post-processing, not a fidelity knob here"),
+    ],
+    "libwebp-decode": [
+        (
+            "no_fancy_upsampling / dithering",
+            "post-processing, not core decode fidelity",
+        ),
+    ],
+    "libjpeg-turbo-decode": [
+        (
+            "dct_method / fancy_upsampling",
+            "output forced to 8-bit RGB; scored vs golden",
+        ),
+    ],
+}
+
+
+def variant_impl_name(base: str, tag: str) -> str:
+    """Series name for a derived secondary-knob variant: ``base@tag``.
+
+    The ``@`` / ``-`` are safe in the impl-name slot of ``BenchmarkTask.name()``,
+    which ``summary._parse_command_name`` recovers by splitting on the first
+    ``" ("`` then ``", "``. Assert the grammar so a bad tag fails loudly at import
+    rather than silently corrupting a parsed metric row."""
+    name = f"{base}@{tag}"
+    assert ", " not in name and " (" not in name and "=" not in name, (
+        f"variant name {name!r} would break command-name parsing"
+    )
+    return name
+
+
+def _derive_variant(
+    base: "Implementation",
+    schema: "TunableSchema",
+    tag: str,
+    overrides: Dict[str, str],
+    kind: Literal["curated", "oat"],
+) -> None:
+    """Register one derived variant: an Implementation reusing the base binary plus
+    a schema with `overrides` folded into perf_preset. Idempotent per derived name
+    (so a curated variant and an identical OAT one don't double-register)."""
+    vname = variant_impl_name(base.name, tag)
+    if vname in TUNABLE_SCHEMAS:
+        return
+    IMPLEMENTATIONS.append(
+        base.model_copy(update={"name": vname, "variant_kind": kind})
+    )
+    TUNABLE_SCHEMAS[vname] = schema.model_copy(
+        update={
+            "perf_preset": {**schema.perf_preset, **overrides},
+            "variants": [],
+            "skipped": [],
+        }
+    )
+
+
+def _expand_variants() -> None:
+    """Append derived secondary-knob series to IMPLEMENTATIONS + TUNABLE_SCHEMAS.
+
+    For every base encoder schema: (1) its curated ``variants`` (run by default,
+    ``--params variants``); then (2) a one-at-a-time (OAT) expansion of every
+    enum/bool non-axis knob that is NOT documented-skipped, to each of its other
+    values (``--params all``), skipping any override already covered by a curated
+    variant. Each derived entry reuses the base binary (like the hand-written
+    ``libjxl-lossless-encode``) and carries a distinct name, so it becomes its own
+    series end-to-end without touching report/plot/summary code."""
+    base_impls = {i.name: i for i in IMPLEMENTATIONS if not i.is_variant}
+    for base_name, schema in list(TUNABLE_SCHEMAS.items()):
+        base = base_impls.get(base_name)
+        if base is None:
+            continue
+        seen: set = set()
+        for v in schema.variants:
+            seen.add(frozenset(v.overrides.items()))
+            _derive_variant(base, schema, v.tag, v.overrides, "curated")
+        for p in schema.params:
+            if (
+                p.name == schema.quality_axis
+                or p.skip_reason is not None
+                or p.kind not in ("enum", "bool")
+            ):
+                continue  # axis / documented-skip / non-categorical → not OAT-expanded
+            base_val = schema.perf_preset.get(p.name, p.default)
+            values = ["true", "false"] if p.kind == "bool" else (p.choices or [])
+            for val in values:
+                ov = {p.name: val}
+                if val == base_val or frozenset(ov.items()) in seen:
+                    continue
+                seen.add(frozenset(ov.items()))
+                _derive_variant(base, schema, f"{p.name}-{val}", ov, "oat")
+
+
+_expand_variants()
 
 
 # Self-consistency: every declared schema must name a real implementation, and a
@@ -1054,6 +1424,24 @@ _PERF_ARG = Annotated[
 ]
 
 
+# Secondary-knob coverage for the quality sweep (issue #4). Selects which derived
+# variant series (see `Variant` / `_expand_variants`) join the base encoders:
+#   axis     — quality axis only (legacy single-axis behaviour / escape hatch);
+#   variants — quality axis + each impl's curated secondary variants (default);
+#   all      — additionally the one-at-a-time expansion of every enum/bool knob.
+ParamMode = Literal["axis", "variants", "all"]
+
+_PARAMS_ARG = Annotated[
+    ParamMode,
+    tyro.conf.arg(aliases=["-P"]),
+    Field(
+        description="Secondary-knob coverage: 'axis' = quality axis only; "
+        "'variants' = curated per-impl variants (default); 'all' = also a "
+        "one-at-a-time expansion of every enum/bool knob."
+    ),
+]
+
+
 class BaseArgs(BaseModel):
     """Options shared by every sweep run."""
 
@@ -1106,6 +1494,7 @@ class RunArgs(BaseArgs):
         Field(description="Implementation-type filter (encode/decode; default both)"),
     ] = BenchmarkMode.BOTH
     perf: _PERF_ARG = "anchor"
+    params: _PARAMS_ARG = "variants"
     quality_steps: Annotated[
         Optional[int],
         tyro.conf.arg(aliases=["-q"]),
@@ -1218,6 +1607,21 @@ class SetupArgs(BaseModel):
     ] = False
 
 
+class DocsArgs(BaseModel):
+    """Generate (or verify) the per-implementation tunables overview, the
+    high-level view of every impl's knobs/variants/skips synthesized from
+    TUNABLE_SCHEMAS (issue #4). Writes docs/tunables.md."""
+
+    check: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Verify docs/tunables.md matches the schemas instead of "
+            "writing it; exit non-zero on drift (for CI)."
+        ),
+    ] = False
+
+
 CliEntry = Union[
     Annotated[RunArgs, tyro.conf.subcommand(name="run")],
     Annotated[QualityArgs, tyro.conf.subcommand(name="quality")],
@@ -1226,6 +1630,7 @@ CliEntry = Union[
     Annotated[CleanArgs, tyro.conf.subcommand(name="clean")],
     Annotated[CompileArgs, tyro.conf.subcommand(name="compile")],
     Annotated[SetupArgs, tyro.conf.subcommand(name="setup")],
+    Annotated[DocsArgs, tyro.conf.subcommand(name="docs")],
 ]
 
 

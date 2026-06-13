@@ -40,6 +40,7 @@ from bench_lib.models import (
     CleanArgs,
     CompileArgs,
     DatasetId,
+    DocsArgs,
     ImageFormat,
     ImageFormats,
     Implementation,
@@ -351,6 +352,28 @@ def _encoder_points(
     ]
 
 
+def _encoders_for(format: ImageFormat, params_mode: str) -> list[Implementation]:
+    """Encoders to sweep for `format`, filtered by the ``--params`` coverage mode.
+
+    Secondary-knob variants are pre-expanded into ``IMPLEMENTATIONS`` by
+    ``models._expand_variants`` and tagged via ``variant_kind`` (None = base,
+    "curated", "oat"); here we just pick which kinds to include:
+    ``axis`` → base only (legacy single-axis sweep); ``variants`` → base + curated
+    (default); ``all`` → base + curated + the one-at-a-time expansion."""
+    allowed: set = {None}
+    if params_mode in ("variants", "all"):
+        allowed.add("curated")
+    if params_mode == "all":
+        allowed.add("oat")
+    return [
+        impl
+        for impl in IMPLEMENTATIONS
+        if impl.format == format
+        and impl.type == BenchmarkType.ENCODE
+        and impl.variant_kind in allowed
+    ]
+
+
 def build_sweep(format: ImageFormat, dataset: DatasetId, args: RunArgs) -> BenchList:
     """Construct the unified operating-point sweep for one format.
 
@@ -407,12 +430,12 @@ def build_sweep(format: ImageFormat, dataset: DatasetId, args: RunArgs) -> Bench
         )
 
     # --- Encoders: sweep the quality/effort axis (PPM in; scored vs source). ---
+    # The encoder set includes secondary-knob variant series per the --params mode
+    # (each a distinct base@tag impl reusing the base binary); decoders below are
+    # deliberately left encoder-agnostic (reference-encoded at the preset point),
+    # since a decoder cannot see which encoder knob produced its input.
     if BenchmarkType.ENCODE in types:
-        encoders = [
-            impl
-            for impl in IMPLEMENTATIONS
-            if impl.format == format and impl.type == BenchmarkType.ENCODE
-        ]
+        encoders = _encoders_for(format, args.params)
         if encoders:
             enc_inputs = get_input_files(dataset, PPMImageFormat.PPM, args.sample)
             for impl in encoders:
@@ -1440,6 +1463,35 @@ def run_setup(args: SetupArgs) -> None:
             ensure_dataset(args.dataset, force=args.force)
         else:
             ensure_all_datasets(force=args.force)
+
+
+def run_docs(args: DocsArgs) -> None:
+    """Generate (or --check) docs/tunables.md from the tunable schemas.
+
+    The overview is synthesized from `TUNABLE_SCHEMAS` (the single in-code source
+    of truth), so `--check` (used in CI / tests) fails if the committed file has
+    drifted from the schemas — keeping the high-level overview honest (issue #4)."""
+    from bench_lib.tunables_doc import render_tunables_markdown
+
+    path = os.path.join(PROJECT_ROOT, "docs", "tunables.md")
+    content = render_tunables_markdown()
+    if args.check:
+        current = None
+        if os.path.exists(path):
+            with open(path) as f:
+                current = f.read()
+        if current != content:
+            print(
+                f"{Fore.RED}✗ {path} is out of date.{Style.RESET_ALL} "
+                "Run './bench docs' to regenerate it."
+            )
+            sys.exit(1)
+        print(f"{Fore.GREEN}✓ {path} is up to date.{Style.RESET_ALL}")
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"{Fore.GREEN}✓ Wrote {path}{Style.RESET_ALL}")
 
 
 def run_clean(args: CleanArgs):
