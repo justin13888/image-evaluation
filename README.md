@@ -116,6 +116,10 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 # Fewer, evenly-sampled points; subset of formats; encoders only
 ./bench run --dataset kodak --quality-steps 5 --formats jpeg jxl --mode encode
 
+# Secondary-knob coverage: 'variants' (curated, default) → 'all' (every enum/bool
+# knob one-at-a-time); '--params axis' restores the legacy quality-axis-only sweep
+./bench run --dataset kodak --params all
+
 # Peak memory during the timing overlay; override inner-loop iters/warmup (default 10/2)
 ./bench run --dataset div2k --measure-memory --iterations 20 --warmup 3
 
@@ -126,10 +130,11 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 
 # --- Shared ---
 ./bench compile          # build vendored libs + all implementations + install iqa-cli
+./bench docs             # regenerate docs/tunables.md (--check verifies it in CI)
 ./bench clean            # remove build artifacts and results
 ```
 
-> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--sample`, `--formats`/`--mode`, and `--quick` all cap it. The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration.
+> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--sample`, `--formats`/`--mode`, `--params`, and `--quick` all cap it. `--params variants` (default) adds a handful of curated secondary-knob series per encoder; `--params all` adds the full one-at-a-time expansion (heavier), while `--params axis` is the leanest (quality axis only). The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration.
 
 ### Cleanup
 
@@ -228,24 +233,11 @@ Each implementation declares its tunable knobs in a per-implementation schema in
 
 - **`perf_preset`** — the single fixed operating point the **performance** suite uses (one set of params per codec). Presets are not quality-matched across implementations.
 - **`quality_axis` + `quality_sweep`** — the knob the **quality** suite sweeps and the discrete values it steps through. For a **lossy** encoder this traces a rate-distortion curve (e.g. JPEG `quality`, JXL `distance`); for a **lossless** encoder (`lossless: true` — PNG, lossless JXL) it is instead a *compression-effort* axis tracing size-vs-effort. Knob-less lossless encoders (spng, image-webp) declare `lossless` with no axis and contribute a single operating point. Decoders have no axis.
+- **`variants`** — curated *secondary* operating points that exercise the implementation-specific knobs beyond the quality axis (e.g. JPEG `subsampling=444` and sequential scan, AVIF 4:4:4, JXL progressive/modular, mozjpeg trellis off). Each variant is its own series — a distinct `impl@knob-value` reusing the same binary, so it gets its own rate-distortion curve without polluting the base. The `--params` flag selects coverage: `axis` (quality axis only), `variants` (curated, **default**), or `all` (additionally a one-at-a-time sweep of every enum/bool knob). Knobs that are deliberately *not* swept carry a `skip_reason` in the schema so the decision is recorded.
 
-Representative tunables (see the schema for the authoritative list):
+The authoritative per-implementation overview — every knob, swept axis, variant series, and intentionally-skipped knob with its reason — is **generated** from `TUNABLE_SCHEMAS`:
 
-A **lossy** quality axis traces a rate-distortion curve; a **lossless** axis (marked *effort*) traces size-vs-effort and feeds the lossless compression-efficiency view.
-
-| Format | Quality / effort axis | Other knobs | Perf preset |
-| :----- | :-------------------- | :---------- | :---------- |
-| **JPEG** (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder) | `quality` 1-100 | `progressive`, `subsampling` (420/444) | q80, progressive, 420 |
-| **JPEG** (image-jpeg) | `quality` 1-100 | — | q80 |
-| **WEBP** (libwebp) | `quality` 0-100 | `method` 0-6, `lossless` | q75, m4, lossy |
-| **WEBP** (image-webp) | — *(lossless, single point)* | — | lossless |
-| **AVIF** (libavif, svt-av1, rav1e) | `quality` 0-100 | `speed`, chroma (420/444) | q65, speed 6, 420 |
-| **JXL** (libjxl) | `distance` (lossy, 15.0→0.1) | `effort` 1-9 | d1.0, e7 |
-| **JXL** (libjxl-lossless) | `effort` 1-9 *(lossless, distance pinned to 0)* | — | d0.0, e7 |
-| **JXL** (zune-jpegxl) | `quality` 0-100 | `effort` 1-9 | q90, e7 |
-| **PNG** (libpng, zune-png) | `compression`/`effort` 0-9 *(lossless)* | — | level 6 / effort 4 |
-| **PNG** (image-png) | `compression` (fast/default/best) *(lossless)* | `filter` | default, adaptive |
-| **PNG** (spng) | — *(lossless, single point)* | — | default |
+> 📋 **[`docs/tunables.md`](docs/tunables.md)** — run `./bench docs` to regenerate it, or `./bench docs --check` to verify it is in sync (also enforced in CI).
 
 > **Known limitations:**
 > - **AVIF film grain synthesis** is not yet implemented in `libavif` or `rav1e` (a TODO is tracked in each).

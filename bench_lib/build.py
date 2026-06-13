@@ -310,7 +310,9 @@ def build_projects(formats: list[ImageFormat]):
             NULL_IMPLEMENTATIONS,
             (impl for impl in IMPLEMENTATIONS if impl.format == fmt),
         ):
-            if impl.build == "cpp" and impl.name not in seen:
+            # Secondary-knob variants reuse their base's binary (no build target of
+            # their own), so skip them here — the base impl already builds the dir.
+            if impl.build == "cpp" and not impl.is_variant and impl.name not in seen:
                 seen.add(impl.name)
                 to_build.append(impl)
     num_workers = min(len(to_build), 3) if to_build else 1

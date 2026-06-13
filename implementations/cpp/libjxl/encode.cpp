@@ -29,6 +29,15 @@ class LibJxlEncodeBench : public BenchmarkImplementation {
     distance = static_cast<float>(param_double(args, "distance", 1.0));
     effort = param_int(args, "effort", 7);
     lossless = (distance <= 0.0f);
+
+    // Issue #4: JXL progressive / quality-constraint knobs. -1 = leave the
+    // encoder's own default (so omitting the --param is a true no-op); 0/1(/2)
+    // force the setting. decoding_speed defaults to 0 (libjxl's own default).
+    progressive = param_int(args, "progressive", -1);
+    modular = param_int(args, "modular", -1);
+    responsive = param_int(args, "responsive", -1);
+    progressive_dc = param_int(args, "progressive_dc", -1);
+    decoding_speed = param_int(args, "decoding_speed", 0);
   }
 
   std::vector<uint8_t> run(const Args &args) override {
@@ -78,6 +87,28 @@ class LibJxlEncodeBench : public BenchmarkImplementation {
     JxlEncoderFrameSettingsSetOption(frame_settings,
                                      JXL_ENC_FRAME_SETTING_EFFORT, effort);
 
+    // Progressive / quality-constraint knobs (issue #4). Each -1 leaves the
+    // encoder default untouched; decoding_speed (0..4) is always applied (0 =
+    // the libjxl default, a no-op).
+    if (progressive != -1) {
+      JxlEncoderFrameSettingsSetOption(
+          frame_settings, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, progressive);
+    }
+    if (progressive_dc != -1) {
+      JxlEncoderFrameSettingsSetOption(
+          frame_settings, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, progressive_dc);
+    }
+    if (responsive != -1) {
+      JxlEncoderFrameSettingsSetOption(
+          frame_settings, JXL_ENC_FRAME_SETTING_RESPONSIVE, responsive);
+    }
+    if (modular != -1) {
+      JxlEncoderFrameSettingsSetOption(frame_settings,
+                                       JXL_ENC_FRAME_SETTING_MODULAR, modular);
+    }
+    JxlEncoderFrameSettingsSetOption(
+        frame_settings, JXL_ENC_FRAME_SETTING_DECODING_SPEED, decoding_speed);
+
     if (JXL_ENC_SUCCESS !=
         JxlEncoderAddImageFrame(frame_settings, &pixel_format,
                                 const_cast<uint8_t *>(input_data.data()),
@@ -116,6 +147,11 @@ class LibJxlEncodeBench : public BenchmarkImplementation {
   float distance;
   int effort;
   bool lossless;
+  int progressive;
+  int modular;
+  int responsive;
+  int progressive_dc;
+  int decoding_speed;
   JxlThreadParallelRunnerPtr runner{nullptr};
 };
 
