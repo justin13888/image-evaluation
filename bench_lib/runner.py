@@ -61,6 +61,7 @@ from bench_lib.summary import generate_summary
 from bench_lib.system_info import (
     _detect_mimalloc_version,
     get_compiler_versions,
+    get_git_info,
     get_library_versions,
     get_physical_cores,
     get_system_info,
@@ -1050,6 +1051,7 @@ def _base_manifest() -> dict:
     """System/compiler/library/allocator metadata shared by both suites."""
     return {
         **get_system_info(),
+        "git": get_git_info(),
         "compiler": get_compiler_versions(),
         "libraries": get_library_versions(),
         "allocator": f"mimalloc {_detect_mimalloc_version()}",

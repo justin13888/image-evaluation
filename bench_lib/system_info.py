@@ -44,6 +44,31 @@ def get_system_info() -> Dict[str, Any]:
     return info
 
 
+def get_git_info() -> Dict[str, Any]:
+    """Best-effort git provenance for the run: the commit that produced it and
+    whether the working tree had uncommitted changes. Empty dict outside a git
+    checkout (or when git is unavailable)."""
+
+    def _git(*args: str) -> str:
+        return (
+            subprocess.check_output(
+                ["git", *args], cwd=PROJECT_ROOT, stderr=subprocess.DEVNULL
+            )
+            .decode()
+            .strip()
+        )
+
+    try:
+        commit = _git("rev-parse", "HEAD")
+    except Exception:
+        return {}
+    try:
+        dirty = bool(_git("status", "--porcelain"))
+    except Exception:
+        dirty = False
+    return {"commit": commit, "dirty": dirty}
+
+
 def get_physical_cores() -> int:
     """Best-effort physical (not logical/SMT) core count.
 
