@@ -40,7 +40,16 @@ from bench_lib.summary import generate_summary  # noqa: E402
 
 
 def _metric(
-    impl, fmt, label, bpp, ss, psnr, ssim=None, butteraugli=None, img="file.png"
+    impl,
+    fmt,
+    label,
+    bpp,
+    ss,
+    psnr,
+    ssim=None,
+    butteraugli=None,
+    img="file.png",
+    time_s=0.0,
 ):
     axis = "quality"
     return {
@@ -62,10 +71,45 @@ def _metric(
         "error": None,
         "type": "encode",
         "format": fmt,
+        "lossless": False,
         "width": 100,
         "height": 100,
         "megapixels": 0.01,
         "bpp": bpp,
+        "time_s": time_s,
+    }
+
+
+def _decode(impl, fmt, label, bpp, psnr, time_s, img="file.png"):
+    """A golden-basis decode row (issue #21/#46): PSNR vs the golden decoder is
+    None for a bit-exact path, finite for an approximate one; ``time_s`` is the
+    one-pass decode time that feeds the speed-vs-bitrate scatter."""
+    return {
+        "name": f"{impl} ({fmt}, decode, {label}, t0, {img})",
+        "impl": impl,
+        "lang": "rust",
+        "build": "rust",
+        "label": label,
+        "params": "",
+        "quality_axis": "quality",
+        "quality_value": label.split("-")[-1],
+        "input_path": f"data/{img}",
+        "source_path": f"data/{img}",
+        "filesize": int(bpp * 1000),
+        "ssimulacra2": None,
+        "psnr": psnr,
+        "ssim": None,
+        "butteraugli": None,
+        "error": None,
+        "type": "decode",
+        "metric_basis": "golden",
+        "format": fmt,
+        "lossless": False,
+        "width": 100,
+        "height": 100,
+        "megapixels": 0.01,
+        "bpp": bpp,
+        "time_s": time_s,
     }
 
 
@@ -151,6 +195,7 @@ def test_report_html():
     # >1 image) and the distinct-image count are exercised.
     metrics = []
     for img in ("img_a.png", "img_b.png"):
+        # Varied time_s so the encode-time bubble scale has spread to encode.
         metrics += [
             _metric(
                 "libjpeg-turbo-encode",
@@ -162,6 +207,7 @@ def test_report_html():
                 0.95,
                 2.1,
                 img=img,
+                time_s=0.02,
             ),
             _metric(
                 "libjpeg-turbo-encode",
@@ -173,6 +219,7 @@ def test_report_html():
                 0.99,
                 0.6,
                 img=img,
+                time_s=0.08,
             ),
             _metric(
                 "mozjpeg-encode",
@@ -184,6 +231,7 @@ def test_report_html():
                 0.95,
                 2.0,
                 img=img,
+                time_s=0.12,
             ),
             _metric(
                 "mozjpeg-encode",
@@ -195,6 +243,7 @@ def test_report_html():
                 0.99,
                 0.5,
                 img=img,
+                time_s=0.45,
             ),
         ]
     # A legitimate low-quality point with negative SSIMULACRA2 — must survive.
@@ -209,8 +258,38 @@ def test_report_html():
             0.40,
             12.0,
             img="img_a.png",
+            time_s=0.03,
         )
     )
+    # Lossless encode rows (issue #26) so the size-vs-effort bubble path renders;
+    # decode rows (golden basis) so the decoder speed-vs-bitrate scatter renders,
+    # mixing a bit-exact decoder (psnr None) with an approximate one (finite psnr).
+    for img in ("img_a.png", "img_b.png"):
+        for eff, bpp, t in (("effort-1", 9.0, 0.05), ("effort-9", 7.5, 0.40)):
+            row = _metric(
+                "libpng-encode",
+                "png",
+                eff,
+                bpp,
+                100.0,
+                None,
+                1.0,
+                0.0,
+                img=img,
+                time_s=t,
+            )
+            row["lossless"] = True
+            metrics.append(row)
+        metrics += [
+            _decode("libwebp-decode", "webp", "quality-60", 0.30, None, 0.004, img=img),
+            _decode("libwebp-decode", "webp", "quality-90", 1.00, None, 0.011, img=img),
+            _decode(
+                "zune-jpeg-decode", "jpeg", "quality-60", 0.30, 48.5, 0.006, img=img
+            ),
+            _decode(
+                "zune-jpeg-decode", "jpeg", "quality-90", 1.00, 51.0, 0.015, img=img
+            ),
+        ]
     with open(os.path.join(qual, "metrics.json"), "w") as f:
         json.dump(metrics, f)
     # A manifest carrying the run's benchmark_config so the report can describe
@@ -277,6 +356,38 @@ def test_report_html():
     )
     assert "arithmetic average" in html, "aggregation note must explain the mean"
     assert "hardHi" in html, "known-range axis scaling must be wired into the engine"
+    # Time dimension (issue #46): per-section toggles mounted beside each heading,
+    # the bubble-sizing + decoder-scatter engine inlined, and decode times +
+    # fidelity round-tripping into the decoder summary the scatter is drawn from.
+    for mount in ("q-toggle-rd", "q-toggle-lossless", "q-toggle-decoder"):
+        assert f"id='{mount}'" in html, f"missing per-section time toggle mount {mount}"
+    assert "showTime" in html, "per-section show-time state must be in the engine"
+    assert "timeScale" in html and "sizeLegendHTML" in html, (
+        "encode-time bubble sizing + size legend must be wired into the engine"
+    )
+    assert "renderDecoderChart" in html, (
+        "decoder speed-vs-bitrate scatter must be inlined"
+    )
+    decoders = json.loads(
+        re.search(
+            r'<script id="quality-decoders" type="application/json">(.*?)</script>',
+            html,
+            re.S,
+        ).group(1)
+    )
+    assert "libwebp-decode" in decoders and "zune-jpeg-decode" in decoders, (
+        "both decoders must reach the decoder summary"
+    )
+    assert decoders["libwebp-decode"]["bit_exact"], (
+        "libwebp-decode is bit-exact (psnr None)"
+    )
+    assert not decoders["zune-jpeg-decode"]["bit_exact"], (
+        "zune-jpeg-decode has finite PSNR vs golden — an approximate path"
+    )
+    assert any(
+        isinstance(p.get("time_s"), (int, float)) and p["time_s"] > 0
+        for p in decoders["zune-jpeg-decode"]["points"]
+    ), "decode time must round-trip into the points the scatter is drawn from"
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 
