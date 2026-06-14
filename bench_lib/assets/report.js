@@ -567,8 +567,14 @@
       return { impl: impl, fmt: d.format, bpp: d.best_bpp, ratio: d.ratio };
     }).sort(function (a, b) { return a.bpp - b.bpp; });
     var maxBpp = Math.max.apply(null, rows.map(function (r) { return r.bpp; }));
-    var rowH = 26, padT = 8, padB = 8, labelW = 160, valW = 150;
-    var W = VBW, H = padT + padB + rows.length * rowH;
+    var rowH = 26, padT = 8, padB = 8, valW = 150;
+    // Size the label gutter to the longest encoder name (≈7px/char at the 12px
+    // label font, + padding) so names never clip on the left; grow the viewBox so
+    // the bar area stays usable. The container scrolls (CSS) only when even this
+    // can't fit the viewport.
+    var longest = rows.reduce(function (m, r) { return Math.max(m, r.impl.length); }, 0);
+    var labelW = Math.min(320, Math.max(160, longest * 7 + 16));
+    var W = Math.max(VBW, labelW + 380 + valW), H = padT + padB + rows.length * rowH;
     var x0 = labelW, x1 = W - valW;
     var svg = [];
     rows.forEach(function (r, i) {

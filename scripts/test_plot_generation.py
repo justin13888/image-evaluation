@@ -141,7 +141,7 @@ def test_timing_summary():
         json.dump(data, f)
     generate_summary(tmpdir, raw, None)
     files = os.listdir(tmpdir)
-    assert any(f.endswith(".png") for f in files), "expected a timing plot"
+    assert any(f.endswith(".svg") for f in files), "expected a timing plot (SVG)"
     assert "summary.md" in files
     print("✓ timing summary:", sorted(files))
 
@@ -179,16 +179,16 @@ def test_quality_summary():
 
 
 def test_report_html():
-    """Self-contained report.html: perf charts stay base64 PNGs; the quality
+    """Self-contained report.html: perf charts are base64 SVGs; the quality
     suite is interactive with the raw metrics embedded inline (recomputable)."""
     bundle = os.path.join(repo_root, "results", "tmp_bundle")
     perf = os.path.join(bundle, "performance")
     qual = os.path.join(bundle, "quality")
     os.makedirs(perf, exist_ok=True)
     os.makedirs(qual, exist_ok=True)
-    # Minimal placeholder perf PNG (content irrelevant; report just base64s it).
-    with open(os.path.join(perf, "jpeg_encode_perf_results.png"), "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n placeholder")
+    # Minimal placeholder perf SVG (content irrelevant; report just base64s it).
+    with open(os.path.join(perf, "jpeg_encode_perf_results.svg"), "w") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
     # Real quality metrics (incl. SSIM higher-better and Butteraugli lower-better)
     # so all four metric series are exercised in the interactive path. Two
     # distinct images per operating point so the aggregation path (mean across
@@ -297,6 +297,7 @@ def test_report_html():
     with open(os.path.join(qual, "manifest.json"), "w") as f:
         json.dump(
             {
+                "git": {"commit": "0123456789abcdef0123456789abcdef01234567", "dirty": True},
                 "benchmark_config": {
                     "suite": "quality",
                     "dataset": "div2k",
@@ -307,7 +308,7 @@ def test_report_html():
                     "mode": "both",
                     "quality_steps": None,
                     "quick": False,
-                }
+                },
             },
             f,
         )
@@ -315,7 +316,7 @@ def test_report_html():
     out = generate_report_html(bundle, generated_at="2026-01-01T00:00:00Z")
     html = open(out).read()
     # Perf charts remain embedded images; nothing is loaded externally.
-    assert "data:image/png;base64," in html, "perf images must be embedded"
+    assert "data:image/svg+xml;base64," in html, "perf images must be embedded as SVG"
     assert 'src="http' not in html and "src='http" not in html, "no external images"
     assert "Performance" in html and "Quality" in html
     # Quality is interactive: raw data embedded + the chart engine inlined.
@@ -339,16 +340,23 @@ def test_report_html():
     assert "q-metric-grid" in html, (
         "per-format section must render the all-metrics small-multiples grid"
     )
-    # Dataset & run configuration: the report must describe what was benchmarked
+    # Dataset & Run Configuration: the report must describe what was benchmarked
     # and link to the dataset's source.
-    assert "Dataset &amp; run configuration" in html, (
-        "report must surface the dataset / run configuration"
+    assert "Dataset &amp; Run Configuration" in html, (
+        "report must surface the dataset / run configuration (title case)"
     )
     assert "div2k" in html, "dataset name must be shown"
     assert "https://data.vision.ee.ethz.ch/cvl/DIV2K/" in html, (
         "dataset source link must be shown"
     )
     assert "jpeg" in html and "Formats" in html, "run formats must be shown"
+    # Provenance: the run's commit must link back to the exact source tree, and a
+    # dirty working tree must be flagged.
+    assert (
+        "github.com/justin13888/image-implementation-benchmark/tree/"
+        "0123456789abcdef0123456789abcdef01234567" in html
+    ), "commit must link to the GitHub source tree"
+    assert "dirty (uncommitted changes)" in html, "dirty working tree must be flagged"
     # Aggregation disclosure: the mount point exists and the engine knows how to
     # state mean-across-N-images vs single-image, with known-range axes.
     assert "id='q-aggregation'" in html or 'id="q-aggregation"' in html, (
