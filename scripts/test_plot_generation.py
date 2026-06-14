@@ -353,7 +353,7 @@ def test_report_html():
     # Provenance: the run's commit must link back to the exact source tree, and a
     # dirty working tree must be flagged.
     assert (
-        "github.com/justin13888/image-implementation-benchmark/tree/"
+        "github.com/justin13888/image-evaluation/tree/"
         "0123456789abcdef0123456789abcdef01234567" in html
     ), "commit must link to the GitHub source tree"
     assert "dirty (uncommitted changes)" in html, "dirty working tree must be flagged"

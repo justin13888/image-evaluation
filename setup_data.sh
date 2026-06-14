@@ -12,7 +12,7 @@ set -e
 # set -x
 mkdir -p data data/kodak data/div2k data/pathological
 
-echo "=== Image Implementation Benchmark Data Setup ==="
+echo "=== Image Evaluation Data Setup ==="
 echo
 
 # ============================================================================
