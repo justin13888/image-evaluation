@@ -38,7 +38,24 @@
 .q-axis-title { fill: #444; font-size: 13px; }
 .q-line { fill: none; stroke-width: 2.6; stroke-linejoin: round; stroke-linecap: round; }
 .q-pt { stroke: #fff; stroke-width: 1; }
+.q-pt-approx { stroke-width: 2; }   /* approximate decode: hollow ring (issue #46) */
 .q-hl { fill: none; stroke-width: 2.5; }
+
+/* Time dimension (issue #46): encode/decode time as bubble size, with a size
+   legend; per-section show/hide toggles sit beside their section heading. */
+.q-section-toggle {
+  display: inline-flex; align-items: center; margin-left: .7rem;
+  font-weight: 400; font-size: .78rem; vertical-align: middle;
+}
+.q-section-toggle .q-label { color: #555; margin-right: .35rem; }
+.q-size-legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .9rem;
+  margin: .4rem .2rem 0; font-size: .78rem; color: #555;
+}
+.q-size-cap { color: #555; }
+.q-size-item { display: inline-flex; align-items: center; gap: .25rem; }
+.q-size-item svg { overflow: visible; }
+.q-size-bub { fill: #c9c9c9; stroke: #888; stroke-width: 1; }
 
 .q-legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; margin: .5rem .2rem 0; }
 .q-chip {

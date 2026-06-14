@@ -49,7 +49,13 @@
     butteraugli: { key: "butteraugli", name: "Butteraugli", y: "Butteraugli (lower is better)", lo: 0, hi: 3, hardLo: 0, hardHi: null },
   };
 
-  var state = { metric: "ssimulacra2", xscale: "linear" };
+  // showTime: per-section toggles (issue #46) — whether encode/decode time is
+  // visualised (bubble size on the rate-distortion/lossless charts, the
+  // speed-vs-bitrate scatter for decoders). Default on; flipped per section.
+  var state = {
+    metric: "ssimulacra2", xscale: "linear",
+    showTime: { rd: true, lossless: true, decoder: true },
+  };
   var HIDDEN = {}; // chartId -> Set of hidden series keys (persisted across re-renders)
 
   // ---- data helpers --------------------------------------------------------
@@ -156,13 +162,62 @@
     });
   }
 
+  // ---- time bubble sizing (issue #46) --------------------------------------
+
+  var PT_R = 4.5;                 // uniform point radius (time dimension off)
+  var BUB_RMIN = 3, BUB_RMAX = 14;
+
+  // Build a time -> radius scale over the given points' mean time (p.t). Area is
+  // ~proportional to time (radius ∝ √time), so a 4× slower point reads ~2× wider.
+  // Returns null when there is nothing to encode — no point carries a positive
+  // time, or every time is equal — and callers then fall back to the uniform
+  // PT_R. The scale is per-chart: times span ms→s across formats, so a shared
+  // scale would shrink the fast formats to dots; the size legend states the
+  // mapping for each chart and the tooltip always gives the exact value.
+  function timeScale(points) {
+    var ts = [];
+    points.forEach(function (p) { if (isNum(p.t) && p.t > 0) ts.push(p.t); });
+    if (ts.length < 2) return null;
+    var tmin = Math.min.apply(null, ts), tmax = Math.max.apply(null, ts);
+    if (!(tmax > tmin)) return null;
+    var s0 = Math.sqrt(tmin), s1 = Math.sqrt(tmax);
+    return {
+      tmin: tmin, tmax: tmax,
+      r: function (t) {
+        if (!isNum(t) || t <= 0) return BUB_RMIN;
+        var f = (Math.sqrt(t) - s0) / (s1 - s0);
+        return BUB_RMIN + Math.max(0, Math.min(1, f)) * (BUB_RMAX - BUB_RMIN);
+      },
+    };
+  }
+
+  // Reference-bubble legend (HTML, sized in px) explaining a chart's time scale.
+  // The middle reference is the geometric mean so it sits visually between the
+  // extremes on the √ scale.
+  function sizeLegendHTML(scale, label) {
+    var refs = [scale.tmin, Math.sqrt(scale.tmin * scale.tmax), scale.tmax];
+    var d = 2 * BUB_RMAX + 2;
+    var items = refs.map(function (t) {
+      return '<span class="q-size-item"><svg width="' + d + '" height="' + d +
+        '" viewBox="0 0 ' + d + " " + d + '"><circle cx="' + (d / 2) + '" cy="' +
+        (d / 2) + '" r="' + scale.r(t).toFixed(1) + '" class="q-size-bub"/></svg>' +
+        esc(fmtTime(t)) + "</span>";
+    }).join("");
+    return '<div class="q-size-legend"><span class="q-size-cap">' + esc(label) +
+      " (bubble size)</span>" + items + "</div>";
+  }
+
   // series: [{key,label,color,dash?,points:[{x,y,label,q,count}]}]
-  function renderRDChart(container, series, chartId, metric) {
+  function renderRDChart(container, series, chartId, metric, showTime) {
     var hidden = HIDDEN[chartId] || (HIDDEN[chartId] = {});
     var info = METRIC_INFO[metric];
     var log = state.xscale === "log";
     var vis = series.filter(function (s) { return !hidden[s.key]; });
     container._hits = [];
+    // Encode-time bubble scale over visible points (null => uniform PT_R).
+    var visPts = [];
+    vis.forEach(function (s) { s.points.forEach(function (p) { visPts.push(p); }); });
+    var scale = showTime ? timeScale(visPts) : null;
 
     // domain over visible points
     var xs = [], ys = [];
@@ -234,11 +289,13 @@
         s.points.forEach(function (p, i) {
           var px = sx(p.x), py = sy(p.y);
           d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
-          hits.push({ sx: px, sy: py, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, std: p.std, t: p.t });
+          var r = scale ? scale.r(p.t) : PT_R;
+          hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, std: p.std, t: p.t });
         });
         svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
         s.points.forEach(function (p) {
-          svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="4.5" fill="' + s.color + '"/>');
+          var r = scale ? scale.r(p.t) : PT_R;
+          svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
         });
       });
       svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
@@ -255,6 +312,7 @@
     }).join("");
 
     container.innerHTML = plotHTML + '<div class="q-legend">' + chips + "</div>" +
+      (scale ? sizeLegendHTML(scale, "encode time") : "") +
       '<div class="q-tooltip" hidden></div>';
 
     // legend toggles
@@ -262,7 +320,7 @@
       chip.addEventListener("click", function () {
         var k = chip.getAttribute("data-key");
         if (hidden[k]) delete hidden[k]; else hidden[k] = 1;
-        renderRDChart(container, series, chartId, metric);
+        renderRDChart(container, series, chartId, metric, showTime);
       });
     });
 
@@ -282,6 +340,7 @@
         });
         if (best && bd <= 26 * 26) {
           hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
+          hl.setAttribute("r", Math.max(7.5, (best.r || PT_R) + 3).toFixed(1));
           hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
           var crect = container.getBoundingClientRect();
           tip.hidden = false;
@@ -333,7 +392,7 @@
       });
     });
     if (!series.length) { host.innerHTML = '<p class="q-note">No rate-distortion data.</p>'; return; }
-    renderRDChart(chart, series, "combined", state.metric);
+    renderRDChart(chart, series, "combined", state.metric, state.showTime.rd);
   }
 
   // Metrics that actually carry finite encode data. SSIMULACRA2 always present
@@ -387,7 +446,7 @@
         var series = fmtAgg.map(function (s, i) {
           return { key: fmt + "/" + s.impl, label: s.impl, color: PALETTE[i % PALETTE.length], points: s.points };
         });
-        renderRDChart(chart, series, "fmt:" + fmt + ":" + metric, metric);
+        renderRDChart(chart, series, "fmt:" + fmt + ":" + metric, metric, state.showTime.rd);
       });
     });
   }
@@ -545,6 +604,10 @@
         dash: DASHES[di % DASHES.length], points: points,
       };
     });
+    // Encode-time bubble scale across every effort point (null => uniform PT_R).
+    var allPts = [];
+    series.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
+    var scale = state.showTime.lossless ? timeScale(allPts) : null;
     var ys = [];
     series.forEach(function (s) { s.points.forEach(function (p) { ys.push(p.y); }); });
     var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
@@ -577,15 +640,17 @@
       s.points.forEach(function (p, i) {
         var px = sx(p.x), py = sy(p.y);
         d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
-        hits.push({ sx: px, sy: py, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
+        var r = scale ? scale.r(p.t) : PT_R;
+        hits.push({ sx: px, sy: py, r: r, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
       });
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' +
           (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       }
       s.points.forEach(function (p) {
+        var r = scale ? scale.r(p.t) : PT_R;
         svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) +
-          '" r="4.5" fill="' + s.color + '"/>');
+          '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
       });
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
@@ -594,7 +659,9 @@
     }).join("");
     host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
-      '<div class="q-legend">' + chips + "</div><div class=\"q-tooltip\" hidden></div>";
+      '<div class="q-legend">' + chips + "</div>" +
+      (scale ? sizeLegendHTML(scale, "encode time") : "") +
+      '<div class="q-tooltip" hidden></div>';
 
     var svgEl = host.querySelector("svg");
     var tip = host.querySelector(".q-tooltip");
@@ -610,6 +677,7 @@
       });
       if (best && bd <= 26 * 26) {
         hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
+        hl.setAttribute("r", Math.max(7.5, (best.r || PT_R) + 3).toFixed(1));
         hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
         var crect = host.getBoundingClientRect();
         tip.hidden = false;
@@ -719,7 +787,152 @@
         "</td></tr>";
     });
     html += "</tbody></table>";
-    host.innerHTML = html;
+    // The decoder's time dimension *is* a whole chart (it carries no
+    // rate-distortion curve to overlay onto), so the per-section toggle shows or
+    // hides the speed-vs-bitrate scatter, with the table always present below.
+    var chart = state.showTime.decoder ? '<div id="q-decoder-chart" class="q-chart"></div>' : "";
+    host.innerHTML = chart + html;
+    if (state.showTime.decoder) {
+      renderDecoderChart(document.getElementById("q-decoder-chart"), impls);
+    }
+  }
+
+  // Speed-vs-bitrate scatter (issue #46): X = input bpp, Y = one-pass decode
+  // time (anchored at 0; lower is better). Each decoder's golden-basis points
+  // are aggregated to one mean point per operating point; bit-exact points are
+  // filled, approximate-decode points (finite PSNR vs golden) are drawn as a
+  // hollow ring so an inexact path stands out. Format-coloured, dashed per
+  // decoder within a format (mirrors the lossless effort chart).
+  function renderDecoderChart(host, impls) {
+    if (!host) return;
+    var dashByFmt = {};
+    var series = impls.map(function (impl) {
+      var d = DECODERS[impl];
+      var byLabel = {};
+      (d.points || []).forEach(function (p) {
+        var a = byLabel[p.label] || (byLabel[p.label] =
+          { bpp: 0, t: 0, n: 0, approx: false, worst: null, label: p.label });
+        a.bpp += p.bpp; a.t += isNum(p.time_s) ? p.time_s : 0; a.n += 1;
+        if (isNum(p.psnr)) { a.approx = true; a.worst = a.worst == null ? p.psnr : Math.min(a.worst, p.psnr); }
+      });
+      var points = Object.keys(byLabel).map(function (k) {
+        var a = byLabel[k];
+        return { x: a.bpp / a.n, y: a.t / a.n, label: a.label, approx: a.approx, worst: a.worst };
+      }).sort(function (a, b) { return a.x - b.x; });
+      var di = dashByFmt[d.format] || 0;
+      dashByFmt[d.format] = di + 1;
+      return {
+        impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
+        dash: DASHES[di % DASHES.length], points: points,
+      };
+    }).filter(function (s) { return s.points.length > 0; });
+    if (!series.length) { host.innerHTML = ""; return; }
+
+    var xs = [], ys = [];
+    series.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
+    var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+    var ymax = Math.max.apply(null, ys);
+    var xticks = linTicks(xmin, xmax, 6);
+    var dxmin = Math.min(xmin, xticks[0]), dxmax = Math.max(xmax, xticks[xticks.length - 1]);
+    var yticks = linTicks(0, ymax, 6);
+    var dymin = 0, dymax = Math.max(ymax, yticks[yticks.length - 1]);
+    if (dymax === dymin) dymax = dymin + 1;
+    function sx(x) { return X0 + (x - dxmin) / (dxmax - dxmin || 1) * (X1 - X0); }
+    function sy(y) { return Y1 - (y - dymin) / (dymax - dymin) * (Y1 - Y0); }
+
+    var svg = [], hits = [];
+    xticks.forEach(function (t) {
+      if (t < dxmin - 1e-9 || t > dxmax + 1e-9) return;
+      var x = sx(t).toFixed(1);
+      svg.push('<line class="q-grid" x1="' + x + '" y1="' + Y0 + '" x2="' + x + '" y2="' + Y1 + '"/>');
+      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + esc(fmtNum(t)) + "</text>");
+    });
+    yticks.forEach(function (t) {
+      if (t < dymin - 1e-9 || t > dymax + 1e-9) return;
+      var y = sy(t).toFixed(1);
+      svg.push('<line class="q-grid" x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '"/>');
+      svg.push('<text class="q-tick" x="' + (X0 - 8) + '" y="' + (+y + 4) + '" text-anchor="end">' + esc(fmtTime(t)) + "</text>");
+    });
+    svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
+    svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
+    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Input bits per pixel (bpp)</text>');
+    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better)</text>');
+    series.forEach(function (s) {
+      var d = "";
+      s.points.forEach(function (p, i) {
+        var px = sx(p.x), py = sy(p.y);
+        d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
+        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst });
+      });
+      if (s.points.length > 1) {
+        svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+      }
+      s.points.forEach(function (p) {
+        var cx = sx(p.x).toFixed(1), cy = sy(p.y).toFixed(1);
+        if (p.approx) {
+          svg.push('<circle class="q-pt q-pt-approx" cx="' + cx + '" cy="' + cy + '" r="4.5" fill="#fff" stroke="' + s.color + '"/>');
+        } else {
+          svg.push('<circle class="q-pt" cx="' + cx + '" cy="' + cy + '" r="4.5" fill="' + s.color + '"/>');
+        }
+      });
+    });
+    svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
+    var chips = series.map(function (s) {
+      return '<span class="q-chip"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
+    }).join("");
+    host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
+      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
+      '<div class="q-legend">' + chips + "</div>" +
+      '<p class="q-note">Hollow markers = approximate decode (finite PSNR vs the golden decoder); filled = bit-exact.</p>' +
+      '<div class="q-tooltip" hidden></div>';
+
+    var svgEl = host.querySelector("svg");
+    var tip = host.querySelector(".q-tooltip");
+    var hl = host.querySelector(".q-hl");
+    svgEl.addEventListener("mousemove", function (ev) {
+      var r = svgEl.getBoundingClientRect();
+      var vx = (ev.clientX - r.left) * (VBW / r.width);
+      var vy = (ev.clientY - r.top) * (VBH / r.height);
+      var best = null, bd = 1e9;
+      hits.forEach(function (h) {
+        var dd = (h.sx - vx) * (h.sx - vx) + (h.sy - vy) * (h.sy - vy);
+        if (dd < bd) { bd = dd; best = h; }
+      });
+      if (best && bd <= 26 * 26) {
+        hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
+        hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
+        var crect = host.getBoundingClientRect();
+        tip.hidden = false;
+        tip.innerHTML = "<b>" + esc(best.impl) + "</b><br>" +
+          '<span class="k">step</span> ' + esc(best.step) + "<br>" +
+          '<span class="k">input bpp</span> ' + best.bpp.toFixed(3) + "<br>" +
+          '<span class="k">decode time</span> ' + fmtTime(best.t) + "<br>" +
+          '<span class="k">fidelity vs golden</span> ' +
+          (best.approx ? best.worst.toFixed(2) + " dB" : "∞ (bit-exact)");
+        var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
+        if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
+        tip.style.left = Math.max(0, tx) + "px";
+        tip.style.top = ty + "px";
+      } else {
+        hl.setAttribute("visibility", "hidden"); tip.hidden = true;
+      }
+    });
+    svgEl.addEventListener("mouseleave", function () {
+      hl.setAttribute("visibility", "hidden"); tip.hidden = true;
+    });
+  }
+
+  // Per-section "show time" toggle (issue #46), mounted beside a section heading.
+  // Flipping it re-renders only that section's charts; default is on.
+  function mountSectionToggle(mountId, key, rerender) {
+    var host = document.getElementById(mountId);
+    if (!host) return;
+    host.innerHTML = "";
+    host.appendChild(group("Show time", [
+      { label: "On", value: true }, { label: "Off", value: false },
+    ], function () { return state.showTime[key]; }, function (v) {
+      state.showTime[key] = v; rerender();
+    }));
   }
 
   function init() {
@@ -730,6 +943,9 @@
     renderLossless();
     renderDecoders();
     renderBdRate();
+    mountSectionToggle("q-toggle-rd", "rd", renderAll);
+    mountSectionToggle("q-toggle-lossless", "lossless", renderLossless);
+    mountSectionToggle("q-toggle-decoder", "decoder", renderDecoders);
   }
 
   if (document.readyState === "loading") {
