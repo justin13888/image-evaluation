@@ -11,12 +11,12 @@
 #
 # Configuration (env vars, all optional):
 #   CF_PAGES_PROJECT   Cloudflare Pages project name   (default: image-evaluation)
-#   CF_PAGES_BRANCH    Deploy branch (production)       (default: main)
+#   CF_PAGES_BRANCH    Deploy branch (production)       (default: master)
 #   CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  for non-interactive auth
 set -euo pipefail
 
 PROJECT_NAME="${CF_PAGES_PROJECT:-image-evaluation}"
-BRANCH="${CF_PAGES_BRANCH:-main}"
+BRANCH="${CF_PAGES_BRANCH:-master}"
 RESULTS_DIR="results"
 
 err() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; }

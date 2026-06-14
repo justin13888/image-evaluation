@@ -170,7 +170,7 @@ The `report.html` is self-contained and static, so a bundle can be hosted on **[
 1. Create a [Cloudflare account](https://dash.cloudflare.com/sign-up).
 2. Create a Pages project named `image-evaluation` (the default name). Either:
    - **Dashboard:** Workers & Pages → Create → Pages → **Upload assets** (Direct Upload), and name it `image-evaluation`; or
-   - **CLI:** `wrangler pages project create image-evaluation --production-branch main`.
+   - **CLI:** `wrangler pages project create image-evaluation --production-branch master`.
 3. Authenticate wrangler, either:
    - **Interactive:** `wrangler login` (opens a browser), or
    - **Headless/CI:** export `CLOUDFLARE_API_TOKEN` (a token with the *Cloudflare Pages → Edit* permission) and `CLOUDFLARE_ACCOUNT_ID`.
@@ -179,7 +179,7 @@ The `report.html` is self-contained and static, so a bundle can be hosted on **[
 
 ```bash
 export CF_PAGES_PROJECT=my-project   # Pages project name (default: image-evaluation)
-export CF_PAGES_BRANCH=main          # production branch    (default: main)
+export CF_PAGES_BRANCH=master        # production branch    (default: master)
 ```
 
 **Deploy:**
