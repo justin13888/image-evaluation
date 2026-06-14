@@ -43,7 +43,7 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 |---|---|---|---|---|---|
 | `rav1e-encode` | rust | `quality` — 20→90 (8 pts, quality) | `chroma-444` | — | `speed`=6†, `chroma`=420 |
 | `libavif-encode` | c | `quality` — 20→90 (8 pts, quality) | `yuv-444` | — | `speed`=6†, `yuv`=420 |
-| `svt-av1-encode` | c | `quality` — 20→90 (8 pts, quality) | `yuv-444` | — | `speed`=6†, `yuv`=420 |
+| `svt-av1-encode` | c | `quality` — 20→90 (8 pts, quality) | — | — | `speed`=6†, `yuv`=420 |
 
 ### JXL
 
