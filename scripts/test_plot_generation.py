@@ -297,7 +297,10 @@ def test_report_html():
     with open(os.path.join(qual, "manifest.json"), "w") as f:
         json.dump(
             {
-                "git": {"commit": "0123456789abcdef0123456789abcdef01234567", "dirty": True},
+                "git": {
+                    "commit": "0123456789abcdef0123456789abcdef01234567",
+                    "dirty": True,
+                },
                 "benchmark_config": {
                     "suite": "quality",
                     "dataset": "div2k",
