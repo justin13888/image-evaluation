@@ -16,3 +16,6 @@ results/
 # Vendored build artifacts
 vendor/build/
 vendor/install/
+
+# mise local overrides (e.g. CF_PAGES_PROJECT, Cloudflare API token/account id)
+mise.local.toml
