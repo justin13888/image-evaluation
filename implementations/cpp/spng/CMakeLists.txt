@@ -13,7 +13,7 @@ include_directories(../../../harness/cpp)
 
 find_package(ZLIB REQUIRED)
 find_package(mimalloc REQUIRED)
-pkg_check_modules(SPNG spng REQUIRED IMPORTED_TARGET)
+pkg_check_modules(SPNG libspng_static REQUIRED IMPORTED_TARGET)
 
 # Decoder binary
 add_executable(bench-spng-decode decode.cpp)

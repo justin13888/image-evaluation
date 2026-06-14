@@ -893,10 +893,14 @@ def _mozjpeg_schema() -> "TunableSchema":
     return schema
 
 
-def _avif_schema() -> "TunableSchema":
+def _avif_schema(support_444: bool = True) -> "TunableSchema":
     """AVIF encoders via libavif (libavif, svt-av1) share a 0-100 quality knob plus
     a speed preset and chroma format. `speed` is a quality/throughput trade left to
-    the performance overlay; 4:4:4 chroma is the curated secondary series."""
+    the performance overlay; 4:4:4 chroma is the curated secondary series.
+
+    `support_444=False` restricts the encoder to 4:2:0 only and drops the 4:4:4
+    series — SVT-AV1 (`Svt[error]: Only support 420 now`) rejects any other chroma
+    format, so exposing the variant would just produce guaranteed-failing runs."""
     return TunableSchema(
         params=[
             Tunable(
@@ -920,7 +924,7 @@ def _avif_schema() -> "TunableSchema":
                 name="yuv",
                 kind="enum",
                 default="420",
-                choices=["420", "444"],
+                choices=["420", "444"] if support_444 else ["420"],
                 description="Chroma subsampling (YUV format)",
             ),
         ],
@@ -933,7 +937,9 @@ def _avif_schema() -> "TunableSchema":
                 overrides={"yuv": "444"},
                 description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
             )
-        ],
+        ]
+        if support_444
+        else [],
         skipped=[
             (
                 "codec-specific-options",
@@ -1095,7 +1101,9 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         ],
     ),
     "libavif-encode": _avif_schema(),
-    "svt-av1-encode": _avif_schema(),
+    # SVT-AV1 only encodes YUV 4:2:0 ("Svt[error]: Only support 420 now"), so it
+    # gets the AVIF schema without the 4:4:4 chroma series.
+    "svt-av1-encode": _avif_schema(support_444=False),
     # --- JXL ---
     # Issue #4 explicitly calls out JXL "progressive decoding and various quality
     # constraint settings". libjxl-encode wires the encode-side levers

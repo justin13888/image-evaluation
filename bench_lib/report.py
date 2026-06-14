@@ -25,6 +25,9 @@ from bench_lib.plotting import (
 
 _ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
+# Public repository, for linking a run back to the exact commit that produced it.
+_REPO_URL = "https://github.com/justin13888/image-implementation-benchmark"
+
 
 def _asset(name: str) -> str:
     """Read a bundled asset (CSS/JS) to inline into the report."""
@@ -40,24 +43,35 @@ def _json_script(elem_id: str, obj: Any) -> str:
     return f'<script id="{elem_id}" type="application/json">{payload}</script>'
 
 
-def _img_tag(png_path: str) -> str:
-    """Embed a PNG as a base64 <img> data URI (self-contained, no external src)."""
-    with open(png_path, "rb") as f:
+def _img_tag(img_path: str) -> str:
+    """Embed a chart as a base64 <img> data URI (self-contained, no external src).
+    SVG charts use ``image/svg+xml``; anything else is treated as PNG. A data-URI
+    <img> (rather than inlined markup) isolates each SVG so matplotlib's shared
+    ids/clip-paths can't collide across charts."""
+    mime = "image/svg+xml" if img_path.endswith(".svg") else "image/png"
+    with open(img_path, "rb") as f:
         data = base64.b64encode(f.read()).decode("ascii")
-    alt = html.escape(os.path.basename(png_path))
+    alt = html.escape(os.path.basename(img_path))
     return (
         f'<figure><img alt="{alt}" '
-        f'src="data:image/png;base64,{data}">'
+        f'src="data:{mime};base64,{data}">'
         f"<figcaption>{alt}</figcaption></figure>"
     )
 
 
-def _embed_pngs(section_dir: str) -> str:
-    """Embed every PNG in a suite subdirectory, sorted by name."""
-    pngs = sorted(glob.glob(os.path.join(section_dir, "*.png")))
-    if not pngs:
+def _embed_charts(section_dir: str) -> str:
+    """Embed every chart in a suite subdirectory, sorted by name. Prefers SVG and
+    falls back to PNG of the same basename, so older PNG-only bundles still render."""
+    by_base: dict[str, str] = {}
+    # PNGs first, then let SVGs of the same basename win.
+    for path in sorted(glob.glob(os.path.join(section_dir, "*.png"))):
+        by_base[os.path.splitext(os.path.basename(path))[0]] = path
+    for path in sorted(glob.glob(os.path.join(section_dir, "*.svg"))):
+        by_base[os.path.splitext(os.path.basename(path))[0]] = path
+    charts = [by_base[k] for k in sorted(by_base)]
+    if not charts:
         return "<p><em>No charts.</em></p>"
-    return "\n".join(_img_tag(p) for p in pngs)
+    return "\n".join(_img_tag(p) for p in charts)
 
 
 def _load_json(path: str) -> Optional[Any]:
@@ -75,6 +89,19 @@ def _benchmark_config(bundle_dir: str) -> Optional[dict]:
         m = _load_json(os.path.join(bundle_dir, rel))
         if isinstance(m, dict) and isinstance(m.get("benchmark_config"), dict):
             return m["benchmark_config"]
+    return None
+
+
+def _git_info(bundle_dir: str) -> Optional[dict]:
+    """The run's git provenance (commit + dirty flag) from whichever manifest
+    carries it, mirroring ``_benchmark_config``'s search order. ``None`` for older
+    bundles whose manifests predate git capture."""
+    for rel in ("quality/manifest.json", "performance/manifest.json", "manifest.json"):
+        m = _load_json(os.path.join(bundle_dir, rel))
+        if isinstance(m, dict):
+            git = m.get("git")
+            if isinstance(git, dict) and git.get("commit"):
+                return git
     return None
 
 
@@ -157,10 +184,21 @@ def _config_section(bundle_dir: str) -> list[str]:
     if cfg.get("quick"):
         row("Quick mode", "yes (2 quality points/impl)")
 
+    git = _git_info(bundle_dir)
+    if git and git.get("commit"):
+        commit = str(git["commit"])
+        link = (
+            f'<a href="{html.escape(_REPO_URL)}/tree/{html.escape(commit)}" '
+            f'rel="noopener noreferrer"><code>{html.escape(commit[:12])}</code></a>'
+        )
+        if git.get("dirty"):
+            link += " &middot; dirty (uncommitted changes)"
+        row("Commit", link)
+
     if not rows:
         return []
     return [
-        "<h2>Dataset &amp; run configuration</h2>",
+        "<h2>Dataset &amp; Run Configuration</h2>",
         "<table>" + "".join(rows) + "</table>",
     ]
 
@@ -343,7 +381,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "across single-threaded and all-cores modes. Quality above is primary: "
             "raw speed is only meaningful alongside the quality it trades for.</p>"
         )
-        parts.append(_embed_pngs(perf_dir))
+        parts.append(_embed_charts(perf_dir))
 
     parts.append(
         "<p class='muted'>Raw data is embedded above "

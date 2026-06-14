@@ -155,7 +155,11 @@ def generate_summary(
             plots = create_plots_from_parsed_results(parsed_results)
 
             for key, fig in plots:
-                filename = filename_from_key(key) + ".png"
+                # SVG (vector) keeps the charts sharp at any zoom and consistent
+                # with the interactive quality charts; matplotlib infers the
+                # backend from the .svg extension. figsize is unchanged, so the
+                # proportions match the previous PNG output.
+                filename = filename_from_key(key) + ".svg"
                 filepath = os.path.join(result_dir, filename)
                 fig.savefig(filepath)
                 plt.close(fig)

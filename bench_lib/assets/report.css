@@ -52,7 +52,7 @@
   display: flex; flex-wrap: wrap; align-items: center; gap: .15rem .9rem;
   margin: .4rem .2rem 0; font-size: .78rem; color: #555;
 }
-.q-size-cap { color: #555; }
+.q-size-cap { color: #555; flex-basis: 100%; }   /* break before the reference bubbles */
 .q-size-item { display: inline-flex; align-items: center; gap: .25rem; }
 .q-size-item svg { overflow: visible; }
 .q-size-bub { fill: #c9c9c9; stroke: #888; stroke-width: 1; }
@@ -83,10 +83,11 @@ table.q-table td.bad { color: #b3261e; }
 /* Lossless compression-efficiency view (issue #26): a bpp leaderboard + a
    size-vs-effort chart. The effort chart reuses .q-chart; the bars need their
    own plot framing since they are not a .q-chart. */
+#q-lossless-bars { overflow-x: auto; }   /* scroll instead of clipping long labels */
 #q-lossless-bars .q-plot {
   border: 1px solid #e6e6e6; border-radius: 6px; background: #fff; margin-bottom: 1rem;
 }
-#q-lossless-bars svg { width: 100%; height: auto; display: block; }
+#q-lossless-bars svg { width: 100%; height: auto; display: block; min-width: 600px; }
 .q-ll-name { fill: #222; font-size: 12px; }
 .q-ll-val { fill: #444; font-size: 12px; font-variant-numeric: tabular-nums; }
 
