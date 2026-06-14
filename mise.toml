@@ -3,6 +3,9 @@
 hk = "1.48.0"
 # uv manages the Python toolchain/venv used by ./bench and the lint/format tasks.
 uv = "0.11.21"
+# node + wrangler provide the Cloudflare Pages deploy (see tasks.deploy-report).
+node = "22"
+"npm:wrangler" = "4"
 
 [hooks]
 # Wire the git hooks (hk.pkl) automatically after `mise install`.
@@ -129,6 +132,12 @@ run = "uv run python scripts/test_plot_generation.py"
 [tasks.test]
 description = "Run all tests"
 depends = ["test-rust", "test-python"]
+
+# --- Deploy task ---
+
+[tasks.deploy-report]
+description = "Deploy a report bundle to Cloudflare Pages (default: newest under results/)"
+run = "scripts/deploy_report.sh"
 
 # --- Pre-commit hook task (invoked by hk; see hk.pkl) ---
 

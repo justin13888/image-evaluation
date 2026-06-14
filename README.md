@@ -161,6 +161,36 @@ results/<timestamp>/
 
 **`report.html`** is a single offline-friendly file, **quality-first**. The quality view is primary and interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, a sortable BD-rate table, a **lossless compression-efficiency** section (bpp leaderboard + size-vs-effort chart), and a **decoder fidelity & speed** section (decode time + PSNR vs the golden decoder). Every operating point's encode/decode **time** is also a visible dimension ([issue #46](https://github.com/justin13888/image-evaluation/issues/46)): on the rate-distortion, Pareto and lossless-effort charts time is the point's **bubble size** (bigger = slower), and the decoder section adds a **speed-vs-bitrate scatter** (decode time vs input bpp, approximate-decode points ringed). A per-section **Show time** toggle (default on) hides the time dimension when you want the rate-distortion shape on its own. The rigorous-timing overlay's charts (embedded as base64 PNGs) follow below it as the secondary view. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
 
+### Publishing the report
+
+The `report.html` is self-contained and static, so a bundle can be hosted on **[Cloudflare Pages](https://pages.cloudflare.com/)**. The `deploy-report` task picks a bundle, runs pre-flight checks, stages an `index.html` (so the site root serves the report), and uploads it with the [wrangler](https://developers.cloudflare.com/workers/wrangler/) CLI (provisioned by `mise install`).
+
+**One-time Cloudflare setup:**
+
+1. Create a [Cloudflare account](https://dash.cloudflare.com/sign-up).
+2. Create a Pages project named `image-evaluation` (the default name). Either:
+   - **Dashboard:** Workers & Pages → Create → Pages → **Upload assets** (Direct Upload), and name it `image-evaluation`; or
+   - **CLI:** `wrangler pages project create image-evaluation --production-branch master`.
+3. Authenticate wrangler, either:
+   - **Interactive:** `wrangler login` (opens a browser), or
+   - **Headless/CI:** export `CLOUDFLARE_API_TOKEN` (a token with the *Cloudflare Pages → Edit* permission) and `CLOUDFLARE_ACCOUNT_ID`.
+
+**Configure (optional)** — all have defaults; override via the environment or a gitignored `mise.local.toml` `[env]` block:
+
+```bash
+export CF_PAGES_PROJECT=my-project   # Pages project name (default: image-evaluation)
+export CF_PAGES_BRANCH=master        # production branch    (default: master)
+```
+
+**Deploy:**
+
+```bash
+mise run deploy-report                            # newest bundle under results/
+mise run deploy-report results/20260614_164319    # a specific bundle
+```
+
+The task fails fast with an actionable message if the bundle or its `report.html` is missing, if `wrangler` isn't installed, or if you are not authenticated. On success wrangler prints the live `*.pages.dev` URL, whose root loads the report.
+
 ## Methodology
 
 ### Input Generation
