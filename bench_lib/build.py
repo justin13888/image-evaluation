@@ -22,6 +22,10 @@ from bench_lib.models import (
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENDOR_DIR = os.path.join(PROJECT_ROOT, "vendor")
 VENDOR_COMMON = os.path.join(VENDOR_DIR, "install", "common")
+# Vendored build tools (nasm) install here. build_vendor.py sets this on PATH
+# for its own subprocess; we re-apply it in this (parent) process so the cargo
+# and C++ builds below also resolve the vendored nasm without a system install.
+VENDOR_COMMON_BIN = os.path.join(VENDOR_COMMON, "bin")
 VENDOR_LIBJPEG_TURBO = os.path.join(VENDOR_DIR, "install", "libjpeg-turbo")
 VENDOR_MOZJPEG = os.path.join(VENDOR_DIR, "install", "mozjpeg")
 
@@ -285,6 +289,13 @@ def build_projects(formats: list[ImageFormat]):
     # Build vendored C/C++ libraries and ssimulacra2
     print(f"{Fore.BLUE}\n[Step 1/3] Building vendored dependencies...")
     build_vendor_deps()
+
+    # build_vendor_deps() runs in a child process, so its PATH change does not
+    # reach here. Re-apply it so the cargo / C++ builds below also see the
+    # vendored nasm (e.g. any nasm-rs-based crate).
+    if os.path.isdir(VENDOR_COMMON_BIN):
+        _path = os.environ.get("PATH", "")
+        os.environ["PATH"] = VENDOR_COMMON_BIN + os.pathsep + _path
 
     # Build Rust projects
     print(f"{Fore.BLUE}\n[Step 2/3] Building Rust projects...")

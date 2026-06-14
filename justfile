@@ -12,6 +12,8 @@ clean:
 clean-vendor:
     rm -rf vendor/build
     rm -rf vendor/install
+    # nasm is built in-tree (no out-of-tree support); wipe its build artifacts too.
+    git -C vendor/nasm clean -fdx 2>/dev/null || true
 
 # Remove all build artifacts
 clean-all: clean clean-vendor

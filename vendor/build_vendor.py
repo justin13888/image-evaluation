@@ -18,6 +18,11 @@ INSTALL_COMMON = os.path.join(VENDOR_DIR, "install", "common")
 INSTALL_LIBJPEG_TURBO = os.path.join(VENDOR_DIR, "install", "libjpeg-turbo")
 INSTALL_MOZJPEG = os.path.join(VENDOR_DIR, "install", "mozjpeg")
 
+# Vendored build tools (currently just nasm) install here. The directory is
+# prepended to PATH before any library is built so a fresh machine needs no
+# system-wide nasm — see build_nasm() and _prepend_vendor_bin_to_path().
+INSTALL_COMMON_BIN = os.path.join(INSTALL_COMMON, "bin")
+
 # Build directories
 BUILD_DIR = os.path.join(VENDOR_DIR, "build")
 
@@ -255,6 +260,59 @@ def build_dav1d():
     run(["ninja", "-C", build_dir, "install"], label=label, env=env)
 
 
+def _prepend_vendor_bin_to_path():
+    """Put the vendored tools bin dir (nasm) at the front of PATH.
+
+    Every build step copies os.environ, so mutating PATH here makes the vendored
+    nasm visible to cmake (aom), meson (dav1d), cargo/nasm-rs (rav1d), and the
+    libjpeg-turbo / mozjpeg / SVT-AV1 / libwebp SIMD assembler invocations —
+    without requiring a system-wide nasm install.
+    """
+    os.makedirs(INSTALL_COMMON_BIN, exist_ok=True)
+    path = os.environ.get("PATH", "")
+    if INSTALL_COMMON_BIN not in path.split(os.pathsep):
+        os.environ["PATH"] = INSTALL_COMMON_BIN + os.pathsep + path
+
+
+def build_nasm():
+    """Build the NASM assembler from the vendored submodule.
+
+    NASM assembles the x86-64 SIMD kernels in aom, dav1d, rav1d, libjpeg-turbo,
+    mozjpeg, SVT-AV1 and libwebp. It is the one build tool not provided by the
+    C/C++/Rust language toolchains, so vendoring it lets a fresh machine run the
+    benchmark without `apt install nasm` / `brew install nasm`. Must run before
+    every other step so they pick up the installed binary via PATH.
+    """
+    label = "nasm"
+    sentinel = os.path.join(INSTALL_COMMON_BIN, "nasm")
+    if is_built(sentinel):
+        print(f"  [{label}] Already built, skipping.")
+        return
+
+    src = os.path.join(VENDOR_DIR, "nasm")
+    if not os.path.exists(os.path.join(src, "autogen.sh")):
+        raise RuntimeError(
+            "vendor/nasm submodule is empty — run "
+            "`git submodule update --init --depth 1 vendor/nasm`"
+        )
+    # NASM is built in-tree (cwd = the submodule). Its autotools build does not
+    # support a VPATH/out-of-tree build of the perl-generated x86 instruction
+    # tables (the recipes redirect into x86/ without creating it first). The
+    # nasm submodule is marked `ignore = dirty` in .gitmodules so these build
+    # artifacts never surface as repo changes.
+    # A git checkout ships no ./configure; autogen.sh generates it (autoconf).
+    if not os.path.exists(os.path.join(src, "configure")):
+        run(["sh", "autogen.sh"], cwd=src, label=label)
+    run(["./configure"], cwd=src, label=label)
+    # The default target builds only the nasm/ndisasm binaries — no man pages,
+    # so asciidoc/xmlto are not required.
+    run(["make", f"-j{os.cpu_count() or 1}"], cwd=src, label=label)
+
+    os.makedirs(INSTALL_COMMON_BIN, exist_ok=True)
+    shutil.copy2(os.path.join(src, "nasm"), sentinel)
+    print(f"  [{label}] Installed nasm to {sentinel}")
+
+
 def _make_nasm_shim() -> str:
     """
     Return path to a nasm shim script, creating it if needed.
@@ -268,11 +326,15 @@ def _make_nasm_shim() -> str:
     never matches and cmake rejects nasm 3.x as "unsupported".
 
     The shim intercepts the `-hf` invocation and appends the "-Ox" line that
-    cmake expects, while forwarding every other invocation to real nasm.
+    cmake expects, while forwarding every other invocation to real nasm. The
+    vendored nasm (built by build_nasm()) is preferred; a system nasm on PATH is
+    used as a fallback.
     """
-    nasm_real = shutil.which("nasm")
+    nasm_real = os.path.join(INSTALL_COMMON_BIN, "nasm")
+    if not os.path.exists(nasm_real):
+        nasm_real = shutil.which("nasm")
     if not nasm_real:
-        raise RuntimeError("nasm not found in PATH")
+        raise RuntimeError("nasm not found (vendored build missing and none on PATH)")
 
     shim_path = os.path.join(BUILD_DIR, "nasm_shim.sh")
     os.makedirs(BUILD_DIR, exist_ok=True)
@@ -610,7 +672,13 @@ def main():
     print("BUILDING VENDORED DEPENDENCIES")
     print("=" * 70)
 
+    # nasm is built first; prepend its install dir to PATH so every later step
+    # (and any tool they spawn) resolves the vendored assembler.
+    _prepend_vendor_bin_to_path()
+
     steps = [
+        # nasm must precede every library that assembles x86-64 SIMD kernels.
+        ("nasm", build_nasm),
         ("zlib", build_zlib),
         ("mimalloc", build_mimalloc),
         ("libpng", build_libpng),  # must precede mozjpeg (mozjpeg find_package(PNG))
