@@ -47,3 +47,9 @@
 	path = vendor/codec-corpus
 	url = https://github.com/imazen/codec-corpus.git
 	ignore = untracked
+[submodule "vendor/nasm"]
+	path = vendor/nasm
+	url = https://github.com/netwide-assembler/nasm.git
+	# nasm is configured + built in-tree (no out-of-tree build support), so its
+	# build artifacts dirty the working tree; ignore them in status/diff.
+	ignore = dirty
