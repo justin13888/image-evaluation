@@ -1,0 +1,24 @@
+amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.pkl"
+
+// Git hooks for this repo. Equivalent to the previous lefthook.yaml: the actual
+// format/lint/test logic lives in mise tasks (see mise.toml) so there is a single
+// source of truth. Run `hk install` to wire these into .git/hooks (done
+// automatically by the mise `postinstall` hook on `mise install`).
+hooks {
+    ["pre-commit"] {
+        steps {
+            ["pre-commit"] {
+                check = "mise run pre-commit"
+                exclusive = true
+            }
+        }
+    }
+    ["pre-push"] {
+        steps {
+            ["test"] {
+                check = "mise run test"
+                exclusive = true
+            }
+        }
+    }
+}

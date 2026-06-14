@@ -1,0 +1,163 @@
+[tools]
+# hk powers the git hooks (see hk.pkl); the postinstall hook wires them up.
+hk = "1.48.0"
+# uv manages the Python toolchain/venv used by ./bench and the lint/format tasks.
+uv = "0.11.21"
+
+[hooks]
+# Wire the git hooks (hk.pkl) automatically after `mise install`.
+postinstall = "hk install"
+
+# --- Clean tasks ---
+
+[tasks.clean]
+description = "Remove C++ and Rust benchmark build artifacts (fast to rebuild)"
+run = [
+    "rm -rf implementations/cpp/*/build",
+    "rm -rf target",
+]
+
+[tasks.clean-vendor]
+description = "Remove vendored library build and install trees (slow to rebuild — takes many minutes)"
+run = [
+    "rm -rf vendor/build",
+    "rm -rf vendor/install",
+    # nasm is built in-tree (no out-of-tree support); wipe its build artifacts too.
+    "git -C vendor/nasm clean -fdx 2>/dev/null || true",
+]
+
+[tasks.clean-all]
+description = "Remove all build artifacts"
+depends = ["clean", "clean-vendor"]
+
+# --- Fix tasks (modify files in place) ---
+
+[tasks.fmt-cpp]
+description = "Format C++ sources with clang-format"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+files=$(git ls-files -- '*.cpp' '*.cc' '*.cxx' '*.h' '*.hpp' '*.hxx')
+if [ -n "$files" ]; then
+    echo "$files" | xargs -n 10 -P "$(nproc)" clang-format -i -style=file
+fi
+'''
+
+[tasks.fmt-python]
+description = "Format Python with ruff"
+run = "uv run ruff format ."
+
+[tasks.fmt-rust]
+description = "Format Rust with cargo fmt"
+run = "cargo fmt"
+
+[tasks.fmt]
+description = "Format C++, Python and Rust"
+depends = ["fmt-cpp", "fmt-python", "fmt-rust"]
+
+[tasks.lint-python]
+description = "Lint Python with ruff (auto-fix)"
+run = "uv run ruff check --fix ."
+
+[tasks.lint-rust]
+description = "Lint Rust with clippy (auto-fix)"
+run = "cargo clippy --fix --allow-dirty --allow-staged -- -D warnings"
+
+[tasks.lint]
+description = "Lint Python and Rust (auto-fix)"
+depends = ["lint-python", "lint-rust"]
+
+[tasks.fix]
+description = "Format then lint-fix everything (run before committing)"
+# Run sequentially: formatting must finish before lint-fix touches the same files.
+run = [
+    "mise run fmt",
+    "mise run lint",
+]
+
+# --- Check tasks (read-only, for CI) ---
+
+[tasks.check-fmt-cpp]
+description = "Check C++ formatting (clang-format dry run)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+files=$(git ls-files -- '*.cpp' '*.cc' '*.cxx' '*.h' '*.hpp' '*.hxx')
+if [ -n "$files" ]; then
+    echo "$files" | xargs -n 10 -P "$(nproc)" clang-format --dry-run -Werror -style=file
+fi
+'''
+
+[tasks.check-fmt-python]
+description = "Check Python formatting (ruff)"
+run = "uv run ruff format --check ."
+
+[tasks.check-fmt-rust]
+description = "Check Rust formatting (cargo fmt)"
+run = "cargo fmt --check"
+
+[tasks.check-fmt]
+description = "Check formatting for C++, Python and Rust"
+depends = ["check-fmt-cpp", "check-fmt-python", "check-fmt-rust"]
+
+[tasks.check-lint-python]
+description = "Lint Python without fixing (ruff)"
+run = "uv run ruff check ."
+
+[tasks.check-lint-rust]
+description = "Lint Rust without fixing (clippy)"
+run = "cargo clippy -- -D warnings"
+
+[tasks.check-lint]
+description = "Lint Python and Rust without fixing"
+depends = ["check-lint-python", "check-lint-rust"]
+
+[tasks.check]
+description = "All read-only format and lint checks (used in CI)"
+depends = ["check-fmt", "check-lint"]
+
+# --- Test tasks ---
+
+[tasks.test-rust]
+description = "Run the Rust test suite"
+run = "cargo test"
+
+[tasks.test-python]
+description = "Run the Python plot-generation tests"
+run = "uv run python scripts/test_plot_generation.py"
+
+[tasks.test]
+description = "Run all tests"
+depends = ["test-rust", "test-python"]
+
+# --- Pre-commit hook task (invoked by hk; see hk.pkl) ---
+
+[tasks.pre-commit]
+description = "Format + lint and verify nothing was left unstaged (git pre-commit hook)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running formatters..."
+mise run fmt
+
+echo "Running Python linter..."
+mise run lint-python
+
+echo "Running Rust clippy (with fix)..."
+cargo clippy --fix --allow-dirty --allow-staged -- -D warnings
+
+echo "Checking for modified files..."
+if ! git diff --exit-code; then
+    echo ""
+    echo "ERROR: Files were modified by formatters/linters."
+    echo "Please re-stage the changes and try again:"
+    echo "  git add -u && git commit"
+    exit 1
+fi
+
+echo "Running Rust clippy (final check)..."
+cargo clippy -- -D warnings
+
+echo "Pre-commit checks passed."
+'''

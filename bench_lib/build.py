@@ -32,7 +32,7 @@ VENDOR_MOZJPEG = os.path.join(VENDOR_DIR, "install", "mozjpeg")
 # iqa-cli (the image-quality metrics CLI) is no longer vendored in-repo; it is
 # installed from crates.io, pinned to a version that tracks the iqa crate. The
 # binary is installed into target/bin (see install_iqa_cli) so it lives with the
-# workspace build and is removed by `just clean` (which wipes target/).
+# workspace build and is removed by `mise run clean` (which wipes target/).
 IQA_CLI_VERSION = "0.2.0"
 
 # Per-build-directory locks to prevent concurrent cmake/make in the same dir

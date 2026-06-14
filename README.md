@@ -6,14 +6,12 @@ This repository contains benchmarks for various image format implementations, co
 
 ### Prerequisites
 
-* [uv](https://docs.astral.sh/uv/) - Python package manager (install: `curl -LsSf https://astral.sh/uv/install.sh | sh`)
+* [mise](https://mise.jdx.dev/) — task runner and tool manager (install: `curl https://mise.run | sh`). It provisions the project's `uv` (Python package manager) and [`hk`](https://hk.jdx.dev/) (git hooks); run `mise install` to fetch them. Rust (via rustup) and the system C/C++ build tools below are not managed by mise.
 * Rust toolchain ([rustup](https://rustup.rs/))
 * CMake, Clang, ccache
 * Autoconf + Automake (to build the vendored NASM assembler)
 * Meson + Ninja (for dav1d)
 * ImageMagick, hyperfine, wget, unzip
-* [just](https://github.com/casey/just) — task runner
-* [lefthook](https://github.com/evilmartians/lefthook) — git hooks manager
 
   On Ubuntu/Debian:
 
@@ -34,18 +32,19 @@ The NASM assembler (used to assemble the x86-64 SIMD kernels in aom, dav1d, rav1
 
 ### Development Setup
 
-1. **Install git hooks**:
+1. **Install project tooling and git hooks**:
 
    ```bash
-   lefthook install
+   mise install   # fetches uv + hk and wires the git hooks (runs `hk install`)
    ```
 
-2. **Available recipes**:
-   - `just fix` — format + lint fix (run before committing)
-   - `just check` — CI-style read-only checks
-   - `just test` — run all tests
+2. **Available tasks**:
+   - `mise run fix` — format + lint fix (run before committing)
+   - `mise run check` — CI-style read-only checks
+   - `mise run test` — run all tests
+   - `mise tasks` — list every available task
 
-   The pre-commit hook runs `just pre-commit` automatically on `git commit`. The pre-push hook runs `just test` on `git push`.
+   The pre-commit hook runs `mise run pre-commit` automatically on `git commit`. The pre-push hook runs `mise run test` on `git push`.
 
 ### Setup
 
@@ -497,5 +496,5 @@ Contributions are welcome!
 * **New Implementations:** Must implement the standard CLI defined in "Benchmarking Architecture".
 * **Optimization:** If you find flags or methods that improve a specific implementation, open a PR with benchmark results and updated manifest.
 * **Image Sets:** Proposals for additional pathological or domain-specific test images are welcome.
-* Run `just fix` before committing, or let the pre-commit hook handle it automatically.
-* CI runs `just check` and `just test` on all PRs.
+* Run `mise run fix` before committing, or let the pre-commit hook handle it automatically.
+* CI runs `mise run check` and `mise run test` on all PRs.
