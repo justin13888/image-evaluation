@@ -38,7 +38,7 @@ fi
 
 if [ -z "$report_dir" ]; then
     err "no report bundle found under '$RESULTS_DIR/'. Generate one first, e.g.:"
-    err "  ./bench run --dataset kodak --sample 3 --quick"
+    err "  ./bench run --dataset clic2025"
     exit 1
 fi
 
