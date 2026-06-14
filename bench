@@ -1,6 +1,6 @@
 #!/usr/bin/env .venv/bin/python
 """
-Image Implementation Benchmark Runner
+Image Evaluation Runner
 
 Orchestrates compilation, execution, and result collection for image codec benchmarks.
 See README.md for full methodology and usage details.

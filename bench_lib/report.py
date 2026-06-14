@@ -26,7 +26,7 @@ from bench_lib.plotting import (
 _ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
 # Public repository, for linking a run back to the exact commit that produced it.
-_REPO_URL = "https://github.com/justin13888/image-implementation-benchmark"
+_REPO_URL = "https://github.com/justin13888/image-evaluation"
 
 
 def _asset(name: str) -> str:
@@ -356,7 +356,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         "<title>Benchmark Report</title>",
         f"<style>{_CSS}\n{_asset('report.css')}</style></head><body>",
-        "<h1>Image Implementation Benchmark — Report</h1>",
+        "<h1>Image Evaluation — Report</h1>",
     ]
     if generated_at:
         parts.append(f"<p class='muted'>Generated: {html.escape(generated_at)}</p>")
