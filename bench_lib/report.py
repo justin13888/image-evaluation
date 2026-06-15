@@ -383,6 +383,21 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         )
         parts.append(_embed_charts(perf_dir))
 
+    scal_dir = os.path.join(bundle_dir, "scaling")
+    if os.path.isdir(scal_dir):
+        parts.append("<h2>Scaling &mdash; time vs pixel count</h2>")
+        parts.append(
+            "<p class='muted'>Each codec timed single-threaded at its performance "
+            "preset on a downscale-only resolution ladder (same content, only pixels "
+            "vary). Axes are log-log; the dashed line is a fit of "
+            "<code>time &prop; pixels<sup>k</sup></code>. <strong>k &asymp; 1 is "
+            "linear; k &gt; 1 is super-linear</strong> (cost grows faster than pixel "
+            "count) &mdash; the per-codec exponent and R² are in the legend and "
+            "<code>scaling/summary.md</code>. Single-threaded to isolate the "
+            "pixel-count exponent from parallel-scaling effects.</p>"
+        )
+        parts.append(_embed_charts(scal_dir))
+
     parts.append(
         "<p class='muted'>Raw data is embedded above "
         "(<code>#quality-metrics</code>) and also on disk alongside this file: "

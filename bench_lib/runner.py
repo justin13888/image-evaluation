@@ -59,6 +59,14 @@ from bench_lib.models import (
     select_sweep,
 )
 from bench_lib.report import generate_report_html
+from bench_lib.scaling import (
+    SCALING_HYPERFINE_FLAGS,
+    SCALING_LADDER_MP,
+    build_scaling_tasks,
+    generate_ladder,
+    select_scaling_sources,
+    write_scaling_outputs,
+)
 from bench_lib.summary import generate_summary
 from bench_lib.system_info import (
     _detect_mimalloc_version,
@@ -1504,6 +1512,59 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
         measure_memory(result_dir, mem_commands, mem_names)
 
 
+def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
+    """Time encode/decode vs pixel count on a downscaled resolution ladder and
+    write the ``scaling/`` suite (per-(format, op) log-log charts + a summary with
+    a fitted exponent per codec). Returns True iff it produced output.
+
+    Single-threaded by design (see ``scaling``): the question is how cost grows
+    with pixels, isolated from parallel-scaling efficiency. Reuses the shared
+    hyperfine driver with lighter run counts (a slope only needs a rough mean)."""
+    print("=" * 70)
+    print("SCALING SUITE (time vs pixel count)")
+    print("=" * 70)
+
+    sources = select_scaling_sources(
+        get_dataset_files(args.dataset), args.scaling_images
+    )
+    if not sources:
+        print("\nNo source images available for the scaling suite; skipping.")
+        return False
+    ladder = args.scaling_ladder or SCALING_LADDER_MP
+    rungs = generate_ladder(args.dataset, sources, ladder)
+    if not rungs:
+        print("\nNo downscaled rungs generated (sources too small?); skipping.")
+        return False
+    tasks, pixels_by_basename = build_scaling_tasks(args.formats, rungs)
+    if not tasks:
+        print("\nNo scaling tasks to run (binaries missing?); skipping.")
+        return False
+
+    scal_dir = os.path.join(bundle_dir, "scaling")
+    os.makedirs(scal_dir, exist_ok=True)
+    manifest = {
+        **_base_manifest(),
+        "benchmark_config": {
+            "suite": "scaling",
+            **_dataset_manifest(args),
+            "formats": args.formats,
+            "scaling_images": len(sources),
+            "ladder_mp": ladder,
+            "rungs": len(rungs),
+            "threads": 1,
+        },
+    }
+    with open(f"{scal_dir}/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n✓ {len(tasks)} scaling benchmark(s) across {len(rungs)} ladder rung(s)\n")
+
+    raw = _run_hyperfine_tasks(
+        tasks, scal_dir, list(SCALING_HYPERFINE_FLAGS), args.debug
+    )
+    write_scaling_outputs(scal_dir, raw, pixels_by_basename)
+    return True
+
+
 def run_sweep(args: RunArgs) -> None:
     """Run the unified sweep into a fresh bundle.
 
@@ -1541,6 +1602,11 @@ def run_sweep(args: RunArgs) -> None:
         _run_timing_overlay(args, tasks, perf_dir)
         suites.append("performance")
 
+    # 3. Scaling suite (optional): encode/decode time vs pixel count on a
+    # downscaled ladder, characterizing each codec's scaling exponent.
+    if args.scaling and _run_scaling_suite(args, bundle):
+        suites.append("scaling")
+
     _finalize_bundle(bundle, suites)
     _print_bundle(bundle, suites)
 
@@ -1565,6 +1631,10 @@ def _finalize_bundle(bundle_dir: str, suites: list[str]):
         lines.append(
             "- Quality (rate-distortion): [`quality/summary.md`](quality/summary.md)"
         )
+    if "scaling" in suites:
+        lines.append(
+            "- Scaling (time vs pixels): [`scaling/summary.md`](scaling/summary.md)"
+        )
     lines.append(
         "\nOpen [`report.html`](report.html) for a single self-contained view.\n"
     )
@@ -1585,6 +1655,8 @@ def _print_bundle(bundle_dir: str, suites: list[str]):
         print("  - performance/   : raw.json, summary.md, timing charts, memory.csv")
     if "quality" in suites:
         print("  - quality/       : metrics.json, summary.md, rate-distortion charts")
+    if "scaling" in suites:
+        print("  - scaling/       : raw.json, summary.md, time-vs-pixels charts")
     print("  - manifest.json  : bundle metadata")
     print("  - summary.md     : index")
     print("  - report.html    : self-contained report (all charts embedded)")

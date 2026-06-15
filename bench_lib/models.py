@@ -1604,6 +1604,29 @@ class RunArgs(BaseArgs):
         tyro.conf.FlagCreatePairsOff,
         Field(description="Measure peak memory usage (rigorous timing overlay)"),
     ] = False
+    scaling: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Add a scaling suite: time encode/decode vs pixel count on a "
+            "downscaled resolution ladder and fit a per-codec exponent (time ∝ "
+            "pixels^k), exposing super-linear codecs (e.g. AVIF) vs linear (JPEG)."
+        ),
+    ] = False
+    scaling_images: Annotated[
+        int,
+        Field(
+            description="Number of (largest) source images downscaled for the scaling "
+            "ladder."
+        ),
+    ] = 3
+    scaling_ladder: Annotated[
+        Optional[list[float]],
+        Field(
+            description="Megapixel rungs for the scaling ladder (downscale-only). "
+            "Default: 0.25 0.5 1 2."
+        ),
+    ] = None
 
 
 class QualityArgs(RunArgs):
