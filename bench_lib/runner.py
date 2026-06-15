@@ -84,6 +84,40 @@ INPUT_FILES_CACHE: Dict[
 ] = {}
 
 
+def _single_thread_env() -> Dict[str, str]:
+    """Process environment that pins rayon-/OMP-based codecs (and iqa-cli) to a
+    single thread, so a parallel pool of one-thread tasks saturates the CPU
+    without oversubscribing it."""
+    return {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+
+
+def _generate_intermediates_parallel(
+    fn: Callable[[str], tuple[str, str]], items: Sequence[str]
+) -> list[tuple[str, str]]:
+    """Map ``fn`` over ``items`` across a thread pool, preserving input order.
+
+    Used to pre-generate reference inputs (the cached per-image PPM conversion +
+    reference encode). Those are independent per image and **never timed**, so
+    running them concurrently — each child subprocess pinned to a single thread
+    (see ``_single_thread_env`` and the ``--threads 1`` the callers pass) —
+    saturates the CPU without the jobs×all-cores oversubscription a parallel
+    all-core encode would cause. Decode inputs are scored against the golden
+    decoder of the *same* file, so the thread count cannot shift any reported
+    metric. The reference binary must already be built (callers build it up
+    front) so no worker triggers a cargo build that would race the target dir
+    (cf. ``_ensure_reference_decoders``). Re-raises the first worker error,
+    matching the serial path's fail-closed behaviour."""
+    if not items:
+        return []
+    workers = _resolve_jobs(None, len(items))
+    results: list[tuple[str, str]] = [("", "")] * len(items)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_idx = {executor.submit(fn, item): i for i, item in enumerate(items)}
+        for future in as_completed(future_to_idx):
+            results[future_to_idx[future]] = future.result()
+    return results
+
+
 def get_dataset_files(dataset_name: DatasetId) -> list[str]:
     """
     Get list of files for a given dataset.
@@ -133,90 +167,78 @@ def get_input_files(
         rnd = random.Random(f"{dataset_name}_{limit}")
         dataset_files = rnd.sample(dataset_files, limit)
 
-    # input_files: (input_file, output_file)
-    input_files: list[tuple[str, str]] = []
     target_ext = FORMAT_EXT_MAP[format]
 
-    for f in dataset_files:
+    # Resolve + build the reference encoder once up front (only needed when the
+    # dataset must be transcoded into a non-PPM target). Building it inside the
+    # worker pool below would race cargo's target dir — no cross-thread lock —
+    # so we mirror _ensure_reference_decoders and prepare it serially here.
+    ref_impl: Optional[Implementation] = None
+    if format != PPMImageFormat.PPM:
+        ref_impl_name = REFERENCE_ENCODERS.get(format)
+        if not ref_impl_name:
+            raise RuntimeError(f"No reference encoder defined for {format}")
+        ref_impl = find_implementation_by_name(ref_impl_name)
+        if not ref_impl:
+            raise RuntimeError(f"Reference encoder {ref_impl_name} not found")
+        if not os.path.exists(ref_impl.bin):
+            build_project(ref_impl)
+
+    def _prepare(f: str) -> tuple[str, str]:
+        """Resolve one source into its (input_path, source_path), generating the
+        cached intermediate if missing. Independent per image → safe to run in
+        the pool (only reads/writes this image's own paths)."""
         if f.lower().endswith(f".{target_ext}"):
-            # Dataset file already in required format
-            input_files.append((f, f))
-        else:
-            # Determine target file name. A single reference preset is used per
-            # format, so one encoded file per source suffices (no quality suffix).
-            base_path = os.path.splitext(f)[0]
-            target_file = f"{base_path}.{target_ext}"
+            # Dataset file already in required format.
+            return (f, f)
+        # A single reference preset is used per format, so one encoded file per
+        # source suffices (no quality suffix).
+        base_path = os.path.splitext(f)[0]
+        target_file = f"{base_path}.{target_ext}"
+        if os.path.exists(target_file):
+            return (target_file, f)
 
-            # If target file exists, we can use it
-            if os.path.exists(target_file):
-                input_files.append((target_file, f))
-            else:
-                # Need to convert dataset file into required format
-                print(f"Generating {target_file} from {f}...")
+        print(f"Generating {target_file} from {f}...")
+        # 1. Convert to 8-bit P6 PPM (forced 8-bit: not all impls handle 16-bit).
+        intermediate_ppm = _source_to_ppm(f)
+        # If the requested format is PPM itself, the converted P6 intermediate IS
+        # the target. Running the reference "encoder" (null-cpp-encode) over it
+        # would overwrite the valid P6 file with headerless raw RGB (it writes
+        # img.data, not a PPM), so skip the encode step entirely.
+        if format == PPMImageFormat.PPM:
+            return (intermediate_ppm, f)
 
-                # 1. Convert to PPM
-                intermediate_ppm = f"{base_path}.ppm"
-                if not os.path.exists(intermediate_ppm):
-                    # Use ImageMagick to convert to 8-bit P6 PPM
-                    # We force 8-bit depth as not all implementations handle 16-bit PPM
-                    subprocess.run(
-                        ["convert", f, "-depth", "8", intermediate_ppm],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+        # 2. Encode at the reference encoder's fixed preset (--param k=v).
+        # Single-threaded (see _generate_intermediates_parallel): this output is
+        # never timed and decode inputs are scored vs the golden decoder of the
+        # same file, so the thread count cannot change any reported metric.
+        assert ref_impl is not None  # guaranteed: format != PPM resolved one above
+        ref_cmd = [
+            ref_impl.bin,
+            "--input",
+            intermediate_ppm,
+            "--output",
+            target_file,
+            "--iterations",
+            "1",
+            "--warmup",
+            "0",
+            "--threads",
+            "1",
+        ]
+        for key, value in sorted(schema_for(ref_impl.name).perf_params().items()):
+            ref_cmd += ["--param", f"{key}={value}"]
+        subprocess.run(
+            ref_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,  # Capture stderr to avoid spam, unless error
+            env=_single_thread_env(),
+        )
+        return (target_file, f)
 
-                # If the requested format is PPM itself, the converted P6
-                # intermediate IS the target. Running the reference "encoder"
-                # (null-cpp-encode) over it would overwrite the valid P6 file
-                # with headerless raw RGB (it writes img.data, not a PPM), so
-                # skip the encode step entirely.
-                if format == PPMImageFormat.PPM:
-                    input_files.append((intermediate_ppm, f))
-                    continue
+    input_files = _generate_intermediates_parallel(_prepare, dataset_files)
 
-                # 2. Encode using reference encoder
-                ref_impl_name = REFERENCE_ENCODERS.get(format)
-                if not ref_impl_name:
-                    raise RuntimeError(f"No reference encoder defined for {format}")
-
-                ref_impl = find_implementation_by_name(ref_impl_name)
-                if not ref_impl:
-                    raise RuntimeError(f"Reference encoder {ref_impl_name} not found")
-
-                # Ensure reference implementation is built
-                # Note: We rely on the user having built everything or `run` building it.
-                # If we are in `run`, builds happen before this.
-                if not os.path.exists(ref_impl.bin):
-                    # Try to build it on demand?
-                    build_project(ref_impl)
-
-                # Run encoder at its fixed performance preset (--param k=v).
-                ref_cmd = [
-                    ref_impl.bin,
-                    "--input",
-                    intermediate_ppm,
-                    "--output",
-                    target_file,
-                    "--iterations",
-                    "1",
-                    "--warmup",
-                    "0",
-                    "--threads",
-                    "0",
-                ]
-                for key, value in sorted(
-                    schema_for(ref_impl.name).perf_params().items()
-                ):
-                    ref_cmd += ["--param", f"{key}={value}"]
-                subprocess.run(
-                    ref_cmd,
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,  # Capture stderr to avoid spam, unless error
-                )
-
-                input_files.append((target_file, f))
     # Verify all input files exist
     missing = [f_path for f_path, _ in input_files if not os.path.exists(f_path)]
     if missing:
@@ -230,19 +252,32 @@ def get_input_files(
 
 def _source_to_ppm(f: str) -> str:
     """Return an 8-bit P6 PPM path for source `f`, generating it via ImageMagick
-    if `f` is not already a PPM. Mirrors the conversion in `get_input_files`
-    (forced 8-bit, since not every implementation handles 16-bit PPM)."""
+    if `f` is not already a PPM (forced 8-bit, since not every implementation
+    handles 16-bit PPM).
+
+    The conversion goes to a unique temp file that is atomically `os.replace`d
+    onto the canonical path, so a concurrent reader (the parallel pre-generation
+    pool) never observes a half-written PPM. The temp name carries no `.ppm`
+    extension, so the output format is forced with ImageMagick's `ppm:` prefix
+    rather than inferred from the suffix."""
     if f.lower().endswith(".ppm"):
         return f
     base = os.path.splitext(f)[0]
     ppm = f"{base}.ppm"
     if not os.path.exists(ppm):
-        subprocess.run(
-            ["convert", f, "-depth", "8", ppm],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ppm) or ".", suffix=".tmp")
+        os.close(fd)
+        try:
+            subprocess.run(
+                ["convert", f, "-depth", "8", f"ppm:{tmp}"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            os.replace(tmp, ppm)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return ppm
 
 
@@ -289,12 +324,19 @@ def get_decode_inputs(
     ref_impl = find_implementation_by_name(ref_name)
     if not ref_impl:
         raise RuntimeError(f"Reference encoder {ref_name} not found")
+    # Build the reference encoder once up front (the worker pool below must not
+    # trigger a cargo build that would race the target dir).
     if not os.path.exists(ref_impl.bin):
         build_project(ref_impl)
 
     ext = FORMAT_EXT_MAP[format]
-    inputs: list[tuple[str, str]] = []
-    for f in dataset_files:
+
+    def _prepare(f: str) -> tuple[str, str]:
+        """Reference-encode one source at this operating point, returning
+        (encoded_path, source_ppm_path). Independent per image → pool-safe.
+        Single-threaded (--threads 1 + 1-thread env): never timed, and decoders
+        are scored vs the golden decode of the same file, so the thread count
+        cannot move any reported metric (see _generate_intermediates_parallel)."""
         ppm = _source_to_ppm(f)
         base = os.path.splitext(f)[0]
         target = f"{base}.{label}.{ext}"
@@ -311,14 +353,20 @@ def get_decode_inputs(
                 "--warmup",
                 "0",
                 "--threads",
-                "0",
+                "1",
             ]
             for k, v in sorted(params.items()):
                 cmd += ["--param", f"{k}={v}"]
             subprocess.run(
-                cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=_single_thread_env(),
             )
-        inputs.append((target, ppm))
+        return (target, ppm)
+
+    inputs = _generate_intermediates_parallel(_prepare, dataset_files)
 
     DECODE_INPUTS_CACHE[key] = inputs
     return inputs
@@ -896,7 +944,7 @@ def generate_metrics(
     # Pin every child process to a single thread: covers rayon-/OMP-based codecs
     # and iqa-cli. The encode/decode also pass --threads 1 for codecs (e.g.
     # libavif) whose internal pool keys off the flag rather than these env vars.
-    env = {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+    env = _single_thread_env()
 
     # Build missing reference decoders up front (serial) to avoid a cargo race
     # inside the worker threads.
