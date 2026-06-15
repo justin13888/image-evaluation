@@ -1557,6 +1557,16 @@ class RunArgs(BaseArgs):
             "the full sweep). Default: every declared point."
         ),
     ] = None
+    decode_steps: Annotated[
+        Optional[int],
+        tyro.conf.arg(aliases=["-D"]),
+        Field(
+            description="Number of decoder operating points (input bitrates) per "
+            "format, sampled from the reference encoder's sweep — decoupled from "
+            "--quality-steps. Decode cost/fidelity is ~flat across bitrate, so a few "
+            "points suffice; default 3. Use 0 for the full encoder axis (legacy)."
+        ),
+    ] = 3
     iterations: Annotated[
         int,
         tyro.conf.arg(aliases=["-i"]),

@@ -529,11 +529,13 @@ def _build_decoder_sweep(
 ) -> None:
     """Emit decoder tasks across the same operating-point axis as the encoders.
 
-    Decoders take no params, so the *input* is what varies: for each operating
-    point of the format's reference encoder (the same quality/effort sweep
-    encoders trace), reference-encode the sources at that point and decode them.
-    Decode cost and fidelity (PSNR vs the golden decoder, scored later) thus trace
-    input bitrate. Knob-less reference encoders contribute a single point.
+    Decoders take no params, so the *input* is what varies: for a few operating
+    points of the format's reference encoder, reference-encode the sources at that
+    point and decode them. Decode cost and fidelity (PSNR vs the golden decoder,
+    scored later) thus trace input bitrate. Because decode cost/fidelity is ~flat
+    across bitrate, the point count is decoupled from the encoder's --quality-steps
+    and set by --decode-steps (default a few; --quick → one; 0 → the full encoder
+    axis). Knob-less reference encoders contribute a single point.
 
     Formats with both a lossy and a lossless mode (WebP, JXL) are swept against
     *both* their lossy (REFERENCE_ENCODERS) and lossless (LOSSLESS_REFERENCE_ENCODERS)
@@ -547,6 +549,12 @@ def _build_decoder_sweep(
     ]
     if not decoders:
         return
+
+    # Decoders don't sweep quality; their cost/fidelity is ~flat across input
+    # bitrate, so only a few representative input encodings are needed — decoupled
+    # from the encoder's --quality-steps. --quick collapses to one point;
+    # --decode-steps 0 (or None) falls back to the encoder step count (full axis).
+    dsteps = 1 if args.quick else (args.decode_steps or steps)
 
     ref_names: list[str] = []
     lossy_ref = REFERENCE_ENCODERS.get(format)
@@ -575,7 +583,7 @@ def _build_decoder_sweep(
         # like PNG (whose sole reference is lossless) is not spuriously split.
         is_lossless_path = ref_name == lossless_ref
         schema = schema_for(ref_impl.name)
-        points = _encoder_points(schema, steps)
+        points = _encoder_points(schema, dsteps)
         if not points:
             points = [(schema.perf_params(), "perf")]
 
