@@ -1374,6 +1374,60 @@ def _run_hyperfine_chunk(
         return json.load(f).get("results", [])
 
 
+def _run_hyperfine_tasks(
+    timing: BenchList, result_dir: str, base_flags: list[str], debug: bool
+) -> str:
+    """Time fully-configured tasks under hyperfine; return the merged ``raw.json``
+    path written in ``result_dir``.
+
+    Each task must already carry its real threads/iterations/warmup + discard
+    policy (so ``cmd()``/``name()`` reflect the timed run). hyperfine takes every
+    benchmark as positional argv, so a large sweep over a dataset with long file
+    paths (e.g. clic2025's 64-hex-hash names) can blow past the OS argv limit
+    (ARG_MAX) in a single invocation (Errno 7, E2BIG). Split the benchmarks into
+    chunks whose combined argv stays well under the limit, run hyperfine per
+    chunk, and merge the per-chunk JSON. Each benchmark is timed independently and
+    the summary recomputes relative speed from the absolute per-benchmark stats,
+    so chunking does not affect the results. Shared by the performance overlay and
+    the scaling suite."""
+    json_output = f"{result_dir}/raw.json"
+    ARGV_BUDGET = 128_000  # bytes; conservative vs ARG_MAX (>=256 KiB everywhere)
+    chunks: list[list] = []
+    current: list = []
+    current_len = 0
+    for task in timing:
+        # Each task contributes three argv entries: --command-name, the name, and
+        # the command string (+ a little slack for separators/quoting).
+        cost = len(task.name()) + len(task.cmd("/dev/null")) + 24
+        if current and current_len + cost > ARGV_BUDGET:
+            chunks.append(current)
+            current, current_len = [], 0
+        current.append(task)
+        current_len += cost
+    if current:
+        chunks.append(current)
+
+    if len(chunks) > 1:
+        print(f"Splitting into {len(chunks)} hyperfine runs to stay under ARG_MAX\n")
+
+    merged_results: list = []
+    for idx, chunk in enumerate(chunks):
+        single = len(chunks) == 1
+        # Single chunk writes straight to raw.json (hyperfine's native export);
+        # multi-chunk runs go to part files that are merged and then removed.
+        part_path = json_output if single else f"{result_dir}/raw.part{idx}.json"
+        results = _run_hyperfine_chunk(chunk, base_flags, part_path, debug)
+        if not single:
+            merged_results.extend(results)
+            os.remove(part_path)
+
+    # Stitch the per-chunk exports back into the single raw.json the summary reads.
+    if len(chunks) > 1:
+        with open(json_output, "w") as f:
+            json.dump({"results": merged_results}, f, indent=2)
+    return json_output
+
+
 def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> None:
     """Rigorous (hyperfine) timing overlay over the selected subset of the sweep.
 
@@ -1433,54 +1487,12 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
 
     print(f"\n✓ {len(timing)} timing benchmark(s) ready to run\n")
 
-    json_output = f"{result_dir}/raw.json"
     base_flags = (
         ["--warmup", "3", "--min-runs", "10"]
         if not args.quick
         else ["--warmup", "0", "--min-runs", "1", "--max-runs", "1"]
     )
-
-    # hyperfine takes every benchmark as positional argv, so a large sweep over a
-    # dataset with long file paths (e.g. clic2025's 64-hex-hash names) can blow
-    # past the OS argv limit (ARG_MAX) in a single invocation (Errno 7, E2BIG).
-    # Split the benchmarks into chunks whose combined argv stays well under the
-    # limit, run hyperfine per chunk, and merge the per-chunk JSON. Each benchmark
-    # is timed independently, and the summary recomputes relative speed from the
-    # absolute per-benchmark stats, so chunking does not affect the results.
-    ARGV_BUDGET = 128_000  # bytes; conservative vs ARG_MAX (>=256 KiB everywhere)
-    chunks: list[list] = []
-    current: list = []
-    current_len = 0
-    for task in timing:
-        # Each task contributes three argv entries: --command-name, the name, and
-        # the command string (+ a little slack for separators/quoting).
-        cost = len(task.name()) + len(task.cmd("/dev/null")) + 24
-        if current and current_len + cost > ARGV_BUDGET:
-            chunks.append(current)
-            current, current_len = [], 0
-        current.append(task)
-        current_len += cost
-    if current:
-        chunks.append(current)
-
-    if len(chunks) > 1:
-        print(f"Splitting into {len(chunks)} hyperfine runs to stay under ARG_MAX\n")
-
-    merged_results: list = []
-    for idx, chunk in enumerate(chunks):
-        single = len(chunks) == 1
-        # Single chunk writes straight to raw.json (hyperfine's native export);
-        # multi-chunk runs go to part files that are merged and then removed.
-        part_path = json_output if single else f"{result_dir}/raw.part{idx}.json"
-        results = _run_hyperfine_chunk(chunk, base_flags, part_path, args.debug)
-        if not single:
-            merged_results.extend(results)
-            os.remove(part_path)
-
-    # Stitch the per-chunk exports back into the single raw.json the summary reads.
-    if len(chunks) > 1:
-        with open(json_output, "w") as f:
-            json.dump({"results": merged_results}, f, indent=2)
+    json_output = _run_hyperfine_tasks(timing, result_dir, base_flags, args.debug)
 
     generate_summary(result_dir, json_output, None)
 
