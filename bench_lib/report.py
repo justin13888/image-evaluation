@@ -398,6 +398,21 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         )
         parts.append(_embed_charts(scal_dir))
 
+    eff_dir = os.path.join(bundle_dir, "effort")
+    if os.path.isdir(eff_dir):
+        parts.append("<h2>Effort / speed &mdash; time vs quality vs size</h2>")
+        parts.append(
+            "<p class='muted'>The lever the rate-distortion sweep pins: each lossy "
+            "codec's effort/speed knob (AVIF <code>speed</code>, JXL "
+            "<code>effort</code>, WebP <code>method</code>) swept at a fixed quality "
+            "preset on a ~1 MP downscale. Charts show how encode time, size (bpp) and "
+            "SSIMULACRA2 move with the knob; the tradeoff (slower = smaller/better, "
+            "to a point) is the whole story. Encode time is a single-pass wall-clock "
+            "(relative), not the performance suite's isolated timing. Numbers are in "
+            "<code>effort/summary.md</code>.</p>"
+        )
+        parts.append(_embed_charts(eff_dir))
+
     parts.append(
         "<p class='muted'>Raw data is embedded above "
         "(<code>#quality-metrics</code>) and also on disk alongside this file: "

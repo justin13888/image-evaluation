@@ -1627,6 +1627,22 @@ class RunArgs(BaseArgs):
             "Default: 0.25 0.5 1 2."
         ),
     ] = None
+    effort: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Add an effort/speed suite: sweep each lossy codec's pinned "
+            "effort knob (AVIF speed, JXL effort, WebP method) at fixed quality and "
+            "record the time/size/quality tradeoff. Off by default."
+        ),
+    ] = False
+    effort_images: Annotated[
+        int,
+        Field(
+            description="Number of (largest) source images used for the effort suite "
+            "(downscaled to ~1 MP)."
+        ),
+    ] = 4
 
 
 class QualityArgs(RunArgs):

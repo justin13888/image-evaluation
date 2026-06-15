@@ -58,6 +58,11 @@ from bench_lib.models import (
     schema_for,
     select_sweep,
 )
+from bench_lib.effort import (
+    build_effort_tasks,
+    prepare_effort_images,
+    write_effort_outputs,
+)
 from bench_lib.report import generate_report_html
 from bench_lib.scaling import (
     SCALING_HYPERFINE_FLAGS,
@@ -1565,6 +1570,52 @@ def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
     return True
 
 
+def _run_effort_suite(args: RunArgs, bundle_dir: str) -> bool:
+    """Sweep each lossy codec's pinned effort/speed knob at fixed quality and write
+    the ``effort/`` suite (time / bpp / SSIMULACRA2 vs effort charts + a summary).
+    Reuses ``generate_metrics`` for the encode→decode→score pipeline, on a ~1 MP
+    downscale of a few sources so the high-effort end stays affordable. Returns
+    True iff it produced output."""
+    print("=" * 70)
+    print("EFFORT / SPEED SUITE (time vs quality vs size)")
+    print("=" * 70)
+
+    sources = select_scaling_sources(
+        get_dataset_files(args.dataset), args.effort_images
+    )
+    image_ppms = prepare_effort_images(args.dataset, sources)
+    if not image_ppms:
+        print("\nNo images available for the effort suite; skipping.")
+        return False
+    tasks = build_effort_tasks(args.formats, image_ppms)
+    if not tasks:
+        print("\nNo effort-swept codecs built for these formats; skipping.")
+        return False
+
+    eff_dir = os.path.join(bundle_dir, "effort")
+    os.makedirs(eff_dir, exist_ok=True)
+    manifest = {
+        **_base_manifest(),
+        "benchmark_config": {
+            "suite": "effort",
+            **_dataset_manifest(args),
+            "formats": args.formats,
+            "effort_images": len(image_ppms),
+            "effort_mp": 1.0,
+        },
+    }
+    with open(f"{eff_dir}/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n✓ {len(tasks)} effort benchmark(s)\n")
+
+    max_workers = _resolve_jobs(args.jobs, len(tasks))
+    metrics = generate_metrics(tasks, eff_dir, max_workers, args.keep_temp)
+    with open(f"{eff_dir}/metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    write_effort_outputs(eff_dir, metrics)
+    return True
+
+
 def run_sweep(args: RunArgs) -> None:
     """Run the unified sweep into a fresh bundle.
 
@@ -1607,6 +1658,11 @@ def run_sweep(args: RunArgs) -> None:
     if args.scaling and _run_scaling_suite(args, bundle):
         suites.append("scaling")
 
+    # 4. Effort/speed suite (optional): the time/size/quality tradeoff across each
+    # lossy codec's pinned effort knob (AVIF speed, JXL effort, WebP method).
+    if args.effort and _run_effort_suite(args, bundle):
+        suites.append("effort")
+
     _finalize_bundle(bundle, suites)
     _print_bundle(bundle, suites)
 
@@ -1635,6 +1691,11 @@ def _finalize_bundle(bundle_dir: str, suites: list[str]):
         lines.append(
             "- Scaling (time vs pixels): [`scaling/summary.md`](scaling/summary.md)"
         )
+    if "effort" in suites:
+        lines.append(
+            "- Effort/speed (time vs quality vs size): "
+            "[`effort/summary.md`](effort/summary.md)"
+        )
     lines.append(
         "\nOpen [`report.html`](report.html) for a single self-contained view.\n"
     )
@@ -1657,6 +1718,8 @@ def _print_bundle(bundle_dir: str, suites: list[str]):
         print("  - quality/       : metrics.json, summary.md, rate-distortion charts")
     if "scaling" in suites:
         print("  - scaling/       : raw.json, summary.md, time-vs-pixels charts")
+    if "effort" in suites:
+        print("  - effort/        : metrics.json, summary.md, effort-tradeoff charts")
     print("  - manifest.json  : bundle metadata")
     print("  - summary.md     : index")
     print("  - report.html    : self-contained report (all charts embedded)")
