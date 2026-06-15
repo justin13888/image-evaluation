@@ -4,6 +4,7 @@ import csv
 import datetime
 import errno
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -649,6 +651,58 @@ def _decode_to_ppm(
     )
 
 
+# A per-run cache of golden-reference PPMs shared across decoder tasks:
+# {"dir": staging subdir, "map": {key: published_path}, "lock": Lock}.
+GoldenCache = Dict[str, object]
+
+
+def _new_golden_cache(temp_dir: str) -> GoldenCache:
+    """Create the golden-PPM cache rooted in a subdir of the metric staging dir
+    (so it is freed with the staging dir, or kept under --keep-temp)."""
+    golden_dir = os.path.join(temp_dir, "golden")
+    os.makedirs(golden_dir, exist_ok=True)
+    return {"dir": golden_dir, "map": {}, "lock": threading.Lock()}
+
+
+def _golden_reference_ppm(
+    task: BenchmarkTask,
+    golden_cache: GoldenCache,
+    env: Dict[str, str],
+    identifier: str,
+) -> str:
+    """Return the golden-reference PPM for a decoder task's input, decoding it at
+    most once across all decoders that share that input.
+
+    Every decoder of a format scores against the *same* golden decode of the
+    *same* bitstream, so the result is identical regardless of which decoder
+    asked for it — memoizing it turns N redundant reference decodes per
+    (format, input) into one. The first task to see an input publishes the PPM
+    atomically (decode into a private ``.part`` outside the lock, then
+    ``os.replace`` onto the canonical path); later tasks reuse it. A rare race
+    (two tasks for the same input in flight at once) just decodes twice and
+    republishes identical bytes — correct, only mildly wasteful. The returned
+    path is owned by the cache dir and freed with the staging dir, so it is
+    NEVER added to a task's ``temp_files`` (that would let one decoder delete the
+    PPM another still needs)."""
+    lock = golden_cache["lock"]
+    cache_map = golden_cache["map"]
+    ref_name = REFERENCE_DECODERS.get(task.impl.format)
+    key = f"{ref_name}\0{os.path.abspath(task.input_path)}"
+    with lock:  # type: ignore[union-attr]
+        canonical = cache_map.get(key)  # type: ignore[union-attr]
+        published = canonical is not None and os.path.exists(canonical)
+        if canonical is None:
+            digest = hashlib.sha1(key.encode()).hexdigest()[:16]
+            canonical = os.path.join(str(golden_cache["dir"]), f"{digest}.ppm")
+            cache_map[key] = canonical  # type: ignore[index]
+    if published:
+        return canonical
+    part = f"{canonical}.{identifier}.part"
+    _decode_to_ppm(task, task.input_path, part, env=env)
+    os.replace(part, canonical)
+    return canonical
+
+
 def _run_iqa(
     reference_path: str,
     distorted_path: str,
@@ -690,7 +744,11 @@ def _run_iqa(
 
 
 def _measure_one(
-    task: BenchmarkTask, temp_dir: str, env: Dict[str, str], keep_temp: bool = False
+    task: BenchmarkTask,
+    temp_dir: str,
+    env: Dict[str, str],
+    golden_cache: GoldenCache,
+    keep_temp: bool = False,
 ) -> tuple[Optional[BenchmarkMetrics], str]:
     """Encode one task, decode + score it, and return its metric row alongside a
     preformatted status line.
@@ -778,9 +836,10 @@ def _measure_one(
             metric_basis = "source"
         else:
             distorted_ppm = output_path
-            reference_ppm = os.path.join(temp_dir, f"{identifier}_golden.ppm")
-            temp_files.append(reference_ppm)
-            _decode_to_ppm(task, task.input_path, reference_ppm, env=env)
+            # The golden PPM is shared across every decoder of this input
+            # (memoized + atomically published), so it is owned by the golden
+            # cache dir, not this task — do NOT add it to temp_files.
+            reference_ppm = _golden_reference_ppm(task, golden_cache, env, identifier)
             metric_basis = "golden"
         score, psnr, ssim, butteraugli = _run_iqa(reference_ppm, distorted_ppm, env=env)
 
@@ -946,6 +1005,12 @@ def generate_metrics(
     # libavif) whose internal pool keys off the flag rather than these env vars.
     env = _single_thread_env()
 
+    # Shared golden-PPM cache: every decoder of a given input scores against the
+    # same golden decode of it, so memoize that decode across decoders instead of
+    # repeating it per decoder (see _golden_reference_ppm). Lives under temp_dir,
+    # freed with it (or kept under --keep-temp).
+    golden_cache = _new_golden_cache(temp_dir)
+
     # Build missing reference decoders up front (serial) to avoid a cargo race
     # inside the worker threads.
     _ensure_reference_decoders(benches)
@@ -959,7 +1024,9 @@ def generate_metrics(
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(_measure_one, task, temp_dir, env, keep_temp)
+                executor.submit(
+                    _measure_one, task, temp_dir, env, golden_cache, keep_temp
+                )
                 for task in ordered
             ]
             for done, future in enumerate(as_completed(futures), start=1):
