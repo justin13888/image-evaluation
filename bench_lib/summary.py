@@ -357,10 +357,16 @@ def generate_summary(
             # Metrics table
             buffer.write("\n## Metrics\n\n")
             buffer.write(
-                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | PSNR (dB) | SSIM | Butteraugli | Time (s) | Status |\n"
+                "The `Wall` column is a single un-warmed pass that includes process "
+                "spawn and writing the output file (the metric pass must write the "
+                "encode to score it). It is an *indicative relative* time only — for "
+                "isolated, compute-only timing see the performance suite.\n\n"
             )
             buffer.write(
-                "|----------------|------|-------|----|--------|------------|-----------|-----|--------------|-----------|------|-------------|------------|--------|\n"
+                "| Implementation | Lang | Build | Op | Params | Input File | File Size | bpp | SSIMULACRA 2 | PSNR (dB) | SSIM | Butteraugli | Wall s (1-pass+I/O) | Status |\n"
+            )
+            buffer.write(
+                "|----------------|------|-------|----|--------|------------|-----------|-----|--------------|-----------|------|-------------|---------------------|--------|\n"
             )
             for m in metrics:
                 impl_name = m["impl"]

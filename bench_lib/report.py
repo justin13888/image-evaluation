@@ -250,7 +250,9 @@ def _quality_section(qual_dir: str) -> list[str]:
         "<em>bubble size</em> (bigger = slower) — a single-pass wall-clock measured "
         "while the suite runs many images in parallel, so read it as a "
         "<em>relative</em> sense of how an operating point's cost scales (higher "
-        "quality/effort = slower), not the performance suite's isolated timing. A "
+        "quality/effort = slower), not the performance suite's isolated timing. This "
+        "single-pass time additionally includes process spawn and writing the output "
+        "file (the performance suite is compute-only via <code>--discard</code>). A "
         "per-section <em>Show time</em> toggle (default on) hides the time dimension "
         "when you want to read the rate-distortion shape on its own.</p>"
     )
