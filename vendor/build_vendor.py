@@ -667,7 +667,7 @@ def build_libwebp():
     )
 
 
-def main():
+def main(targets=None):
     print("=" * 70)
     print("BUILDING VENDORED DEPENDENCIES")
     print("=" * 70)
@@ -698,14 +698,32 @@ def main():
         # no in-repo source and no vendored metric binary.
     ]
 
+    # Optional positional args select a subset of steps to build (order
+    # preserved). The Rust lint/test tasks only need `nasm` to compile rav1e's
+    # SIMD; building the full C/C++ stack for them would be wasteful.
+    if targets:
+        known = {name for name, _ in steps}
+        unknown = [t for t in targets if t not in known]
+        if unknown:
+            print(
+                f"\nERROR: unknown build target(s): {', '.join(unknown)}\n"
+                f"Available: {', '.join(name for name, _ in steps)}"
+            )
+            sys.exit(2)
+        wanted = set(targets)
+        steps = [(name, fn) for name, fn in steps if name in wanted]
+
     for name, fn in steps:
         print(f"\n[{name}]")
         fn()
 
     print("\n" + "=" * 70)
-    print("All vendored dependencies built successfully.")
+    if targets:
+        print(f"Vendored target(s) built successfully: {', '.join(targets)}.")
+    else:
+        print("All vendored dependencies built successfully.")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

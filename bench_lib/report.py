@@ -250,7 +250,9 @@ def _quality_section(qual_dir: str) -> list[str]:
         "<em>bubble size</em> (bigger = slower) — a single-pass wall-clock measured "
         "while the suite runs many images in parallel, so read it as a "
         "<em>relative</em> sense of how an operating point's cost scales (higher "
-        "quality/effort = slower), not the performance suite's isolated timing. A "
+        "quality/effort = slower), not the performance suite's isolated timing. This "
+        "single-pass time additionally includes process spawn and writing the output "
+        "file (the performance suite is compute-only via <code>--discard</code>). A "
         "per-section <em>Show time</em> toggle (default on) hides the time dimension "
         "when you want to read the rate-distortion shape on its own.</p>"
     )
@@ -382,6 +384,36 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "raw speed is only meaningful alongside the quality it trades for.</p>"
         )
         parts.append(_embed_charts(perf_dir))
+
+    scal_dir = os.path.join(bundle_dir, "scaling")
+    if os.path.isdir(scal_dir):
+        parts.append("<h2>Scaling &mdash; time vs pixel count</h2>")
+        parts.append(
+            "<p class='muted'>Each codec timed single-threaded at its performance "
+            "preset on a downscale-only resolution ladder (same content, only pixels "
+            "vary). Axes are log-log; the dashed line is a fit of "
+            "<code>time &prop; pixels<sup>k</sup></code>. <strong>k &asymp; 1 is "
+            "linear; k &gt; 1 is super-linear</strong> (cost grows faster than pixel "
+            "count) &mdash; the per-codec exponent and R² are in the legend and "
+            "<code>scaling/summary.md</code>. Single-threaded to isolate the "
+            "pixel-count exponent from parallel-scaling effects.</p>"
+        )
+        parts.append(_embed_charts(scal_dir))
+
+    eff_dir = os.path.join(bundle_dir, "effort")
+    if os.path.isdir(eff_dir):
+        parts.append("<h2>Effort / speed &mdash; time vs quality vs size</h2>")
+        parts.append(
+            "<p class='muted'>The lever the rate-distortion sweep pins: each lossy "
+            "codec's effort/speed knob (AVIF <code>speed</code>, JXL "
+            "<code>effort</code>, WebP <code>method</code>) swept at a fixed quality "
+            "preset on a ~1 MP downscale. Charts show how encode time, size (bpp) and "
+            "SSIMULACRA2 move with the knob; the tradeoff (slower = smaller/better, "
+            "to a point) is the whole story. Encode time is a single-pass wall-clock "
+            "(relative), not the performance suite's isolated timing. Numbers are in "
+            "<code>effort/summary.md</code>.</p>"
+        )
+        parts.append(_embed_charts(eff_dir))
 
     parts.append(
         "<p class='muted'>Raw data is embedded above "

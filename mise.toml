@@ -6,10 +6,20 @@ uv = "0.11.21"
 # node + wrangler provide the Cloudflare Pages deploy (see tasks.deploy-report).
 node = "22"
 "npm:wrangler" = "4"
+meson = "latest"
 
 [hooks]
 # Wire the git hooks (hk.pkl) automatically after `mise install`.
 postinstall = "hk install"
+
+[env]
+# The Rust crates pull in rav1e, whose x86-64 SIMD is assembled by `nasm` (via
+# the nasm-rs build dependency). Rather than make every dev machine / CI runner
+# `apt|brew install nasm`, the assembler is vendored and built from source (see
+# the `build-nasm` task and vendor/build_vendor.py). Putting its install dir on
+# PATH lets `cargo` (clippy/test) resolve the vendored nasm — the same binary
+# the ./bench C/C++ build uses — so no system-wide nasm is required.
+_.path = ["{{config_root}}/vendor/install/common/bin"]
 
 # --- Clean tasks ---
 
@@ -32,6 +42,15 @@ run = [
 [tasks.clean-all]
 description = "Remove all build artifacts"
 depends = ["clean", "clean-vendor"]
+
+# --- Vendored build tools ---
+
+[tasks.build-nasm]
+description = "Build the vendored NASM assembler (needed to compile rav1e in clippy/tests)"
+# Idempotent: build_vendor.py skips the build when vendor/install/common/bin/nasm
+# already exists. The Rust lint/test tasks depend on this so a fresh checkout (or
+# CI runner) needs no system-wide nasm — the binary lands on PATH via [env].
+run = "python3 vendor/build_vendor.py nasm"
 
 # --- Fix tasks (modify files in place) ---
 
@@ -64,6 +83,7 @@ run = "uv run ruff check --fix ."
 
 [tasks.lint-rust]
 description = "Lint Rust with clippy (auto-fix)"
+depends = ["build-nasm"]
 run = "cargo clippy --fix --allow-dirty --allow-staged -- -D warnings"
 
 [tasks.lint]
@@ -109,6 +129,7 @@ run = "uv run ruff check ."
 
 [tasks.check-lint-rust]
 description = "Lint Rust without fixing (clippy)"
+depends = ["build-nasm"]
 run = "cargo clippy -- -D warnings"
 
 [tasks.check-lint]
@@ -123,6 +144,7 @@ depends = ["check-fmt", "check-lint"]
 
 [tasks.test-rust]
 description = "Run the Rust test suite"
+depends = ["build-nasm"]
 run = "cargo test"
 
 [tasks.test-python]
@@ -152,6 +174,10 @@ mise run fmt
 
 echo "Running Python linter..."
 mise run lint-python
+
+# rav1e's SIMD needs the vendored nasm on PATH (via [env]); build it if missing.
+echo "Ensuring vendored nasm..."
+mise run build-nasm
 
 echo "Running Rust clippy (with fix)..."
 cargo clippy --fix --allow-dirty --allow-staged -- -D warnings

@@ -100,6 +100,11 @@ The benchmark is **quality-first**: a single **`./bench run`** sweeps the *same*
 
 IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary. `--formats` filters formats; `--mode {encode,decode,both}` narrows to encoders and/or decoders. Backward-compatible aliases map onto `run`: **`./bench quality`** = `run --perf off`, **`./bench perf`** = `run --perf all`, **`./bench all`** = `run` (anchor).
 
+`--decode-steps` sets how many input bitrates the decoder sweep uses (default **3**, sampled from the reference encoder's range): decode cost/fidelity is ~flat across bitrate, so a few points characterize it without re-timing every quality level — pass `--decode-steps 0` to restore the full encoder axis. Two opt-in suites add axes the main sweep deliberately holds fixed, each as an extra subfolder in the bundle:
+
+- **`--scaling`** times encode/decode on a controlled, downscale-only resolution ladder (same content, only pixels vary) and fits a per-codec `time ∝ pixels^k` exponent — exposing super-linear codecs (AVIF/AV1, `k > 1`) vs linear ones (JPEG, `k ≈ 1`), which a native-resolution sweep cannot show.
+- **`--effort`** sweeps each lossy codec's *pinned* effort/speed knob (AVIF `speed`, JXL `effort`, WebP `method`) at fixed quality on a ~1 MP downscale, tracing the time↔size↔quality tradeoff that the rate-distortion sweep otherwise fixes at one preset.
+
 ```bash
 # Quick smoke test (2 quality points per impl, anchor timing, all-cores only)
 ./bench run --dataset kodak --sample 3 --quick
@@ -123,6 +128,14 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 # Peak memory during the timing overlay; override inner-loop iters/warmup (default 10/2)
 ./bench run --dataset div2k --measure-memory --iterations 20 --warmup 3
 
+# Comprehensive clic2025 run sized for ~8h on ~8 cores: fewer quality points and a
+# trimmed decoder sweep keep the matrix feasible, while --scaling and --effort add
+# the resolution-scaling and effort/speed characterizations in the same bundle
+./bench run --dataset clic2025 --quality-steps 6 --decode-steps 3 --scaling --effort
+
+# Resolution-scaling characterization on its own (time vs pixels, fitted exponent)
+./bench run --dataset clic2025 --perf off --scaling --scaling-images 3
+
 # Backward-compatible aliases
 ./bench quality --dataset kodak     # = run --perf off
 ./bench perf --dataset kodak        # = run --perf all
@@ -134,7 +147,7 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 ./bench clean            # remove build artifacts and results
 ```
 
-> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--sample`, `--formats`/`--mode`, `--params`, and `--quick` all cap it. `--params variants` (default) adds a handful of curated secondary-knob series per encoder; `--params all` adds the full one-at-a-time expansion (heavier), while `--params axis` is the leanest (quality axis only). The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration.
+> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--decode-steps`, `--sample`, `--formats`/`--mode`, `--params`, and `--quick` all cap it. `--params variants` (default) adds a handful of curated secondary-knob series per encoder; `--params all` adds the full one-at-a-time expansion (heavier), while `--params axis` is the leanest (quality axis only). The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration.
 
 ### Cleanup
 
@@ -144,15 +157,17 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 
 ### Results
 
-Every run writes a **bundle** to `./results/<timestamp>/` containing a `quality/` subfolder (always) and a `performance/` subfolder (whenever `--perf` is not `off`), plus a top-level index and a self-contained report:
+Every run writes a **bundle** to `./results/<timestamp>/` containing a `quality/` subfolder (always), a `performance/` subfolder (whenever `--perf` is not `off`), and `scaling/`/`effort/` subfolders (when `--scaling`/`--effort` are given), plus a top-level index and a self-contained report:
 
 ```
 results/<timestamp>/
-├── report.html        # self-contained, opens offline (interactive quality + timing overlay)
+├── report.html        # self-contained, opens offline (interactive quality + overlays)
 ├── summary.md         # index linking the per-pass summaries
 ├── manifest.json      # bundle metadata (which passes ran)
 ├── quality/           # always: metrics.json, summary.md (tables), manifest.json
-└── performance/       # when --perf != off: raw.json, summary.md, timing charts, memory.csv
+├── performance/       # when --perf != off: raw.json, summary.md, timing charts, memory.csv
+├── scaling/           # when --scaling: raw.json, summary.md, time-vs-pixels charts (fitted k)
+└── effort/            # when --effort: metrics.json, summary.md, effort-tradeoff charts
 ```
 
 **`quality/`** — `metrics.json` (per impl/format/operating-point/image: `filesize`, `bpp`, `ssimulacra2`, `psnr`, `ssim`, `butteraugli`, `metric_basis` (`"source"` for encoders, `"golden"` for decoders), `time_s` (single relative one-pass time, encode or decode), dimensions, the swept `quality_axis`/`quality_value`, and a `lossless` flag) is the raw data everything else is recomputed from; `summary.md` (BD-rate + Pareto best-of-format + lossless efficiency + **decoder fidelity & speed** + per-step metrics tables, linking to `report.html` for the curves); and `manifest.json` (`suite: quality` with the exact per-impl `quality_sweeps`). The metric pass renders **no chart PNGs** — its rate-distortion curves are interactive in `report.html`.

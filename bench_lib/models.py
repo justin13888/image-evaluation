@@ -1557,6 +1557,16 @@ class RunArgs(BaseArgs):
             "the full sweep). Default: every declared point."
         ),
     ] = None
+    decode_steps: Annotated[
+        Optional[int],
+        tyro.conf.arg(aliases=["-D"]),
+        Field(
+            description="Number of decoder operating points (input bitrates) per "
+            "format, sampled from the reference encoder's sweep — decoupled from "
+            "--quality-steps. Decode cost/fidelity is ~flat across bitrate, so a few "
+            "points suffice; default 3. Use 0 for the full encoder axis (legacy)."
+        ),
+    ] = 3
     iterations: Annotated[
         int,
         tyro.conf.arg(aliases=["-i"]),
@@ -1594,6 +1604,45 @@ class RunArgs(BaseArgs):
         tyro.conf.FlagCreatePairsOff,
         Field(description="Measure peak memory usage (rigorous timing overlay)"),
     ] = False
+    scaling: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Add a scaling suite: time encode/decode vs pixel count on a "
+            "downscaled resolution ladder and fit a per-codec exponent (time ∝ "
+            "pixels^k), exposing super-linear codecs (e.g. AVIF) vs linear (JPEG)."
+        ),
+    ] = False
+    scaling_images: Annotated[
+        int,
+        Field(
+            description="Number of (largest) source images downscaled for the scaling "
+            "ladder."
+        ),
+    ] = 3
+    scaling_ladder: Annotated[
+        Optional[list[float]],
+        Field(
+            description="Megapixel rungs for the scaling ladder (downscale-only). "
+            "Default: 0.25 0.5 1 2."
+        ),
+    ] = None
+    effort: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Add an effort/speed suite: sweep each lossy codec's pinned "
+            "effort knob (AVIF speed, JXL effort, WebP method) at fixed quality and "
+            "record the time/size/quality tradeoff. Off by default."
+        ),
+    ] = False
+    effort_images: Annotated[
+        int,
+        Field(
+            description="Number of (largest) source images used for the effort suite "
+            "(downscaled to ~1 MP)."
+        ),
+    ] = 4
 
 
 class QualityArgs(RunArgs):

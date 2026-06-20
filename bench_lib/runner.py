@@ -4,6 +4,7 @@ import csv
 import datetime
 import errno
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -56,7 +58,20 @@ from bench_lib.models import (
     schema_for,
     select_sweep,
 )
+from bench_lib.effort import (
+    build_effort_tasks,
+    prepare_effort_images,
+    write_effort_outputs,
+)
 from bench_lib.report import generate_report_html
+from bench_lib.scaling import (
+    SCALING_HYPERFINE_FLAGS,
+    SCALING_LADDER_MP,
+    build_scaling_tasks,
+    generate_ladder,
+    select_scaling_sources,
+    write_scaling_outputs,
+)
 from bench_lib.summary import generate_summary
 from bench_lib.system_info import (
     _detect_mimalloc_version,
@@ -82,6 +97,40 @@ INPUT_FILES_CACHE: Dict[
     tuple[DatasetId, ImageFormats, Optional[int]],
     Sequence[tuple[str, str]],
 ] = {}
+
+
+def _single_thread_env() -> Dict[str, str]:
+    """Process environment that pins rayon-/OMP-based codecs (and iqa-cli) to a
+    single thread, so a parallel pool of one-thread tasks saturates the CPU
+    without oversubscribing it."""
+    return {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+
+
+def _generate_intermediates_parallel(
+    fn: Callable[[str], tuple[str, str]], items: Sequence[str]
+) -> list[tuple[str, str]]:
+    """Map ``fn`` over ``items`` across a thread pool, preserving input order.
+
+    Used to pre-generate reference inputs (the cached per-image PPM conversion +
+    reference encode). Those are independent per image and **never timed**, so
+    running them concurrently — each child subprocess pinned to a single thread
+    (see ``_single_thread_env`` and the ``--threads 1`` the callers pass) —
+    saturates the CPU without the jobs×all-cores oversubscription a parallel
+    all-core encode would cause. Decode inputs are scored against the golden
+    decoder of the *same* file, so the thread count cannot shift any reported
+    metric. The reference binary must already be built (callers build it up
+    front) so no worker triggers a cargo build that would race the target dir
+    (cf. ``_ensure_reference_decoders``). Re-raises the first worker error,
+    matching the serial path's fail-closed behaviour."""
+    if not items:
+        return []
+    workers = _resolve_jobs(None, len(items))
+    results: list[tuple[str, str]] = [("", "")] * len(items)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_idx = {executor.submit(fn, item): i for i, item in enumerate(items)}
+        for future in as_completed(future_to_idx):
+            results[future_to_idx[future]] = future.result()
+    return results
 
 
 def get_dataset_files(dataset_name: DatasetId) -> list[str]:
@@ -133,90 +182,78 @@ def get_input_files(
         rnd = random.Random(f"{dataset_name}_{limit}")
         dataset_files = rnd.sample(dataset_files, limit)
 
-    # input_files: (input_file, output_file)
-    input_files: list[tuple[str, str]] = []
     target_ext = FORMAT_EXT_MAP[format]
 
-    for f in dataset_files:
+    # Resolve + build the reference encoder once up front (only needed when the
+    # dataset must be transcoded into a non-PPM target). Building it inside the
+    # worker pool below would race cargo's target dir — no cross-thread lock —
+    # so we mirror _ensure_reference_decoders and prepare it serially here.
+    ref_impl: Optional[Implementation] = None
+    if format != PPMImageFormat.PPM:
+        ref_impl_name = REFERENCE_ENCODERS.get(format)
+        if not ref_impl_name:
+            raise RuntimeError(f"No reference encoder defined for {format}")
+        ref_impl = find_implementation_by_name(ref_impl_name)
+        if not ref_impl:
+            raise RuntimeError(f"Reference encoder {ref_impl_name} not found")
+        if not os.path.exists(ref_impl.bin):
+            build_project(ref_impl)
+
+    def _prepare(f: str) -> tuple[str, str]:
+        """Resolve one source into its (input_path, source_path), generating the
+        cached intermediate if missing. Independent per image → safe to run in
+        the pool (only reads/writes this image's own paths)."""
         if f.lower().endswith(f".{target_ext}"):
-            # Dataset file already in required format
-            input_files.append((f, f))
-        else:
-            # Determine target file name. A single reference preset is used per
-            # format, so one encoded file per source suffices (no quality suffix).
-            base_path = os.path.splitext(f)[0]
-            target_file = f"{base_path}.{target_ext}"
+            # Dataset file already in required format.
+            return (f, f)
+        # A single reference preset is used per format, so one encoded file per
+        # source suffices (no quality suffix).
+        base_path = os.path.splitext(f)[0]
+        target_file = f"{base_path}.{target_ext}"
+        if os.path.exists(target_file):
+            return (target_file, f)
 
-            # If target file exists, we can use it
-            if os.path.exists(target_file):
-                input_files.append((target_file, f))
-            else:
-                # Need to convert dataset file into required format
-                print(f"Generating {target_file} from {f}...")
+        print(f"Generating {target_file} from {f}...")
+        # 1. Convert to 8-bit P6 PPM (forced 8-bit: not all impls handle 16-bit).
+        intermediate_ppm = _source_to_ppm(f)
+        # If the requested format is PPM itself, the converted P6 intermediate IS
+        # the target. Running the reference "encoder" (null-cpp-encode) over it
+        # would overwrite the valid P6 file with headerless raw RGB (it writes
+        # img.data, not a PPM), so skip the encode step entirely.
+        if format == PPMImageFormat.PPM:
+            return (intermediate_ppm, f)
 
-                # 1. Convert to PPM
-                intermediate_ppm = f"{base_path}.ppm"
-                if not os.path.exists(intermediate_ppm):
-                    # Use ImageMagick to convert to 8-bit P6 PPM
-                    # We force 8-bit depth as not all implementations handle 16-bit PPM
-                    subprocess.run(
-                        ["convert", f, "-depth", "8", intermediate_ppm],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+        # 2. Encode at the reference encoder's fixed preset (--param k=v).
+        # Single-threaded (see _generate_intermediates_parallel): this output is
+        # never timed and decode inputs are scored vs the golden decoder of the
+        # same file, so the thread count cannot change any reported metric.
+        assert ref_impl is not None  # guaranteed: format != PPM resolved one above
+        ref_cmd = [
+            ref_impl.bin,
+            "--input",
+            intermediate_ppm,
+            "--output",
+            target_file,
+            "--iterations",
+            "1",
+            "--warmup",
+            "0",
+            "--threads",
+            "1",
+        ]
+        for key, value in sorted(schema_for(ref_impl.name).perf_params().items()):
+            ref_cmd += ["--param", f"{key}={value}"]
+        subprocess.run(
+            ref_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,  # Capture stderr to avoid spam, unless error
+            env=_single_thread_env(),
+        )
+        return (target_file, f)
 
-                # If the requested format is PPM itself, the converted P6
-                # intermediate IS the target. Running the reference "encoder"
-                # (null-cpp-encode) over it would overwrite the valid P6 file
-                # with headerless raw RGB (it writes img.data, not a PPM), so
-                # skip the encode step entirely.
-                if format == PPMImageFormat.PPM:
-                    input_files.append((intermediate_ppm, f))
-                    continue
+    input_files = _generate_intermediates_parallel(_prepare, dataset_files)
 
-                # 2. Encode using reference encoder
-                ref_impl_name = REFERENCE_ENCODERS.get(format)
-                if not ref_impl_name:
-                    raise RuntimeError(f"No reference encoder defined for {format}")
-
-                ref_impl = find_implementation_by_name(ref_impl_name)
-                if not ref_impl:
-                    raise RuntimeError(f"Reference encoder {ref_impl_name} not found")
-
-                # Ensure reference implementation is built
-                # Note: We rely on the user having built everything or `run` building it.
-                # If we are in `run`, builds happen before this.
-                if not os.path.exists(ref_impl.bin):
-                    # Try to build it on demand?
-                    build_project(ref_impl)
-
-                # Run encoder at its fixed performance preset (--param k=v).
-                ref_cmd = [
-                    ref_impl.bin,
-                    "--input",
-                    intermediate_ppm,
-                    "--output",
-                    target_file,
-                    "--iterations",
-                    "1",
-                    "--warmup",
-                    "0",
-                    "--threads",
-                    "0",
-                ]
-                for key, value in sorted(
-                    schema_for(ref_impl.name).perf_params().items()
-                ):
-                    ref_cmd += ["--param", f"{key}={value}"]
-                subprocess.run(
-                    ref_cmd,
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,  # Capture stderr to avoid spam, unless error
-                )
-
-                input_files.append((target_file, f))
     # Verify all input files exist
     missing = [f_path for f_path, _ in input_files if not os.path.exists(f_path)]
     if missing:
@@ -230,19 +267,32 @@ def get_input_files(
 
 def _source_to_ppm(f: str) -> str:
     """Return an 8-bit P6 PPM path for source `f`, generating it via ImageMagick
-    if `f` is not already a PPM. Mirrors the conversion in `get_input_files`
-    (forced 8-bit, since not every implementation handles 16-bit PPM)."""
+    if `f` is not already a PPM (forced 8-bit, since not every implementation
+    handles 16-bit PPM).
+
+    The conversion goes to a unique temp file that is atomically `os.replace`d
+    onto the canonical path, so a concurrent reader (the parallel pre-generation
+    pool) never observes a half-written PPM. The temp name carries no `.ppm`
+    extension, so the output format is forced with ImageMagick's `ppm:` prefix
+    rather than inferred from the suffix."""
     if f.lower().endswith(".ppm"):
         return f
     base = os.path.splitext(f)[0]
     ppm = f"{base}.ppm"
     if not os.path.exists(ppm):
-        subprocess.run(
-            ["convert", f, "-depth", "8", ppm],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ppm) or ".", suffix=".tmp")
+        os.close(fd)
+        try:
+            subprocess.run(
+                ["convert", f, "-depth", "8", f"ppm:{tmp}"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            os.replace(tmp, ppm)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return ppm
 
 
@@ -289,12 +339,19 @@ def get_decode_inputs(
     ref_impl = find_implementation_by_name(ref_name)
     if not ref_impl:
         raise RuntimeError(f"Reference encoder {ref_name} not found")
+    # Build the reference encoder once up front (the worker pool below must not
+    # trigger a cargo build that would race the target dir).
     if not os.path.exists(ref_impl.bin):
         build_project(ref_impl)
 
     ext = FORMAT_EXT_MAP[format]
-    inputs: list[tuple[str, str]] = []
-    for f in dataset_files:
+
+    def _prepare(f: str) -> tuple[str, str]:
+        """Reference-encode one source at this operating point, returning
+        (encoded_path, source_ppm_path). Independent per image → pool-safe.
+        Single-threaded (--threads 1 + 1-thread env): never timed, and decoders
+        are scored vs the golden decode of the same file, so the thread count
+        cannot move any reported metric (see _generate_intermediates_parallel)."""
         ppm = _source_to_ppm(f)
         base = os.path.splitext(f)[0]
         target = f"{base}.{label}.{ext}"
@@ -311,14 +368,20 @@ def get_decode_inputs(
                 "--warmup",
                 "0",
                 "--threads",
-                "0",
+                "1",
             ]
             for k, v in sorted(params.items()):
                 cmd += ["--param", f"{k}={v}"]
             subprocess.run(
-                cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=_single_thread_env(),
             )
-        inputs.append((target, ppm))
+        return (target, ppm)
+
+    inputs = _generate_intermediates_parallel(_prepare, dataset_files)
 
     DECODE_INPUTS_CACHE[key] = inputs
     return inputs
@@ -479,11 +542,13 @@ def _build_decoder_sweep(
 ) -> None:
     """Emit decoder tasks across the same operating-point axis as the encoders.
 
-    Decoders take no params, so the *input* is what varies: for each operating
-    point of the format's reference encoder (the same quality/effort sweep
-    encoders trace), reference-encode the sources at that point and decode them.
-    Decode cost and fidelity (PSNR vs the golden decoder, scored later) thus trace
-    input bitrate. Knob-less reference encoders contribute a single point.
+    Decoders take no params, so the *input* is what varies: for a few operating
+    points of the format's reference encoder, reference-encode the sources at that
+    point and decode them. Decode cost and fidelity (PSNR vs the golden decoder,
+    scored later) thus trace input bitrate. Because decode cost/fidelity is ~flat
+    across bitrate, the point count is decoupled from the encoder's --quality-steps
+    and set by --decode-steps (default a few; --quick → one; 0 → the full encoder
+    axis). Knob-less reference encoders contribute a single point.
 
     Formats with both a lossy and a lossless mode (WebP, JXL) are swept against
     *both* their lossy (REFERENCE_ENCODERS) and lossless (LOSSLESS_REFERENCE_ENCODERS)
@@ -497,6 +562,12 @@ def _build_decoder_sweep(
     ]
     if not decoders:
         return
+
+    # Decoders don't sweep quality; their cost/fidelity is ~flat across input
+    # bitrate, so only a few representative input encodings are needed — decoupled
+    # from the encoder's --quality-steps. --quick collapses to one point;
+    # --decode-steps 0 (or None) falls back to the encoder step count (full axis).
+    dsteps = 1 if args.quick else (args.decode_steps or steps)
 
     ref_names: list[str] = []
     lossy_ref = REFERENCE_ENCODERS.get(format)
@@ -525,7 +596,7 @@ def _build_decoder_sweep(
         # like PNG (whose sole reference is lossless) is not spuriously split.
         is_lossless_path = ref_name == lossless_ref
         schema = schema_for(ref_impl.name)
-        points = _encoder_points(schema, steps)
+        points = _encoder_points(schema, dsteps)
         if not points:
             points = [(schema.perf_params(), "perf")]
 
@@ -601,6 +672,58 @@ def _decode_to_ppm(
     )
 
 
+# A per-run cache of golden-reference PPMs shared across decoder tasks:
+# {"dir": staging subdir, "map": {key: published_path}, "lock": Lock}.
+GoldenCache = Dict[str, object]
+
+
+def _new_golden_cache(temp_dir: str) -> GoldenCache:
+    """Create the golden-PPM cache rooted in a subdir of the metric staging dir
+    (so it is freed with the staging dir, or kept under --keep-temp)."""
+    golden_dir = os.path.join(temp_dir, "golden")
+    os.makedirs(golden_dir, exist_ok=True)
+    return {"dir": golden_dir, "map": {}, "lock": threading.Lock()}
+
+
+def _golden_reference_ppm(
+    task: BenchmarkTask,
+    golden_cache: GoldenCache,
+    env: Dict[str, str],
+    identifier: str,
+) -> str:
+    """Return the golden-reference PPM for a decoder task's input, decoding it at
+    most once across all decoders that share that input.
+
+    Every decoder of a format scores against the *same* golden decode of the
+    *same* bitstream, so the result is identical regardless of which decoder
+    asked for it — memoizing it turns N redundant reference decodes per
+    (format, input) into one. The first task to see an input publishes the PPM
+    atomically (decode into a private ``.part`` outside the lock, then
+    ``os.replace`` onto the canonical path); later tasks reuse it. A rare race
+    (two tasks for the same input in flight at once) just decodes twice and
+    republishes identical bytes — correct, only mildly wasteful. The returned
+    path is owned by the cache dir and freed with the staging dir, so it is
+    NEVER added to a task's ``temp_files`` (that would let one decoder delete the
+    PPM another still needs)."""
+    lock = golden_cache["lock"]
+    cache_map = golden_cache["map"]
+    ref_name = REFERENCE_DECODERS.get(task.impl.format)
+    key = f"{ref_name}\0{os.path.abspath(task.input_path)}"
+    with lock:  # type: ignore[union-attr]
+        canonical = cache_map.get(key)  # type: ignore[union-attr]
+        published = canonical is not None and os.path.exists(canonical)
+        if canonical is None:
+            digest = hashlib.sha1(key.encode()).hexdigest()[:16]
+            canonical = os.path.join(str(golden_cache["dir"]), f"{digest}.ppm")
+            cache_map[key] = canonical  # type: ignore[index]
+    if published:
+        return canonical
+    part = f"{canonical}.{identifier}.part"
+    _decode_to_ppm(task, task.input_path, part, env=env)
+    os.replace(part, canonical)
+    return canonical
+
+
 def _run_iqa(
     reference_path: str,
     distorted_path: str,
@@ -642,7 +765,11 @@ def _run_iqa(
 
 
 def _measure_one(
-    task: BenchmarkTask, temp_dir: str, env: Dict[str, str], keep_temp: bool = False
+    task: BenchmarkTask,
+    temp_dir: str,
+    env: Dict[str, str],
+    golden_cache: GoldenCache,
+    keep_temp: bool = False,
 ) -> tuple[Optional[BenchmarkMetrics], str]:
     """Encode one task, decode + score it, and return its metric row alongside a
     preformatted status line.
@@ -730,9 +857,10 @@ def _measure_one(
             metric_basis = "source"
         else:
             distorted_ppm = output_path
-            reference_ppm = os.path.join(temp_dir, f"{identifier}_golden.ppm")
-            temp_files.append(reference_ppm)
-            _decode_to_ppm(task, task.input_path, reference_ppm, env=env)
+            # The golden PPM is shared across every decoder of this input
+            # (memoized + atomically published), so it is owned by the golden
+            # cache dir, not this task — do NOT add it to temp_files.
+            reference_ppm = _golden_reference_ppm(task, golden_cache, env, identifier)
             metric_basis = "golden"
         score, psnr, ssim, butteraugli = _run_iqa(reference_ppm, distorted_ppm, env=env)
 
@@ -896,7 +1024,13 @@ def generate_metrics(
     # Pin every child process to a single thread: covers rayon-/OMP-based codecs
     # and iqa-cli. The encode/decode also pass --threads 1 for codecs (e.g.
     # libavif) whose internal pool keys off the flag rather than these env vars.
-    env = {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+    env = _single_thread_env()
+
+    # Shared golden-PPM cache: every decoder of a given input scores against the
+    # same golden decode of it, so memoize that decode across decoders instead of
+    # repeating it per decoder (see _golden_reference_ppm). Lives under temp_dir,
+    # freed with it (or kept under --keep-temp).
+    golden_cache = _new_golden_cache(temp_dir)
 
     # Build missing reference decoders up front (serial) to avoid a cargo race
     # inside the worker threads.
@@ -911,7 +1045,9 @@ def generate_metrics(
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(_measure_one, task, temp_dir, env, keep_temp)
+                executor.submit(
+                    _measure_one, task, temp_dir, env, golden_cache, keep_temp
+                )
                 for task in ordered
             ]
             for done, future in enumerate(as_completed(futures), start=1):
@@ -1251,6 +1387,60 @@ def _run_hyperfine_chunk(
         return json.load(f).get("results", [])
 
 
+def _run_hyperfine_tasks(
+    timing: BenchList, result_dir: str, base_flags: list[str], debug: bool
+) -> str:
+    """Time fully-configured tasks under hyperfine; return the merged ``raw.json``
+    path written in ``result_dir``.
+
+    Each task must already carry its real threads/iterations/warmup + discard
+    policy (so ``cmd()``/``name()`` reflect the timed run). hyperfine takes every
+    benchmark as positional argv, so a large sweep over a dataset with long file
+    paths (e.g. clic2025's 64-hex-hash names) can blow past the OS argv limit
+    (ARG_MAX) in a single invocation (Errno 7, E2BIG). Split the benchmarks into
+    chunks whose combined argv stays well under the limit, run hyperfine per
+    chunk, and merge the per-chunk JSON. Each benchmark is timed independently and
+    the summary recomputes relative speed from the absolute per-benchmark stats,
+    so chunking does not affect the results. Shared by the performance overlay and
+    the scaling suite."""
+    json_output = f"{result_dir}/raw.json"
+    ARGV_BUDGET = 128_000  # bytes; conservative vs ARG_MAX (>=256 KiB everywhere)
+    chunks: list[list] = []
+    current: list = []
+    current_len = 0
+    for task in timing:
+        # Each task contributes three argv entries: --command-name, the name, and
+        # the command string (+ a little slack for separators/quoting).
+        cost = len(task.name()) + len(task.cmd("/dev/null")) + 24
+        if current and current_len + cost > ARGV_BUDGET:
+            chunks.append(current)
+            current, current_len = [], 0
+        current.append(task)
+        current_len += cost
+    if current:
+        chunks.append(current)
+
+    if len(chunks) > 1:
+        print(f"Splitting into {len(chunks)} hyperfine runs to stay under ARG_MAX\n")
+
+    merged_results: list = []
+    for idx, chunk in enumerate(chunks):
+        single = len(chunks) == 1
+        # Single chunk writes straight to raw.json (hyperfine's native export);
+        # multi-chunk runs go to part files that are merged and then removed.
+        part_path = json_output if single else f"{result_dir}/raw.part{idx}.json"
+        results = _run_hyperfine_chunk(chunk, base_flags, part_path, debug)
+        if not single:
+            merged_results.extend(results)
+            os.remove(part_path)
+
+    # Stitch the per-chunk exports back into the single raw.json the summary reads.
+    if len(chunks) > 1:
+        with open(json_output, "w") as f:
+            json.dump({"results": merged_results}, f, indent=2)
+    return json_output
+
+
 def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> None:
     """Rigorous (hyperfine) timing overlay over the selected subset of the sweep.
 
@@ -1310,54 +1500,12 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
 
     print(f"\n✓ {len(timing)} timing benchmark(s) ready to run\n")
 
-    json_output = f"{result_dir}/raw.json"
     base_flags = (
         ["--warmup", "3", "--min-runs", "10"]
         if not args.quick
         else ["--warmup", "0", "--min-runs", "1", "--max-runs", "1"]
     )
-
-    # hyperfine takes every benchmark as positional argv, so a large sweep over a
-    # dataset with long file paths (e.g. clic2025's 64-hex-hash names) can blow
-    # past the OS argv limit (ARG_MAX) in a single invocation (Errno 7, E2BIG).
-    # Split the benchmarks into chunks whose combined argv stays well under the
-    # limit, run hyperfine per chunk, and merge the per-chunk JSON. Each benchmark
-    # is timed independently, and the summary recomputes relative speed from the
-    # absolute per-benchmark stats, so chunking does not affect the results.
-    ARGV_BUDGET = 128_000  # bytes; conservative vs ARG_MAX (>=256 KiB everywhere)
-    chunks: list[list] = []
-    current: list = []
-    current_len = 0
-    for task in timing:
-        # Each task contributes three argv entries: --command-name, the name, and
-        # the command string (+ a little slack for separators/quoting).
-        cost = len(task.name()) + len(task.cmd("/dev/null")) + 24
-        if current and current_len + cost > ARGV_BUDGET:
-            chunks.append(current)
-            current, current_len = [], 0
-        current.append(task)
-        current_len += cost
-    if current:
-        chunks.append(current)
-
-    if len(chunks) > 1:
-        print(f"Splitting into {len(chunks)} hyperfine runs to stay under ARG_MAX\n")
-
-    merged_results: list = []
-    for idx, chunk in enumerate(chunks):
-        single = len(chunks) == 1
-        # Single chunk writes straight to raw.json (hyperfine's native export);
-        # multi-chunk runs go to part files that are merged and then removed.
-        part_path = json_output if single else f"{result_dir}/raw.part{idx}.json"
-        results = _run_hyperfine_chunk(chunk, base_flags, part_path, args.debug)
-        if not single:
-            merged_results.extend(results)
-            os.remove(part_path)
-
-    # Stitch the per-chunk exports back into the single raw.json the summary reads.
-    if len(chunks) > 1:
-        with open(json_output, "w") as f:
-            json.dump({"results": merged_results}, f, indent=2)
+    json_output = _run_hyperfine_tasks(timing, result_dir, base_flags, args.debug)
 
     generate_summary(result_dir, json_output, None)
 
@@ -1367,6 +1515,105 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
         ]
         mem_names = [task.name() for task in timing]
         measure_memory(result_dir, mem_commands, mem_names)
+
+
+def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
+    """Time encode/decode vs pixel count on a downscaled resolution ladder and
+    write the ``scaling/`` suite (per-(format, op) log-log charts + a summary with
+    a fitted exponent per codec). Returns True iff it produced output.
+
+    Single-threaded by design (see ``scaling``): the question is how cost grows
+    with pixels, isolated from parallel-scaling efficiency. Reuses the shared
+    hyperfine driver with lighter run counts (a slope only needs a rough mean)."""
+    print("=" * 70)
+    print("SCALING SUITE (time vs pixel count)")
+    print("=" * 70)
+
+    sources = select_scaling_sources(
+        get_dataset_files(args.dataset), args.scaling_images
+    )
+    if not sources:
+        print("\nNo source images available for the scaling suite; skipping.")
+        return False
+    ladder = args.scaling_ladder or SCALING_LADDER_MP
+    rungs = generate_ladder(args.dataset, sources, ladder)
+    if not rungs:
+        print("\nNo downscaled rungs generated (sources too small?); skipping.")
+        return False
+    tasks, pixels_by_basename = build_scaling_tasks(args.formats, rungs)
+    if not tasks:
+        print("\nNo scaling tasks to run (binaries missing?); skipping.")
+        return False
+
+    scal_dir = os.path.join(bundle_dir, "scaling")
+    os.makedirs(scal_dir, exist_ok=True)
+    manifest = {
+        **_base_manifest(),
+        "benchmark_config": {
+            "suite": "scaling",
+            **_dataset_manifest(args),
+            "formats": args.formats,
+            "scaling_images": len(sources),
+            "ladder_mp": ladder,
+            "rungs": len(rungs),
+            "threads": 1,
+        },
+    }
+    with open(f"{scal_dir}/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n✓ {len(tasks)} scaling benchmark(s) across {len(rungs)} ladder rung(s)\n")
+
+    raw = _run_hyperfine_tasks(
+        tasks, scal_dir, list(SCALING_HYPERFINE_FLAGS), args.debug
+    )
+    write_scaling_outputs(scal_dir, raw, pixels_by_basename)
+    return True
+
+
+def _run_effort_suite(args: RunArgs, bundle_dir: str) -> bool:
+    """Sweep each lossy codec's pinned effort/speed knob at fixed quality and write
+    the ``effort/`` suite (time / bpp / SSIMULACRA2 vs effort charts + a summary).
+    Reuses ``generate_metrics`` for the encode→decode→score pipeline, on a ~1 MP
+    downscale of a few sources so the high-effort end stays affordable. Returns
+    True iff it produced output."""
+    print("=" * 70)
+    print("EFFORT / SPEED SUITE (time vs quality vs size)")
+    print("=" * 70)
+
+    sources = select_scaling_sources(
+        get_dataset_files(args.dataset), args.effort_images
+    )
+    image_ppms = prepare_effort_images(args.dataset, sources)
+    if not image_ppms:
+        print("\nNo images available for the effort suite; skipping.")
+        return False
+    tasks = build_effort_tasks(args.formats, image_ppms)
+    if not tasks:
+        print("\nNo effort-swept codecs built for these formats; skipping.")
+        return False
+
+    eff_dir = os.path.join(bundle_dir, "effort")
+    os.makedirs(eff_dir, exist_ok=True)
+    manifest = {
+        **_base_manifest(),
+        "benchmark_config": {
+            "suite": "effort",
+            **_dataset_manifest(args),
+            "formats": args.formats,
+            "effort_images": len(image_ppms),
+            "effort_mp": 1.0,
+        },
+    }
+    with open(f"{eff_dir}/manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n✓ {len(tasks)} effort benchmark(s)\n")
+
+    max_workers = _resolve_jobs(args.jobs, len(tasks))
+    metrics = generate_metrics(tasks, eff_dir, max_workers, args.keep_temp)
+    with open(f"{eff_dir}/metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    write_effort_outputs(eff_dir, metrics)
+    return True
 
 
 def run_sweep(args: RunArgs) -> None:
@@ -1406,6 +1653,16 @@ def run_sweep(args: RunArgs) -> None:
         _run_timing_overlay(args, tasks, perf_dir)
         suites.append("performance")
 
+    # 3. Scaling suite (optional): encode/decode time vs pixel count on a
+    # downscaled ladder, characterizing each codec's scaling exponent.
+    if args.scaling and _run_scaling_suite(args, bundle):
+        suites.append("scaling")
+
+    # 4. Effort/speed suite (optional): the time/size/quality tradeoff across each
+    # lossy codec's pinned effort knob (AVIF speed, JXL effort, WebP method).
+    if args.effort and _run_effort_suite(args, bundle):
+        suites.append("effort")
+
     _finalize_bundle(bundle, suites)
     _print_bundle(bundle, suites)
 
@@ -1430,6 +1687,15 @@ def _finalize_bundle(bundle_dir: str, suites: list[str]):
         lines.append(
             "- Quality (rate-distortion): [`quality/summary.md`](quality/summary.md)"
         )
+    if "scaling" in suites:
+        lines.append(
+            "- Scaling (time vs pixels): [`scaling/summary.md`](scaling/summary.md)"
+        )
+    if "effort" in suites:
+        lines.append(
+            "- Effort/speed (time vs quality vs size): "
+            "[`effort/summary.md`](effort/summary.md)"
+        )
     lines.append(
         "\nOpen [`report.html`](report.html) for a single self-contained view.\n"
     )
@@ -1450,6 +1716,10 @@ def _print_bundle(bundle_dir: str, suites: list[str]):
         print("  - performance/   : raw.json, summary.md, timing charts, memory.csv")
     if "quality" in suites:
         print("  - quality/       : metrics.json, summary.md, rate-distortion charts")
+    if "scaling" in suites:
+        print("  - scaling/       : raw.json, summary.md, time-vs-pixels charts")
+    if "effort" in suites:
+        print("  - effort/        : metrics.json, summary.md, effort-tradeoff charts")
     print("  - manifest.json  : bundle metadata")
     print("  - summary.md     : index")
     print("  - report.html    : self-contained report (all charts embedded)")
