@@ -6,6 +6,7 @@ uv = "0.11.21"
 # node + wrangler provide the Cloudflare Pages deploy (see tasks.deploy-report).
 node = "22"
 "npm:wrangler" = "4"
+meson = "latest"
 
 [hooks]
 # Wire the git hooks (hk.pkl) automatically after `mise install`.
