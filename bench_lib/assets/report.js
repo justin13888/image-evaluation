@@ -207,6 +207,49 @@
       " (bubble size)</span>" + items + "</div>";
   }
 
+  // SVG path through screen-space points [{x,y}] (sorted by x) as a smooth cubic
+  // spline. Uses monotone cubic Hermite interpolation (Fritsch–Carlson tangents,
+  // like d3 curveMonotoneX) emitted as cubic Béziers: no overshoot, so the curve
+  // never bulges past a measured point or implies a sample between data points
+  // that wasn't benchmarked. Falls back to a straight segment where it can't spline.
+  function smoothPath(pts) {
+    var n = pts.length;
+    if (n === 0) return "";
+    var p = function (q) { return q.x.toFixed(1) + " " + q.y.toFixed(1); };
+    if (n === 1) return "M" + p(pts[0]) + " ";
+    if (n === 2) return "M" + p(pts[0]) + " L" + p(pts[1]) + " ";
+    // Secant slopes between consecutive points.
+    var dx = [], dy = [], m = [];
+    for (var i = 0; i < n - 1; i++) {
+      dx[i] = pts[i + 1].x - pts[i].x;
+      dy[i] = pts[i + 1].y - pts[i].y;
+      m[i] = dx[i] !== 0 ? dy[i] / dx[i] : 0;
+    }
+    // Monotone tangents (Fritsch–Carlson): endpoints take the adjacent secant,
+    // interior points average neighbours but are zeroed at local extrema and
+    // limited to keep the interpolant monotone (and thus overshoot-free).
+    var t = [m[0]];
+    for (var j = 1; j < n - 1; j++) {
+      if (m[j - 1] * m[j] <= 0) { t[j] = 0; }
+      else {
+        var tj = (m[j - 1] + m[j]) / 2;
+        var lim = 3 * Math.min(Math.abs(m[j - 1]), Math.abs(m[j]));
+        t[j] = Math.abs(tj) > lim ? (tj > 0 ? lim : -lim) : tj;
+      }
+    }
+    t[n - 1] = m[n - 2];
+    // Cubic Bézier per interval; control points at ±1/3 of the span along tangents.
+    var d = "M" + p(pts[0]) + " ";
+    for (var k = 0; k < n - 1; k++) {
+      if (dx[k] === 0) { d += "L" + p(pts[k + 1]) + " "; continue; }
+      var c1x = pts[k].x + dx[k] / 3, c1y = pts[k].y + t[k] * dx[k] / 3;
+      var c2x = pts[k + 1].x - dx[k] / 3, c2y = pts[k + 1].y - t[k + 1] * dx[k] / 3;
+      d += "C" + c1x.toFixed(1) + " " + c1y.toFixed(1) + " " +
+        c2x.toFixed(1) + " " + c2y.toFixed(1) + " " + p(pts[k + 1]) + " ";
+    }
+    return d;
+  }
+
   // series: [{key,label,color,dash?,points:[{x,y,label,q,count}]}]
   function renderRDChart(container, series, chartId, metric, showTime) {
     var hidden = HIDDEN[chartId] || (HIDDEN[chartId] = {});
@@ -285,14 +328,14 @@
       // series + collect hit-test points
       var hits = [];
       vis.forEach(function (s) {
-        var d = "";
-        s.points.forEach(function (p, i) {
+        var pts = [];
+        s.points.forEach(function (p) {
           var px = sx(p.x), py = sy(p.y);
-          d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
+          pts.push({ x: px, y: py });
           var r = scale ? scale.r(p.t) : PT_R;
           hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, std: p.std, t: p.t });
         });
-        svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
         s.points.forEach(function (p) {
           var r = scale ? scale.r(p.t) : PT_R;
           svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
@@ -642,15 +685,15 @@
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) +
       ') rotate(-90)" text-anchor="middle">Bits per pixel (lower is better)</text>');
     series.forEach(function (s) {
-      var d = "";
-      s.points.forEach(function (p, i) {
+      var pts = [];
+      s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
-        d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
+        pts.push({ x: px, y: py });
         var r = scale ? scale.r(p.t) : PT_R;
         hits.push({ sx: px, sy: py, r: r, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
       });
       if (s.points.length > 1) {
-        svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' +
+        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' +
           (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       }
       s.points.forEach(function (p) {
@@ -864,14 +907,14 @@
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Input bits per pixel (bpp)</text>');
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better)</text>');
     series.forEach(function (s) {
-      var d = "";
-      s.points.forEach(function (p, i) {
+      var pts = [];
+      s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
-        d += (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1) + " ";
+        pts.push({ x: px, y: py });
         hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst });
       });
       if (s.points.length > 1) {
-        svg.push('<path class="q-line" d="' + d + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       }
       s.points.forEach(function (p) {
         var cx = sx(p.x).toFixed(1), cy = sy(p.y).toFixed(1);
