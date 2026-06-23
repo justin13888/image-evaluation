@@ -1611,6 +1611,16 @@ class RunArgs(BaseArgs):
             "scored, bounding peak disk use on large sweeps."
         ),
     ] = False
+    report_images: Annotated[
+        bool,
+        Field(
+            description="Persist every quality-pass result's exact encoded artifact "
+            "(plus each source) into the bundle's assets/ tree, so the report's data "
+            "points are clickable into an image gallery. Default on. --no-report-images "
+            "restores the lean behavior (no images kept) for very large sweeps or to "
+            "stay well under a static host's file-count limit."
+        ),
+    ] = True
     pin_cores: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
