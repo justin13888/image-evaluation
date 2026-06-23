@@ -19,15 +19,7 @@
 .q-controls a.q-dl { color: #2563eb; text-decoration: none; }
 .q-controls a.q-dl:hover { text-decoration: underline; }
 
-.q-chart-title { margin: 1.4rem 0 .2rem; font-size: 1rem; }
-.q-metric-grid {
-  display: grid; gap: .6rem 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  margin: .3rem 0 1.4rem;
-}
-.q-metric-cell { min-width: 0; }            /* allow charts to shrink in grid tracks */
 .q-metric-cap { font-size: .82rem; color: #555; margin: .1rem 0 .15rem; font-weight: 600; }
-.q-metric-cell .q-chart { margin: 0; }
 .q-chart { position: relative; margin: .3rem 0 1.2rem; }
 .q-chart svg { width: 100%; height: auto; display: block; }
 .q-chart .q-plot { border: 1px solid #e6e6e6; border-radius: 6px; background: #fff; }
@@ -57,13 +49,15 @@
 .q-size-item svg { overflow: visible; }
 .q-size-bub { fill: #c9c9c9; stroke: #888; stroke-width: 1; }
 
-.q-legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; margin: .5rem .2rem 0; }
+.q-legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; margin: .5rem .2rem .6rem; }
 .q-chip {
   display: inline-flex; align-items: center; gap: .35rem; cursor: pointer;
-  font-size: .82rem; color: #222; user-select: none; padding: .1rem .15rem;
+  font-size: .82rem; color: #222; user-select: none; padding: .15rem .3rem;
+  border: 1px solid transparent; background: none; font-family: inherit; border-radius: 4px;
 }
 .q-chip .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
-.q-chip.off { opacity: .35; text-decoration: line-through; }
+.q-chip.off { opacity: .4; text-decoration: line-through; }
+.q-chip.static { cursor: default; }
 
 .q-tooltip {
   position: absolute; pointer-events: none; z-index: 5; max-width: 260px;
@@ -101,3 +95,79 @@ table.q-table td.bad { color: #b3261e; }
                 padding: .6rem .9rem; margin: .8rem 0 1.2rem; font-size: .85rem;
                 border-radius: 0 4px 4px 0; line-height: 1.45; }
 .q-disclaimer strong { color: #7a5d00; }
+
+/* Screen-reader-only live region (announces view/tab/filter changes). */
+.q-visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* View controls: the preset <select>, the time toggle, the raw-data link. */
+.q-ctl { display: inline-flex; align-items: center; gap: .4rem; }
+.q-select {
+  font: inherit; font-size: .85rem; padding: .25rem 1.6rem .25rem .5rem;
+  border: 1px solid #bbb; border-radius: 6px; background: #fff; color: #1a1a1a; cursor: pointer;
+}
+.q-hint { color: #888; font-size: .78rem; }
+
+/* Filter matrix (a <details> with fieldset/legend groups). */
+.q-filters { margin: 0 0 1.2rem; font-size: .85rem; }
+.q-filters > summary { cursor: pointer; color: #2563eb; font-size: .85rem; padding: .2rem 0; }
+.q-filters > summary:hover { text-decoration: underline; }
+.q-filters-body {
+  display: flex; flex-wrap: wrap; gap: .6rem 1.1rem; margin: .6rem 0 .2rem;
+}
+.q-fieldset {
+  border: 1px solid #ddd; border-radius: 6px; padding: .3rem .6rem .5rem;
+  margin: 0; min-width: 150px;
+}
+.q-fieldset legend { font-size: .78rem; color: #555; font-weight: 600; padding: 0 .3rem; }
+.q-check { display: flex; align-items: center; gap: .35rem; font-size: .82rem; padding: .1rem 0; }
+.q-mini {
+  font: inherit; font-size: .72rem; border: 1px solid #ccc; background: #f6f6f6;
+  border-radius: 4px; padding: 0 .35rem; margin-left: .25rem; cursor: pointer; color: #444;
+}
+.q-mini:hover { background: #ececec; }
+
+/* Format tabs (ARIA tablist) + full-width stacked panels. */
+.q-tablist {
+  display: flex; flex-wrap: wrap; gap: .2rem; border-bottom: 2px solid #e0e0e0;
+  margin: .2rem 0 1rem;
+}
+.q-tab {
+  font: inherit; font-size: .88rem; border: 1px solid transparent; border-bottom: 0;
+  background: none; color: #555; padding: .4rem .85rem; cursor: pointer;
+  border-radius: 6px 6px 0 0; margin-bottom: -2px;
+}
+.q-tab:hover { background: #f4f4f4; color: #1a1a1a; }
+.q-tab.active {
+  color: #1a1a1a; font-weight: 600; border-color: #e0e0e0;
+  border-bottom: 2px solid #fff; background: #fff;
+}
+.q-tabpanel { outline: none; }
+.q-stack-item { margin: 0 0 1.6rem; }
+.q-stack-item .q-metric-cap { font-size: .95rem; margin: 0 0 .25rem; }
+
+/* Visible keyboard focus for every interactive control. */
+.q-tab:focus-visible, .q-chip:focus-visible, .q-select:focus-visible,
+.q-mini:focus-visible, .q-filters > summary:focus-visible,
+.q-tabpanel:focus-visible, table.q-table th:focus-visible,
+.q-check input:focus-visible, .q-dl:focus-visible {
+  outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* Full-bleed the chart areas past the readable text column (body is capped at
+   ~1100px) so a single full-width chart per tab really uses the browser width.
+   Only kicks in once the viewport is wider than the text column; the negative
+   margin centres the wider block without causing horizontal scroll. The readable
+   prose/notes stay in the narrow column. */
+@media (min-width: 1180px) {
+  #q-tabs, [data-img-tabs], #q-lossless, #q-decoders {
+    width: min(96vw, 1700px);
+    margin-left: calc(-1 * (min(96vw, 1700px) - 100%) / 2);
+  }
+}
