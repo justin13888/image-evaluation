@@ -13,6 +13,6 @@ path = "src/encode.rs"
 
 [dependencies]
 benchmark-harness = { path = "../../../harness/rust" }
-zune-png = "0.5.0-rc1"
-zune-core = "0.5.0-rc1"
+zune-png = "0.5.2"
+zune-core = "0.5.1"
 anyhow = "1.0"

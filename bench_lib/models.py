@@ -1253,13 +1253,10 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
             )
         ],
     ),
-    "zune-png-encode": TunableSchema(
-        params=[Tunable(name="effort", kind="int", default="4", min=0, max=9)],
-        quality_axis="effort",
-        quality_sweep=_PNG_ZLIB_SWEEP,
-        perf_preset={"effort": "4"},
-        lossless=True,
-    ),
+    # zune-png 0.5.x encoder emits STORED (uncompressed) DEFLATE blocks via zune-inflate
+    # (no compression impl yet) and ignores effort, so there is no compression-efficiency
+    # sweep -- it contributes one honest lossless operating point (~24 bpp). See issue #26.
+    "zune-png-encode": TunableSchema(lossless=True),
     # zenpng: lossless; the swept axis is its 0-200 compression effort. Default 13
     # is the `Balanced` preset. Filter selection is automatic (no knob).
     "zenpng-encode": TunableSchema(
