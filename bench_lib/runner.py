@@ -740,6 +740,65 @@ def _run_iqa(
     )
 
 
+def _decode_input_is_lossless(task: BenchmarkTask) -> bool:
+    """Whether a decode task's input was produced by a *lossless* reference encoder
+    — i.e. the source survives the encode intact, so the decoded pixels have the
+    source as a true ground truth (and bit-exactness can be checked against it).
+
+    The producing reference is the format's lossless reference when the task is on
+    the dedicated lossless decode path (issue #21, ``input_lossless``), else the
+    format's main reference encoder — which is itself lossless for a lossless-only
+    format like PNG. Decoupled from the row's ``lossless`` flag so PNG (lossless,
+    yet not split into a separate decode path) is still recognised."""
+    if task.impl.type != BenchmarkType.DECODE or task.impl.format is None:
+        return False
+    ref_map = LOSSLESS_REFERENCE_ENCODERS if task.input_lossless else REFERENCE_ENCODERS
+    ref_name = ref_map.get(task.impl.format)
+    return bool(ref_name and schema_for(ref_name).lossless)
+
+
+def _read_ppm_raster(path: str) -> Optional[tuple[int, int, bytes]]:
+    """Read an image as ``(width, height, raw RGB bytes)`` for an exact pixel
+    compare. Goes through PIL so PPM header quirks (comments, whitespace) are
+    handled identically on both sides of the comparison; returns None if the file
+    can't be read. P6 PPM carries no colour metadata, so the bytes are the stored
+    samples verbatim."""
+    try:
+        with PILImage.open(path) as im:
+            rgb = im.convert("RGB")
+            return (rgb.width, rgb.height, rgb.tobytes())
+    except Exception:
+        return None
+
+
+def _raster_bit_exact(
+    reference_path: str, distorted_path: str
+) -> tuple[Optional[bool], Optional[int], Optional[int]]:
+    """Definitive byte-level bit-exactness of ``distorted`` vs ``reference`` (both
+    8-bit RGB rasters), independent of iqa-cli/PSNR.
+
+    Returns ``(bit_exact, first_diff_byte, diff_byte_count)``. ``bit_exact`` is
+    None (with None diagnostics) when either raster can't be read; differing
+    dimensions count as not-exact. The exact-match path is a single C-level
+    ``bytes`` compare (cheap); the per-byte diagnostic only runs on a mismatch."""
+    ref = _read_ppm_raster(reference_path)
+    dist = _read_ppm_raster(distorted_path)
+    if ref is None or dist is None:
+        return (None, None, None)
+    (rw, rh, rb), (dw, dh, db) = ref, dist
+    if (rw, rh) != (dw, dh) or len(rb) != len(db):
+        return (False, 0, max(len(rb), len(db)))
+    if rb == db:  # fast path: most rows are bit-exact
+        return (True, None, 0)
+    # Mismatch is rare → vectorise the diagnostic instead of a Python byte loop.
+    import numpy as np
+
+    a = np.frombuffer(rb, dtype=np.uint8)
+    b = np.frombuffer(db, dtype=np.uint8)
+    diff = a != b
+    return (False, int(np.argmax(diff)), int(diff.sum()))
+
+
 def _measure_one(
     task: BenchmarkTask,
     temp_dir: str,
@@ -817,28 +876,57 @@ def _measure_one(
             filesize = 0
 
         # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM + Butteraugli, from
-        # the iqa crate, which consumes raw pixels):
+        # the iqa crate, which consumes raw pixels). The reference each row is
+        # scored against:
         #   - Encoders: decode the encoded output with the format's reference
         #     decoder and score against the original source ("source" basis).
-        #   - Decoders: the output is already a PPM; score it against the *golden*
-        #     (reference) decoder's PPM for the same input ("golden" basis). This
-        #     isolates decoder fidelity from the encoder loss both share, so a
-        #     bit-exact decoder scores ∞ and only approximate paths show a finite
-        #     PSNR.
+        #   - Lossless-input decoders (PNG always; WebP/JXL lossless path): the
+        #     decoded pixels MUST equal the source, so score against the *source*
+        #     ground truth ("source" basis) — the same path encoders use. This
+        #     measures true correctness, not agreement with another decoder.
+        #   - Lossy-input decoders (JPEG, AVIF, WebP/JXL lossy path): no source
+        #     ground truth exists, so score against the *golden* (reference)
+        #     decoder's PPM of the same input ("golden" basis), isolating decoder
+        #     fidelity from the encoder loss both share.
+        decode_time_s: Optional[float] = None
         if task.impl.type == BenchmarkType.ENCODE:
             distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
             temp_files.append(distorted_ppm)
+            # Time this single reference-decode: a real, drift-free decode cost for
+            # this exact encoded output (relative/single-pass, like time_s).
+            decode_start = time.time()
             _decode_to_ppm(task, output_path, distorted_ppm, env=env)
+            decode_time_s = time.time() - decode_start
             reference_ppm = task.source_path
             metric_basis = "source"
         else:
             distorted_ppm = output_path
-            # The golden PPM is shared across every decoder of this input
-            # (memoized + atomically published), so it is owned by the golden
-            # cache dir, not this task — do NOT add it to temp_files.
-            reference_ppm = _golden_reference_ppm(task, golden_cache, env, identifier)
-            metric_basis = "golden"
+            if _decode_input_is_lossless(task):
+                # Lossless round-trip: the source is the ground truth.
+                reference_ppm = task.source_path
+                metric_basis = "source"
+            else:
+                # Lossy: the golden PPM is shared across every decoder of this input
+                # (memoized + atomically published), so it is owned by the golden
+                # cache dir, not this task — do NOT add it to temp_files.
+                reference_ppm = _golden_reference_ppm(
+                    task, golden_cache, env, identifier
+                )
+                metric_basis = "golden"
         score, psnr, ssim, butteraugli = _run_iqa(reference_ppm, distorted_ppm, env=env)
+
+        # Definitive bit-exactness (independent of PSNR): a byte compare of the
+        # produced raster against the reference it was scored against. Meaningful
+        # for any decode row (does it reproduce its reference exactly?) and for a
+        # lossless encoder's round-trip; not for a lossy encode (intentionally not
+        # identical), where it stays None.
+        bit_exact: Optional[bool] = None
+        bit_exact_first_diff: Optional[int] = None
+        bit_exact_diff_count: Optional[int] = None
+        if task.impl.type == BenchmarkType.DECODE or lossless:
+            bit_exact, bit_exact_first_diff, bit_exact_diff_count = _raster_bit_exact(
+                reference_ppm, distorted_ppm
+            )
 
         # 3. Get image dimensions from source file
         width, height, megapixels, bpp = 0, 0, 0.0, 0.0
@@ -858,12 +946,21 @@ def _measure_one(
         psnr_str = f"{psnr:.2f}" if psnr is not None else "∞/NA"
         ssim_str = f"{ssim:.4f}" if ssim is not None else "NA"
         ba_str = f"{butteraugli:.3f}" if butteraugli is not None else "NA"
+        # Surface a genuinely non-bit-exact lossless path right in the sweep log so
+        # it's caught while running (drives the per-codec deep-fix), against the
+        # basis it was scored on (source for lossless, golden for lossy decode).
+        be_str = ""
+        if bit_exact is False:
+            be_str = (
+                f" {Fore.YELLOW}[NOT bit-exact vs {metric_basis}: "
+                f"{bit_exact_diff_count} bytes differ]{Style.RESET_ALL}"
+            )
         status = (
             f"{Fore.GREEN}✓{Style.RESET_ALL} {task.name()} — "
             f"Size: {humanize.naturalsize(filesize, binary=True)}, "
             f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, SSIM: {ssim_str}, "
             f"Butteraugli: {ba_str}, bpp: {bpp:.3f} "
-            f"(took {elapsed_time:.1f} s){dim_warning}"
+            f"(took {elapsed_time:.1f} s){be_str}{dim_warning}"
         )
 
         metric = BenchmarkMetrics(
@@ -889,6 +986,10 @@ def _measure_one(
             megapixels=megapixels,
             bpp=bpp,
             time_s=elapsed_time,
+            decode_time_s=decode_time_s,
+            bit_exact=bit_exact,
+            bit_exact_first_diff=bit_exact_first_diff,
+            bit_exact_diff_count=bit_exact_diff_count,
         )
         return (metric, status)
     except Exception as e:
@@ -935,6 +1036,10 @@ def _measure_one(
             # meaningless for a failed row, so record 0.0 (also: elapsed_time may
             # be unbound if subprocess.run raised).
             time_s=0.0,
+            decode_time_s=None,
+            bit_exact=None,
+            bit_exact_first_diff=None,
+            bit_exact_diff_count=None,
         )
         return (metric, status)
     finally:

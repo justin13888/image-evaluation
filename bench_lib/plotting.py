@@ -195,31 +195,38 @@ def lossless_efficiency(
 def decoder_fidelity(
     metrics: list[BenchmarkMetrics],
 ) -> Dict[str, Dict[str, Any]]:
-    """Per decoder, its speed and fidelity versus the golden (reference) decoder
-    across the sweep of reference-encoded inputs (``metric_basis == "golden"``).
+    """Per decoder, its speed and fidelity versus the reference it is scored
+    against across the sweep of reference-encoded inputs.
 
-    Decoders have no rate-distortion tradeoff of their own: a correct decoder
-    reproduces the golden decoder's pixels, so PSNR vs golden is ∞ (recorded as
-    ``None``). This view answers "how fast, and is it faithful?" — each decoder's
-    golden-basis rows are aggregated to its mean one-pass decode time, mean input
-    bpp, the worst (minimum *finite*) PSNR vs golden, whether every point was
-    bit-exact, and a ``points`` list (decode time + PSNR vs input bpp) for the
-    speed-vs-bitrate chart.
+    Decoders have no rate-distortion tradeoff of their own. A correct decoder
+    reproduces its reference exactly, so its PSNR is ∞ (recorded as ``None``). The
+    reference differs by input: a **losslessly-encoded input** (PNG always; the
+    WebP/JXL lossless path) has the *source* as ground truth (``metric_basis ==
+    "source"``), so fidelity is measured directly against it; a **lossy input**
+    (JPEG, AVIF, WebP/JXL lossy path) has no source truth, so it is measured
+    against the format's *golden* decoder (``metric_basis == "golden"``). This view
+    answers "how fast, and is it faithful?" — each decoder's rows are aggregated to
+    its mean one-pass decode time, mean input bpp, the worst (minimum *finite*)
+    PSNR, whether every point was bit-exact, and a ``points`` list (decode time +
+    PSNR + bit_exact vs input bpp) for the speed-vs-bitrate chart.
+
+    Bit-exactness uses the row's definitive ``bit_exact`` byte-compare field when
+    present, falling back to "no finite PSNR" for older bundles.
 
     Formats with both a lossy and a lossless mode (WebP, JXL) decode inputs from
-    both paths (issue #21); the two are reported separately — bit-exact lossless
-    points (PSNR ∞) would otherwise mask an approximate lossy path in the same
-    decoder's aggregate. The lossless path is keyed ``"<impl> (lossless)"``.
+    both paths (issue #21); the two are reported separately — the lossless path is
+    keyed ``"<impl> (lossless)"`` — so a bit-exact lossless path can't mask an
+    approximate lossy one in the same decoder's aggregate.
 
     Returns ``{key: {format, mean_time_s, mean_bpp, count, bit_exact,
-    worst_psnr, points:[{bpp, time_s, psnr, label}]}}`` where ``key`` is the decoder
-    name (lossy path) or ``"<impl> (lossless)"`` (lossless path). Decoders with no
-    valid golden-basis row are omitted."""
+    worst_psnr, basis, points:[{bpp, time_s, psnr, bit_exact, label}]}}`` where
+    ``key`` is the decoder name (lossy path) or ``"<impl> (lossless)"`` (lossless
+    path). Decoders with no valid scored row are omitted."""
     rows = [
         m
         for m in metrics
         if m["type"] == "decode"
-        and m.get("metric_basis") == "golden"
+        and m.get("metric_basis") in ("golden", "source")
         and not m.get("error")
     ]
     result: Dict[str, Dict[str, Any]] = {}
@@ -229,17 +236,22 @@ def decoder_fidelity(
             m["time_s"] for m in impl_rows if isinstance(m.get("time_s"), (int, float))
         ]
         bpps = [m["bpp"] for m in impl_rows if m["bpp"] > 0]
-        # PSNR vs golden is None for a pixel-identical (bit-exact) decode; a finite
-        # value flags an approximate decode path.
+        # PSNR is None for a pixel-identical (bit-exact) decode; a finite value
+        # flags an approximate decode path (vs source for lossless, vs golden lossy).
         finite_psnrs = [
             m["psnr"] for m in impl_rows if isinstance(m.get("psnr"), (int, float))
         ]
+        # Definitive bit-exactness from the per-row byte compare when available;
+        # legacy bundles (no field) fall back to the PSNR-non-finite inference.
+        explicit = [m["bit_exact"] for m in impl_rows if m.get("bit_exact") is not None]
+        bit_exact = all(explicit) if explicit else (len(finite_psnrs) == 0)
         points = sorted(
             (
                 {
                     "bpp": m["bpp"],
                     "time_s": m.get("time_s") or 0.0,
                     "psnr": m.get("psnr"),
+                    "bit_exact": m.get("bit_exact"),
                     "label": m["label"],
                 }
                 for m in impl_rows
@@ -254,8 +266,9 @@ def decoder_fidelity(
             "mean_time_s": (sum(times) / len(times)) if times else 0.0,
             "mean_bpp": (sum(bpps) / len(bpps)) if bpps else 0.0,
             "count": len(impl_rows),
-            "bit_exact": len(finite_psnrs) == 0,
+            "bit_exact": bit_exact,
             "worst_psnr": (min(finite_psnrs) if finite_psnrs else None),
+            "basis": impl_rows[0].get("metric_basis", "golden"),
             "points": points,
         }
     return result

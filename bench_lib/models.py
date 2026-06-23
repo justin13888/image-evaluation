@@ -1924,3 +1924,20 @@ class BenchmarkMetrics(TypedDict):
     # an operating point's cost scales, not the rigorous-timing overlay's isolated
     # measurement. 0.0 on error.
     time_s: float
+    # Wall-clock seconds for the single reference-decode of THIS encoded output —
+    # measured (never joined) by timing the decode the encoder path already does to
+    # score IQA, so "quality vs decode time" is a real, drift-free axis. Same
+    # single-pass/relative caveat as time_s. Only set on encode rows; None on decode
+    # rows (their time_s already *is* a decode time) and on error.
+    decode_time_s: Optional[float]
+    # Definitive bit-exactness from a direct byte compare of the produced raster
+    # against the reference it is scored against (decode rows: vs source for a
+    # losslessly-encoded input, else vs the golden decoder; encode rows: vs source,
+    # lossless encoders only). True/False where a ground-truth compare applies;
+    # None where it does not (lossy encode rows) or the raster could not be read.
+    # Independent of iqa-cli's PSNR (no rounding / non-finite inference).
+    bit_exact: Optional[bool]
+    # Diagnostics for a non-bit-exact row (both None when bit-exact or N/A): the
+    # byte offset of the first differing sample, and the count of differing bytes.
+    bit_exact_first_diff: Optional[int]
+    bit_exact_diff_count: Optional[int]
