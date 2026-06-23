@@ -373,7 +373,7 @@ def test_report_html():
         "github.com/justin13888/image-evaluation/tree/"
         "0123456789abcdef0123456789abcdef01234567" in html
     ), "commit must link to the GitHub source tree"
-    assert "dirty (uncommitted changes)" in html, "dirty working tree must be flagged"
+    assert " (dirty)" in html, "dirty working tree must be flagged"
     # Aggregation disclosure: the mount point exists and the engine knows how to
     # state mean-across-N-images vs single-image, with known-range axes.
     assert "id='q-aggregation'" in html or 'id="q-aggregation"' in html, (

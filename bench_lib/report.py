@@ -245,7 +245,7 @@ def _config_section(bundle_dir: str) -> list[str]:
             f'rel="noopener noreferrer"><code>{html.escape(commit[:12])}</code></a>'
         )
         if git.get("dirty"):
-            link += " &middot; dirty (uncommitted changes)"
+            link += " (dirty)"
         row("Commit", link)
 
     if not rows:
