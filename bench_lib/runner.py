@@ -27,7 +27,7 @@ from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
 from bench_lib.imageprep import single_thread_env as _single_thread_env
-from bench_lib.imageprep import to_canonical_ppm
+from bench_lib.imageprep import to_canonical_ppm, to_viewable_png
 from bench_lib.models import (
     DATASETS,
     FORMAT_EXT_MAP,
@@ -800,12 +800,32 @@ def _raster_bit_exact(
     return (False, int(np.argmax(diff)), int(diff.sum()))
 
 
+def _publish_file_once(src: str, dst: str) -> None:
+    """Copy ``src`` to ``dst`` once, atomically. Shared across the parallel pool
+    — every decoder of an input publishes the same ``_inputs/`` artifact — so it
+    is a no-op when ``dst`` exists and copies via a temp + ``os.replace``,
+    leaving no half-written file for a concurrent reader."""
+    if os.path.exists(dst):
+        return
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst) or ".", suffix=".tmp")
+    os.close(fd)
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def _measure_one(
     task: BenchmarkTask,
     temp_dir: str,
     env: Dict[str, str],
     golden_cache: GoldenCache,
     keep_temp: bool = False,
+    bundle_dir: Optional[str] = None,
+    capture: bool = False,
 ) -> tuple[Optional[BenchmarkMetrics], str]:
     """Encode one task, decode + score it, and return its metric row alongside a
     preformatted status line.
@@ -837,11 +857,25 @@ def _measure_one(
     # (unless --keep-temp). Filenames carry a random suffix via identifier(), so
     # per-task deletion never races another worker.
     temp_files: list[str] = []
+    # Gallery assets for this data point (None when capture is off / no bundle /
+    # null task): the exact encoded artifact and the browser-viewable source.
+    asset_rel = task.asset_relpath() if (capture and bundle_dir) else None
+    source_rel = task.source_asset_relpath() if (capture and bundle_dir) else None
     try:
         identifier = task.identifier()
         format_ext_str = FORMAT_EXT_MAP[task.output_ext()]
-        output_path = os.path.join(temp_dir, f"{identifier}.{format_ext_str}")
-        temp_files.append(output_path)
+        # An *encoder's* artifact is its output, so encode straight into the
+        # bundle's assets/ tree and keep it — the path is unique per
+        # (impl, label, image), so no worker races another for it. A *decoder's*
+        # artifact is the bitstream it consumed (its raw-PPM output is
+        # format-invariant), so the output stays a deleted-as-scored temp file
+        # and the input is published after scoring instead.
+        if asset_rel and task.impl.type == BenchmarkType.ENCODE:
+            output_path = os.path.join(bundle_dir, asset_rel)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        else:
+            output_path = os.path.join(temp_dir, f"{identifier}.{format_ext_str}")
+            temp_files.append(output_path)
 
         # Run implementation once (no warmup) to get the output file. Force
         # discard=False so the binary writes a real file even though timing runs
@@ -964,6 +998,25 @@ def _measure_one(
             f"(took {elapsed_time:.1f} s){be_str}{dim_warning}"
         )
 
+        # Publish this row's gallery assets (best-effort: a copy/convert failure
+        # must never fail a measurement). Encode artifacts were already written
+        # in place above; a decode artifact is the shared input bitstream.
+        asset_path_out: Optional[str] = None
+        source_asset_out: Optional[str] = None
+        if asset_rel and bundle_dir:
+            try:
+                if task.impl.type == BenchmarkType.DECODE:
+                    _publish_file_once(
+                        task.input_path, os.path.join(bundle_dir, asset_rel)
+                    )
+                asset_path_out = asset_rel
+                if source_rel and to_viewable_png(
+                    task.source_path, os.path.join(bundle_dir, source_rel)
+                ):
+                    source_asset_out = source_rel
+            except Exception:
+                pass  # leave the row without gallery links rather than failing it
+
         metric = BenchmarkMetrics(
             name=task.name(),
             impl=task.impl.name,
@@ -991,6 +1044,8 @@ def _measure_one(
             bit_exact=bit_exact,
             bit_exact_first_diff=bit_exact_first_diff,
             bit_exact_diff_count=bit_exact_diff_count,
+            asset_path=asset_path_out,
+            source_asset=source_asset_out,
         )
         return (metric, status)
     except Exception as e:
@@ -1041,6 +1096,8 @@ def _measure_one(
             bit_exact=None,
             bit_exact_first_diff=None,
             bit_exact_diff_count=None,
+            asset_path=None,
+            source_asset=None,
         )
         return (metric, status)
     finally:
@@ -1082,6 +1139,8 @@ def generate_metrics(
     result_dir: str,
     max_workers: int,
     keep_temp: bool = False,
+    bundle_dir: Optional[str] = None,
+    capture: bool = False,
 ) -> list[BenchmarkMetrics]:
     """Generate file size and visual quality metrics, encoding tasks in parallel.
 
@@ -1093,8 +1152,15 @@ def generate_metrics(
 
     By default each task's temp files are deleted as soon as it's scored, so peak
     disk use stays bounded on large sweeps; `keep_temp` keeps every intermediate
-    (and the staging dir) for inspection instead."""
+    (and the staging dir) for inspection instead.
+
+    When `capture` is set (and `bundle_dir` given), each result's exact encoded
+    artifact and its source are persisted under `<bundle_dir>/assets` for the
+    report gallery (see `BenchmarkTask.asset_relpath`); these are deliverables,
+    not temp files, so they survive the per-task cleanup."""
     print(f"{Fore.BLUE}{'=' * 70}\nCOLLECTING METRICS\n{'=' * 70}\n")
+    if capture and bundle_dir:
+        print(f"Persisting per-result images under: {bundle_dir}/assets\n")
 
     temp_dir = tempfile.mkdtemp()
     if keep_temp:
@@ -1128,7 +1194,14 @@ def generate_metrics(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
-                    _measure_one, task, temp_dir, env, golden_cache, keep_temp
+                    _measure_one,
+                    task,
+                    temp_dir,
+                    env,
+                    golden_cache,
+                    keep_temp,
+                    bundle_dir,
+                    capture,
                 )
                 for task in ordered
             ]
@@ -1404,7 +1477,16 @@ def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[s
     print(f"\n✓ Manifest written to {result_dir}/manifest.json")
     print(f"\n✓ {len(metric_tasks)} quality measurement(s) across the sweep\n")
 
-    metrics = generate_metrics(metric_tasks, result_dir, max_workers, args.keep_temp)
+    # Persist each result's image under <bundle>/assets (report.html lives at the
+    # bundle root, so the rows' relative `assets/...` paths resolve from it).
+    metrics = generate_metrics(
+        metric_tasks,
+        result_dir,
+        max_workers,
+        args.keep_temp,
+        bundle_dir=os.path.dirname(result_dir),
+        capture=args.report_images,
+    )
     metrics_path = f"{result_dir}/metrics.json"
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)

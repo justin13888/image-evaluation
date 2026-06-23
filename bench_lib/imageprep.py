@@ -75,3 +75,33 @@ def to_canonical_ppm(src: str, out_ppm: str, target_px: Optional[int] = None) ->
         if os.path.exists(tmp):
             os.remove(tmp)
     return True
+
+
+def to_viewable_png(src: str, out_png: str) -> bool:
+    """Publish ``src`` (typically the canonical PPM the codecs consumed) as a
+    lossless PNG at ``out_png`` for browser display — once, atomically.
+
+    The report gallery needs a browser-renderable original to toggle against
+    each reconstruction; the PPM is not one. Many scoring tasks share the same
+    source, so this is a no-op when ``out_png`` already exists and writes via a
+    temp file + ``os.replace`` (forcing the format with ImageMagick's ``png:``
+    prefix), so a concurrent reader never sees a half-written file. The pixels
+    are unchanged (PPM->PNG is lossless). Returns True on success (including
+    already-present)."""
+    if os.path.exists(out_png):
+        return True
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(out_png) or ".", suffix=".tmp")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["convert", src, f"png:{tmp}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.replace(tmp, out_png)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return True
