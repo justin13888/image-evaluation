@@ -156,6 +156,54 @@ table.q-table td.bad { color: #b3261e; }
   outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 3px;
 }
 
+/* Per-point image gallery: a data point is clickable into a modal showing the
+   exact images aggregated into it (loaded lazily from the run's assets/). */
+.q-open-hint { color: #9fd0ff; font-style: italic; }
+.q-lb-open { overflow: hidden; }   /* freeze the page behind the modal */
+.q-lightbox {
+  position: fixed; inset: 0; z-index: 1000; display: flex; padding: 2.5vh 2vw;
+  background: rgba(15, 17, 21, .8); overflow: auto;
+}
+.q-lb-dialog {
+  margin: auto; width: min(1500px, 96vw); max-height: 95vh; display: flex;
+  flex-direction: column; background: #fff; border-radius: 10px; overflow: hidden;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, .4);
+}
+.q-lb-head {
+  position: sticky; top: 0; display: flex; align-items: center; gap: 1rem;
+  justify-content: space-between; padding: .7rem 1rem; border-bottom: 1px solid #e3e3e3;
+  background: #fafafa;
+}
+.q-lb-title { margin: 0; font-size: 1rem; }
+.q-lb-actions { display: flex; align-items: center; gap: .5rem; flex: 0 0 auto; }
+.q-lb-toggle, .q-lb-close {
+  font: inherit; font-size: .85rem; border: 1px solid #bbb; background: #fff; color: #1a1a1a;
+  border-radius: 6px; padding: .3rem .7rem; cursor: pointer;
+}
+.q-lb-toggle:hover, .q-lb-close:hover { background: #f0f0f0; }
+.q-lb-toggle[aria-pressed="true"] { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+.q-lb-close { font-weight: 700; line-height: 1; padding: .3rem .55rem; }
+.q-lb-grid {
+  display: grid; gap: .9rem; padding: 1rem; overflow: auto;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+.q-lb-fig { margin: 0; display: flex; flex-direction: column; gap: .3rem; }
+.q-lb-fig img {
+  width: 100%; height: auto; max-height: 60vh; object-fit: contain;
+  background: #f0f0f0 repeating-conic-gradient(#e6e6e6 0% 25%, #f4f4f4 0% 50%) 0 0 / 18px 18px;
+  border: 1px solid #ddd; border-radius: 4px;
+}
+.q-lb-cap { font-size: .74rem; color: #555; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.q-lb-cap .k { color: #222; font-weight: 600; }
+.q-lb-err {
+  border: 1px dashed #c9a100; background: #fffaf0; color: #5c4a00;
+  border-radius: 4px; padding: 1.2rem .8rem; font-size: .8rem; text-align: center;
+}
+.q-chart svg[tabindex]:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.q-lb-toggle:focus-visible, .q-lb-close:focus-visible {
+  outline: 2px solid #2563eb; outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
