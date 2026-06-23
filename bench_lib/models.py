@@ -1,6 +1,7 @@
 """Enums, Pydantic models, constants, type aliases, and helpers."""
 
 import os
+import re
 import secrets
 import shlex
 import threading
@@ -1444,6 +1445,25 @@ def quality_label(axis: str, value: str) -> str:
     return f"{axis}-{value}"
 
 
+def slug(text: str) -> str:
+    """Normalize a token into a deterministic, filesystem- and URL-safe slug:
+    lowercase, every run of characters outside ``[a-z0-9._-]`` collapsed to a
+    single ``-``, leading/trailing ``-`` trimmed. Stable for a given input, so
+    the same (impl, label, image) always maps to the same report-asset path.
+
+    Operating-point labels (``quality-80``, ``distance-1.0``, ``lossless``) and
+    most impl names are already nearly slug-safe; this mainly maps a variant's
+    ``@`` separator (e.g. ``libjxl-encode@progressive``) to ``-``."""
+    return re.sub(r"[^a-z0-9._-]+", "-", text.lower()).strip("-") or "x"
+
+
+def image_slug(source_path: str) -> str:
+    """Deterministic per-image slug from a source path's stem. Corpus sources
+    are content-hash-named, so this is stable regardless of dataset ordering
+    (unlike a running index, which shifts when the sample set changes)."""
+    return slug(os.path.splitext(os.path.basename(source_path))[0])
+
+
 def select_sweep(sweep: list[str], steps: Optional[int]) -> list[str]:
     """Pick `steps` evenly-spaced values from `sweep` (always including the
     first and last). `None` keeps the full sweep; values >= len keep all."""
@@ -1820,6 +1840,39 @@ class BenchmarkTask(BaseModel):
         else:
             return self.impl.format
 
+    def asset_relpath(self) -> Optional[str]:
+        """Bundle-root-relative path where this result's *exact* encoded artifact
+        is persisted for the report's image gallery (``None`` for a null /
+        unformatted task). The directory groups exactly by a chart data point's
+        ``(format, impl, label)``::
+
+            encode: assets/<fmt>/<impl>/<label>/<image>.<ext>   # the produced output
+            decode: assets/<fmt>/_inputs/<label>/<image>.<ext>  # the consumed input
+
+        A decode point's image is the bitstream it decoded, which is identical
+        across every decoder of that input, so decode rows share one ``_inputs``
+        file (deduped) rather than one copy per decoder.
+
+        Deterministic, unlike :func:`identifier` — whose random suffix exists
+        only to keep per-task temp deletion race-free."""
+        if self.impl.format is None:
+            return None
+        fmt = self.impl.format.value
+        img = image_slug(self.source_path)
+        label = slug(self.label)
+        if self.impl.type == BenchmarkType.DECODE:
+            ext = os.path.splitext(self.input_path)[1].lstrip(".") or "bin"
+            return f"assets/{fmt}/_inputs/{label}/{img}.{ext}"
+        ext = FORMAT_EXT_MAP[self.impl.format]
+        return f"assets/{fmt}/{slug(self.impl.name)}/{label}/{img}.{ext}"
+
+    def source_asset_relpath(self) -> str:
+        """Bundle-root-relative path for this task's original source image,
+        stored once per image so the gallery can toggle original vs.
+        reconstruction. The codecs' actual input is the canonical PPM; it is
+        published here losslessly as PNG so a browser can render it."""
+        return f"assets/_sources/{image_slug(self.source_path)}.png"
+
     def cmd(
         self,
         output_path: str,
@@ -1966,3 +2019,10 @@ class BenchmarkMetrics(TypedDict):
     # byte offset of the first differing sample, and the count of differing bytes.
     bit_exact_first_diff: Optional[int]
     bit_exact_diff_count: Optional[int]
+    # Bundle-root-relative paths to the images backing this data point in the
+    # report gallery (see BenchmarkTask.asset_relpath / source_asset_relpath):
+    # the exact encoded artifact for this result (encoder output, or — for a
+    # decoder — the bitstream it decoded) and the original source image. Both
+    # None when image capture is off (--no-report-images) or the row errored.
+    asset_path: Optional[str]
+    source_asset: Optional[str]
