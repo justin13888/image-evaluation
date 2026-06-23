@@ -26,6 +26,8 @@ from colorama import Fore, Style
 from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
+from bench_lib.imageprep import single_thread_env as _single_thread_env
+from bench_lib.imageprep import to_canonical_ppm
 from bench_lib.models import (
     DATASETS,
     FORMAT_EXT_MAP,
@@ -97,13 +99,6 @@ INPUT_FILES_CACHE: Dict[
     tuple[DatasetId, ImageFormats, Optional[int]],
     Sequence[tuple[str, str]],
 ] = {}
-
-
-def _single_thread_env() -> Dict[str, str]:
-    """Process environment that pins rayon-/OMP-based codecs (and iqa-cli) to a
-    single thread, so a parallel pool of one-thread tasks saturates the CPU
-    without oversubscribing it."""
-    return {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
 
 
 def _generate_intermediates_parallel(
@@ -266,33 +261,14 @@ def get_input_files(
 
 
 def _source_to_ppm(f: str) -> str:
-    """Return an 8-bit P6 PPM path for source `f`, generating it via ImageMagick
-    if `f` is not already a PPM (forced 8-bit, since not every implementation
-    handles 16-bit PPM).
-
-    The conversion goes to a unique temp file that is atomically `os.replace`d
-    onto the canonical path, so a concurrent reader (the parallel pre-generation
-    pool) never observes a half-written PPM. The temp name carries no `.ppm`
-    extension, so the output format is forced with ImageMagick's `ppm:` prefix
-    rather than inferred from the suffix."""
+    """Return an 8-bit P6 PPM path for source `f` (no resize), generating it via
+    the shared canonicalizer if `f` is not already a PPM. The full-resolution
+    counterpart of the scaling/effort downscale, routed through the same
+    :func:`to_canonical_ppm` so every sweep prepares inputs identically."""
     if f.lower().endswith(".ppm"):
         return f
-    base = os.path.splitext(f)[0]
-    ppm = f"{base}.ppm"
-    if not os.path.exists(ppm):
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ppm) or ".", suffix=".tmp")
-        os.close(fd)
-        try:
-            subprocess.run(
-                ["convert", f, "-depth", "8", f"ppm:{tmp}"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            os.replace(tmp, ppm)
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+    ppm = f"{os.path.splitext(f)[0]}.ppm"
+    to_canonical_ppm(f, ppm)
     return ppm
 
 
