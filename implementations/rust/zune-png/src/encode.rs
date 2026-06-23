@@ -8,7 +8,6 @@ struct BenchContext {
     input_data: Vec<u8>,
     width: usize,
     height: usize,
-    effort: u8,
 }
 
 impl BenchmarkImplementation for ZunePngBench {
@@ -23,14 +22,15 @@ impl BenchmarkImplementation for ZunePngBench {
         let height = h as usize;
         let input_data = rgb;
 
-        // zlib compression effort (0-9). PNG is lossless; no quality axis.
-        let effort = args.param_u32("effort", 4) as u8;
+        // No tunables: zune-png's encoder (<=0.5.2, via zune-inflate <=0.2.54) writes
+        // STORED/uncompressed DEFLATE blocks and ignores EncoderOptions::effort, so there
+        // is no compression knob to sweep. Output is ~24 bpp (raw 8-bit RGB) and is
+        // reported as a single lossless operating point (see bench_lib/models.py).
 
         Ok(Box::new(BenchContext {
             input_data,
             width,
             height,
-            effort,
         }))
     }
 
@@ -44,8 +44,7 @@ impl BenchmarkImplementation for ZunePngBench {
             ctx.height,
             zune_core::colorspace::ColorSpace::RGB,
             zune_core::bit_depth::BitDepth::Eight,
-        )
-        .set_effort(ctx.effort);
+        );
 
         let mut encoder = PngEncoder::new(&ctx.input_data, options);
 
