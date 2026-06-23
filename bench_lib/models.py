@@ -1725,11 +1725,39 @@ class DocsArgs(BaseModel):
     ] = False
 
 
+class ReportArgs(BaseModel):
+    """Rebuild ``report.html`` for an EXISTING results bundle from its raw metrics,
+    without re-running the (expensive) benchmark. Only the presentation is rebuilt;
+    the embedded raw measurements are reused exactly as they are on disk.
+
+    DANGER: this assumes the bundle's raw data was produced by a codebase
+    compatible with the *current* report code. If the metrics schema or a codec's
+    behaviour changed since the bundle was made, the regenerated graphs can be
+    silently wrong. Re-run a full sweep if in doubt. Requires the
+    ``--assume-results-current`` opt-in (or an interactive confirmation)."""
+
+    directory: Annotated[
+        str,
+        tyro.conf.Positional,
+        Field(description="Path to an existing results bundle directory."),
+    ]
+    assume_results_current: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Confirm you understand this ONLY rebuilds the HTML from "
+            "reused raw metrics and assumes the codebase/results still match. "
+            "Without it you are prompted interactively."
+        ),
+    ] = False
+
+
 CliEntry = Union[
     Annotated[RunArgs, tyro.conf.subcommand(name="run")],
     Annotated[QualityArgs, tyro.conf.subcommand(name="quality")],
     Annotated[PerfArgs, tyro.conf.subcommand(name="perf")],
     Annotated[AllArgs, tyro.conf.subcommand(name="all")],
+    Annotated[ReportArgs, tyro.conf.subcommand(name="report")],
     Annotated[CleanArgs, tyro.conf.subcommand(name="clean")],
     Annotated[CompileArgs, tyro.conf.subcommand(name="compile")],
     Annotated[SetupArgs, tyro.conf.subcommand(name="setup")],

@@ -52,6 +52,7 @@ from bench_lib.models import (
     LOSSLESS_REFERENCE_ENCODERS,
     PerfMode,
     PPMImageFormat,
+    ReportArgs,
     RunArgs,
     SetupArgs,
     TunableSchema,
@@ -65,7 +66,7 @@ from bench_lib.effort import (
     prepare_effort_images,
     write_effort_outputs,
 )
-from bench_lib.report import generate_report_html
+from bench_lib.report import _git_info, generate_report_html
 from bench_lib.scaling import (
     SCALING_HYPERFINE_FLAGS,
     SCALING_LADDER_MP,
@@ -1823,6 +1824,89 @@ def _abort_on_quality_failures(failures: list[str], bundle: str):
         print(f"  {Fore.RED}✗{Style.RESET_ALL} {name}")
     print()
     sys.exit(1)
+
+
+def _report_reuse_banner(bundle_dir: str) -> None:
+    """Print a loud warning that ``bench report`` only re-skins existing raw data,
+    and surface the bundle's recorded commit against the current HEAD so any
+    codebase drift is visible before the (reused) graphs are trusted."""
+    print(f"\n{Fore.YELLOW}{'=' * 70}")
+    print("REGENERATING HTML ONLY — NO BENCHMARK IS RE-RUN")
+    print(f"{'=' * 70}{Style.RESET_ALL}")
+    print(
+        "This rebuilds report.html from the raw metrics already in the bundle. "
+        "Those measurements were produced by whatever codebase made the bundle; "
+        "the regenerated graphs ASSUME that data still matches the current report "
+        "code and codec behaviour. If anything relevant changed, the charts can be "
+        f"{Fore.YELLOW}silently wrong{Style.RESET_ALL} — re-run a full sweep if in doubt."
+    )
+    bundle_git = _git_info(bundle_dir) or {}
+    bundle_commit = str(bundle_git.get("commit") or "")
+    current = get_git_info() or {}
+    current_commit = str(current.get("commit") or "")
+    if bundle_commit:
+        same = bundle_commit == current_commit
+        marker = (
+            f"{Fore.GREEN}(matches current HEAD){Style.RESET_ALL}"
+            if same
+            else f"{Fore.RED}(differs from current HEAD!){Style.RESET_ALL}"
+        )
+        print(
+            f"\n  bundle commit : {bundle_commit[:12]}"
+            f"{' · dirty' if bundle_git.get('dirty') else ''} {marker}"
+        )
+        print(
+            f"  current HEAD  : {current_commit[:12] or 'unknown'}"
+            f"{' · dirty' if current.get('dirty') else ''}"
+        )
+    else:
+        print(
+            f"\n  {Fore.YELLOW}This bundle records no git commit — its provenance "
+            f"is unknown.{Style.RESET_ALL}"
+        )
+    print()
+
+
+def run_report(args: ReportArgs) -> None:
+    """Rebuild ``report.html`` for an existing bundle from its raw metrics, without
+    re-running anything (issue: cheap report iteration on expensive results).
+
+    Reuses the single HTML entrypoint ``generate_report_html`` (the same call
+    ``_finalize_bundle`` makes), so there is no duplicate report logic — this only
+    adds the safety rail around it."""
+    bundle = os.path.abspath(args.directory)
+    if not os.path.isdir(bundle):
+        print(f"{Fore.RED}Error: not a directory: {bundle}{Style.RESET_ALL}")
+        sys.exit(1)
+    # A real bundle always has the quality suite (the metric pass always runs) or
+    # at least a top-level manifest; reject anything else early.
+    looks_like_bundle = os.path.exists(
+        os.path.join(bundle, "quality", "metrics.json")
+    ) or os.path.exists(os.path.join(bundle, "manifest.json"))
+    if not looks_like_bundle:
+        print(
+            f"{Fore.RED}Error: {bundle} does not look like a results bundle "
+            f"(no quality/metrics.json or manifest.json).{Style.RESET_ALL}"
+        )
+        sys.exit(1)
+
+    _report_reuse_banner(bundle)
+    if not args.assume_results_current:
+        try:
+            answer = (
+                input("Regenerate report.html from this reused data? [y/N] ")
+                .strip()
+                .lower()
+            )
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted (pass --assume-results-current to skip this prompt).")
+            sys.exit(1)
+
+    generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    report_path = generate_report_html(bundle, generated_at=generated_at)
+    print(f"\n✓ Report regenerated: {report_path}")
 
 
 def run_compile(args: CompileArgs):
