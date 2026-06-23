@@ -1,13 +1,20 @@
 /* Interactive quality report. Reads the raw metrics embedded in report.html
-   (#quality-metrics) and draws rate-distortion curves as inline SVG — no
-   third-party library, no network. Everything is recomputed in the browser, so
-   the embedded data is the single source of truth.
+   (#quality-metrics) and draws charts as inline SVG — no third-party library, no
+   network. Everything is recomputed in the browser, so the embedded data is the
+   single source of truth.
 
-   Charts:
-     - one rate-distortion chart per format (all encoders), and
-     - a combined chart overlaying the Pareto-front encoders of every format.
-   Plus a sortable BD-rate table. Metric (SSIMULACRA2 / PSNR / SSIM /
-   Butteraugli) and linear/log-x are global toggles. */
+   Layout:
+     - A "view" preset (<select>) picks the X axis shared by every chart: quality
+       vs size (bpp), vs encode time, or vs decode time. Y is always an IQA metric.
+     - Rate-distortion charts live in per-format TABS (plus a cross-format Pareto
+       tab); each tab stacks one full-width chart per metric.
+     - A filter matrix toggles which metrics and which implementations are shown.
+     - Below the tabs: lossless compression efficiency, decoder fidelity/speed, and
+       a sortable BD-rate table.
+   Accessibility: the tabs are a real ARIA tablist (roving tabindex + arrow keys),
+   the view picker is a native <select> (Alt+[ / Alt+] also step it), the filter
+   matrix uses fieldset/legend groups, charts expose role=img + <title>, and view
+   changes are announced via an aria-live region. */
 (function () {
   "use strict";
 
@@ -28,7 +35,7 @@
   // { impl: {format, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
   var LOSSLESS = readJSON("quality-lossless") || {};
   // Precomputed decoder fidelity/speed summary:
-  // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, points} }.
+  // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, basis, points} }.
   var DECODERS = readJSON("quality-decoders") || {};
 
   // Each metric's y-axis is anchored to the metric's *known* range rather than to
@@ -39,24 +46,32 @@
   //              out-of-band points on screen (never clips).
   //   hardLo/hi  absolute theoretical bound the axis must never cross (null =
   //              that side is unbounded, so it tracks the data).
-  // SSIMULACRA2: ≤100 (100=perfect; 90 visually-lossless, 70 high, 50 medium,
-  // 30 low), unbounded below. SSIM: 0..1. PSNR: dB, ≥0, no fixed ceiling.
-  // Butteraugli: ≥0 (0=identical), no fixed ceiling.
   var METRIC_INFO = {
     ssimulacra2: { key: "ssimulacra2", name: "SSIMULACRA2", y: "SSIMULACRA2 (higher is better)", lo: 0, hi: 100, hardLo: null, hardHi: 100 },
     psnr: { key: "psnr", name: "PSNR", y: "PSNR dB (higher is better)", lo: 20, hi: 50, hardLo: 0, hardHi: null },
     ssim: { key: "ssim", name: "SSIM", y: "SSIM (higher is better)", lo: 0, hi: 1, hardLo: 0, hardHi: 1 },
     butteraugli: { key: "butteraugli", name: "Butteraugli", y: "Butteraugli (lower is better)", lo: 0, hi: 3, hardLo: 0, hardHi: null },
   };
+  var METRIC_ORDER = ["ssimulacra2", "psnr", "ssim", "butteraugli"];
 
-  // showTime: per-section toggles (issue #46) — whether encode/decode time is
-  // visualised (bubble size on the rate-distortion/lossless charts, the
-  // speed-vs-bitrate scatter for decoders). Default on; flipped per section.
+  // Numeric axes aggregated per operating point so any of them can be an axis.
+  var AXIS_KEYS = ["bpp", "ssimulacra2", "psnr", "ssim", "butteraugli", "time_s", "decode_time_s"];
+
+  // X-axis descriptors used by the view presets. `log` is the default scale.
+  var X_AXES = {
+    bpp: { key: "bpp", name: "bpp", title: "Bits per pixel (bpp)", fmt: fmtNum },
+    time_s: { key: "time_s", name: "encode time", title: "Encode time (s)", fmt: fmtTime },
+    decode_time_s: { key: "decode_time_s", name: "decode time", title: "Decode time (s)", fmt: fmtTime },
+  };
+
+  // state
   var state = {
-    metric: "ssimulacra2", xscale: "linear",
+    presetIdx: 0,
+    tab: null,                 // set after PRESETS/TABS resolve
+    metricsOn: {},             // metric key -> bool (shown)
+    implsOff: {},              // impl name -> true (hidden globally)
     showTime: { rd: true, lossless: true, decoder: true },
   };
-  var HIDDEN = {}; // chartId -> Set of hidden series keys (persisted across re-renders)
 
   // ---- data helpers --------------------------------------------------------
 
@@ -75,37 +90,56 @@
     });
   }
 
-  // Aggregate to one mean point per (format, impl, quality-step) across images.
-  // Points whose chosen metric is non-finite (e.g. null PSNR) are skipped.
-  // Returns { fmt: [ {impl, points:[{x,y,label,q,count}]} ] }.
-  function aggregate(rows, metric) {
+  // Aggregate to one mean point per (format, impl, quality-step) across images,
+  // computing the mean (and population std) of EVERY numeric axis at once so a
+  // chart can plot any (x, y) pair without re-aggregating.
+  // Returns { fmt: [ {impl, points:[{label,q,count,m:{axis:mean},sd:{axis:std}}]} ] }.
+  function aggregateAll(rows) {
     var byFmt = {};
     rows.forEach(function (m) {
-      var y = m[metric];
-      if (!isNum(y)) return;
       var impls = (byFmt[m.format] = byFmt[m.format] || {});
       var steps = (impls[m.impl] = impls[m.impl] || {});
-      var s = (steps[m.label] = steps[m.label] ||
-        { bpp: 0, y: 0, y2: 0, n: 0, t: 0, label: m.label, q: m.quality_value });
-      s.bpp += m.bpp; s.y += y; s.y2 += y * y; s.n += 1;
-      s.t += isNum(m.time_s) ? m.time_s : 0;
+      var s = (steps[m.label] = steps[m.label] || { label: m.label, q: m.quality_value, n: 0, acc: {} });
+      s.n += 1;
+      AXIS_KEYS.forEach(function (k) {
+        var v = m[k];
+        if (!isNum(v)) return;
+        var a = s.acc[k] || (s.acc[k] = { sum: 0, sq: 0, n: 0 });
+        a.sum += v; a.sq += v * v; a.n += 1;
+      });
     });
     var out = {};
     Object.keys(byFmt).forEach(function (fmt) {
       out[fmt] = Object.keys(byFmt[fmt]).sort().map(function (impl) {
         var steps = byFmt[fmt][impl];
         var points = Object.keys(steps).map(function (k) {
-          var s = steps[k];
-          var mean = s.y / s.n;
-          // Population std of the metric across images at this operating point —
-          // 0 for a single image. Conveys how much the mean curve summarises.
-          var std = s.n > 1 ? Math.sqrt(Math.max(0, s.y2 / s.n - mean * mean)) : 0;
-          return { x: s.bpp / s.n, y: mean, std: std, label: s.label, q: s.q, count: s.n, t: s.t / s.n };
-        }).sort(function (a, b) { return a.x - b.x; });
+          var s = steps[k], mean = {}, sd = {};
+          Object.keys(s.acc).forEach(function (ax) {
+            var a = s.acc[ax], mu = a.sum / a.n;
+            mean[ax] = mu;
+            sd[ax] = a.n > 1 ? Math.sqrt(Math.max(0, a.sq / a.n - mu * mu)) : 0;
+          });
+          return { label: s.label, q: s.q, count: s.n, m: mean, sd: sd };
+        });
         return { impl: impl, points: points };
-      }).filter(function (s) { return s.points.length > 0; });
+      });
     });
     return out;
+  }
+
+  // Metrics that actually carry finite encode data. SSIMULACRA2 always present
+  // (it gates validRows); the rest appear only when measured. Order follows
+  // METRIC_ORDER.
+  function availableMetrics() {
+    function hasMetric(key) {
+      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.lossless && !m.error; });
+    }
+    return METRIC_ORDER.filter(function (k) { return k === "ssimulacra2" || hasMetric(k); });
+  }
+  // Whether any lossy encode row carries a finite value for an X axis (so the
+  // matching preset is worth offering).
+  function hasAxisData(key) {
+    return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.lossless && !m.error; });
   }
 
   // ---- scales / ticks ------------------------------------------------------
@@ -144,36 +178,43 @@
     if (a >= 1) return v.toFixed(2);
     return v.toFixed(3);
   }
-  // Single-pass wall-clock seconds -> compact human string for tooltips.
+  // Single-pass wall-clock seconds -> compact human string for tooltips/ticks.
   function fmtTime(s) {
     if (s >= 100) return s.toFixed(0) + " s";
     if (s >= 1) return s.toFixed(2) + " s";
     return (s * 1000).toFixed(0) + " ms";
   }
 
-  // ---- chart rendering -----------------------------------------------------
+  // ---- tiny DOM helper -----------------------------------------------------
 
-  var VBW = 840, VBH = 460, ML = 66, MR = 18, MT = 14, MB = 54;
-  var X0 = ML, X1 = VBW - MR, Y0 = MT, Y1 = VBH - MB;
-
+  function el(tag, attrs, text) {
+    var e = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      if (attrs[k] != null) e.setAttribute(k, attrs[k]);
+    });
+    if (text != null) e.textContent = text;
+    return e;
+  }
   function esc(s) {
     return String(s).replace(/[&<>"]/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
     });
   }
+  function announce(msg) {
+    var st = document.getElementById("q-status");
+    if (st) st.textContent = msg;
+  }
 
-  // ---- time bubble sizing (issue #46) --------------------------------------
+  // ---- chart geometry / time bubbles --------------------------------------
+
+  var VBW = 1100, VBH = 460, ML = 70, MR = 20, MT = 16, MB = 56;
+  var X0 = ML, X1 = VBW - MR, Y0 = MT, Y1 = VBH - MB;
 
   var PT_R = 4.5;                 // uniform point radius (time dimension off)
   var BUB_RMIN = 3, BUB_RMAX = 14;
 
-  // Build a time -> radius scale over the given points' mean time (p.t). Area is
-  // ~proportional to time (radius ∝ √time), so a 4× slower point reads ~2× wider.
-  // Returns null when there is nothing to encode — no point carries a positive
-  // time, or every time is equal — and callers then fall back to the uniform
-  // PT_R. The scale is per-chart: times span ms→s across formats, so a shared
-  // scale would shrink the fast formats to dots; the size legend states the
-  // mapping for each chart and the tooltip always gives the exact value.
+  // Build a time -> radius scale over the given points' mean encode time (p.t).
+  // Area ~proportional to time (radius ∝ √time). Null when nothing to encode.
   function timeScale(points) {
     var ts = [];
     points.forEach(function (p) { if (isNum(p.t) && p.t > 0) ts.push(p.t); });
@@ -191,14 +232,11 @@
     };
   }
 
-  // Reference-bubble legend (HTML, sized in px) explaining a chart's time scale.
-  // The middle reference is the geometric mean so it sits visually between the
-  // extremes on the √ scale.
   function sizeLegendHTML(scale, label) {
     var refs = [scale.tmin, Math.sqrt(scale.tmin * scale.tmax), scale.tmax];
     var d = 2 * BUB_RMAX + 2;
     var items = refs.map(function (t) {
-      return '<span class="q-size-item"><svg width="' + d + '" height="' + d +
+      return '<span class="q-size-item"><svg aria-hidden="true" width="' + d + '" height="' + d +
         '" viewBox="0 0 ' + d + " " + d + '"><circle cx="' + (d / 2) + '" cy="' +
         (d / 2) + '" r="' + scale.r(t).toFixed(1) + '" class="q-size-bub"/></svg>' +
         esc(fmtTime(t)) + "</span>";
@@ -208,26 +246,20 @@
   }
 
   // SVG path through screen-space points [{x,y}] (sorted by x) as a smooth cubic
-  // spline. Uses monotone cubic Hermite interpolation (Fritsch–Carlson tangents,
-  // like d3 curveMonotoneX) emitted as cubic Béziers: no overshoot, so the curve
-  // never bulges past a measured point or implies a sample between data points
-  // that wasn't benchmarked. Falls back to a straight segment where it can't spline.
+  // spline (Fritsch–Carlson monotone tangents, like d3 curveMonotoneX): no
+  // overshoot, so the curve never implies a sample between data points.
   function smoothPath(pts) {
     var n = pts.length;
     if (n === 0) return "";
     var p = function (q) { return q.x.toFixed(1) + " " + q.y.toFixed(1); };
     if (n === 1) return "M" + p(pts[0]) + " ";
     if (n === 2) return "M" + p(pts[0]) + " L" + p(pts[1]) + " ";
-    // Secant slopes between consecutive points.
     var dx = [], dy = [], m = [];
     for (var i = 0; i < n - 1; i++) {
       dx[i] = pts[i + 1].x - pts[i].x;
       dy[i] = pts[i + 1].y - pts[i].y;
       m[i] = dx[i] !== 0 ? dy[i] / dx[i] : 0;
     }
-    // Monotone tangents (Fritsch–Carlson): endpoints take the adjacent secant,
-    // interior points average neighbours but are zeroed at local extrema and
-    // limited to keep the interpolant monotone (and thus overshoot-free).
     var t = [m[0]];
     for (var j = 1; j < n - 1; j++) {
       if (m[j - 1] * m[j] <= 0) { t[j] = 0; }
@@ -238,7 +270,6 @@
       }
     }
     t[n - 1] = m[n - 2];
-    // Cubic Bézier per interval; control points at ±1/3 of the span along tangents.
     var d = "M" + p(pts[0]) + " ";
     for (var k = 0; k < n - 1; k++) {
       if (dx[k] === 0) { d += "L" + p(pts[k + 1]) + " "; continue; }
@@ -250,128 +281,109 @@
     return d;
   }
 
-  // series: [{key,label,color,dash?,points:[{x,y,label,q,count}]}]
-  function renderRDChart(container, series, chartId, metric, showTime) {
-    var hidden = HIDDEN[chartId] || (HIDDEN[chartId] = {});
-    var info = METRIC_INFO[metric];
-    var log = state.xscale === "log";
-    var vis = series.filter(function (s) { return !hidden[s.key]; });
+  // ---- generalized X/Y chart ----------------------------------------------
+
+  // series: [{key,label,color,dash?,points:[{x,y,std,t,step,q,count}]}]
+  // opts: {xLog, xAxis (X_AXES entry), yInfo (METRIC_INFO entry), showTime, title}
+  function renderXYChart(container, series, opts) {
+    var info = opts.yInfo, xAxis = opts.xAxis, log = !!opts.xLog;
+    var showTime = opts.showTime && xAxis.key === "bpp"; // time-as-bubble only on size charts
+    var vis = series.filter(function (s) { return !state.implsOff[s.implName]; });
     container._hits = [];
-    // Encode-time bubble scale over visible points (null => uniform PT_R).
+
     var visPts = [];
     vis.forEach(function (s) { s.points.forEach(function (p) { visPts.push(p); }); });
     var scale = showTime ? timeScale(visPts) : null;
 
-    // domain over visible points
     var xs = [], ys = [];
-    vis.forEach(function (s) {
-      s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); });
-    });
+    vis.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
+    var ariaLabel = info.name + " versus " + xAxis.name + (opts.title ? " — " + opts.title : "");
     var plotHTML;
     if (!xs.length) {
-      plotHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
-        '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
-        '" text-anchor="middle" class="q-tick">All series hidden</text></svg></div>';
-    } else {
-      var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
-      var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
-      var xticks, dxmin, dxmax;
-      if (log) {
-        if (xmin <= 0) xmin = 1e-6;
-        dxmin = xmin * 0.9; dxmax = xmax * 1.1;
-        xticks = logTicks(dxmin, dxmax);
-      } else {
-        xticks = linTicks(xmin, xmax, 6);
-        dxmin = Math.min(xmin, xticks[0]); dxmax = Math.max(xmax, xticks[xticks.length - 1]);
-      }
-      // Metric (y) axis: anchor to the metric's known range, expanding only to
-      // fit out-of-band points, then clamp to the theoretical bounds. This keeps
-      // the axis identical across charts/formats and single-image vs dataset.
-      var ylo = (info.lo != null) ? Math.min(info.lo, ymin) : ymin;
-      var yhi = (info.hi != null) ? Math.max(info.hi, ymax) : ymax;
-      if (info.hardLo != null) ylo = Math.max(ylo, info.hardLo);
-      if (info.hardHi != null) yhi = Math.min(yhi, info.hardHi);
-      var yticks = linTicks(ylo, yhi, 6);
-      var dymin = Math.min(ylo, yticks[0]), dymax = Math.max(yhi, yticks[yticks.length - 1]);
-      if (info.hardLo != null) dymin = Math.max(dymin, info.hardLo);
-      if (info.hardHi != null) dymax = Math.min(dymax, info.hardHi);
-      if (dymax === dymin) dymax = dymin + 1;
-
-      var lx0 = log ? Math.log10(dxmin) : dxmin, lx1 = log ? Math.log10(dxmax) : dxmax;
-      function sx(x) {
-        var t = ((log ? Math.log10(x) : x) - lx0) / (lx1 - lx0 || 1);
-        return X0 + t * (X1 - X0);
-      }
-      function sy(y) { return Y1 - (y - dymin) / (dymax - dymin) * (Y1 - Y0); }
-
-      var svg = [];
-      // gridlines + ticks
-      xticks.forEach(function (t) {
-        if (t < dxmin - 1e-9 || t > dxmax + 1e-9) return;
-        var x = sx(t).toFixed(1);
-        svg.push('<line class="q-grid" x1="' + x + '" y1="' + Y0 + '" x2="' + x + '" y2="' + Y1 + '"/>');
-        svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + esc(fmtNum(t)) + "</text>");
-      });
-      yticks.forEach(function (t) {
-        if (t < dymin - 1e-9 || t > dymax + 1e-9) return;
-        var y = sy(t).toFixed(1);
-        svg.push('<line class="q-grid" x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '"/>');
-        svg.push('<text class="q-tick" x="' + (X0 - 8) + '" y="' + (+y + 4) + '" text-anchor="end">' + esc(fmtNum(t)) + "</text>");
-      });
-      // axes
-      svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
-      svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
-      // axis titles
-      svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Bits per pixel (bpp)' + (log ? " — log" : "") + "</text>");
-      svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">' + esc(info.y) + "</text>");
-
-      // series + collect hit-test points
-      var hits = [];
-      vis.forEach(function (s) {
-        var pts = [];
-        s.points.forEach(function (p) {
-          var px = sx(p.x), py = sy(p.y);
-          pts.push({ x: px, y: py });
-          var r = scale ? scale.r(p.t) : PT_R;
-          hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.label, count: p.count, std: p.std, t: p.t });
-        });
-        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
-        s.points.forEach(function (p) {
-          var r = scale ? scale.r(p.t) : PT_R;
-          svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
-        });
-      });
-      svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
-
-      plotHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
-        '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>";
-      container._hits = hits;
+      plotHTML = '<div class="q-plot"><svg role="img" aria-label="' + esc(ariaLabel) +
+        ' (no data)" viewBox="0 0 ' + VBW + " " + VBH + '"><title>' + esc(ariaLabel) +
+        '</title><text x="' + VBW / 2 + '" y="' + VBH / 2 +
+        '" text-anchor="middle" class="q-tick">No data for this view</text></svg></div>';
+      container.innerHTML = plotHTML;
+      return;
     }
+    var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+    var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
+    var xticks, dxmin, dxmax;
+    if (log) {
+      if (xmin <= 0) xmin = 1e-6;
+      dxmin = xmin * 0.9; dxmax = xmax * 1.1;
+      xticks = logTicks(dxmin, dxmax);
+    } else {
+      xticks = linTicks(xmin, xmax, 6);
+      dxmin = Math.min(xmin, xticks[0]); dxmax = Math.max(xmax, xticks[xticks.length - 1]);
+    }
+    var ylo = (info.lo != null) ? Math.min(info.lo, ymin) : ymin;
+    var yhi = (info.hi != null) ? Math.max(info.hi, ymax) : ymax;
+    if (info.hardLo != null) ylo = Math.max(ylo, info.hardLo);
+    if (info.hardHi != null) yhi = Math.min(yhi, info.hardHi);
+    var yticks = linTicks(ylo, yhi, 6);
+    var dymin = Math.min(ylo, yticks[0]), dymax = Math.max(yhi, yticks[yticks.length - 1]);
+    if (info.hardLo != null) dymin = Math.max(dymin, info.hardLo);
+    if (info.hardHi != null) dymax = Math.min(dymax, info.hardHi);
+    if (dymax === dymin) dymax = dymin + 1;
 
-    // legend
-    var chips = series.map(function (s) {
-      return '<span class="q-chip' + (hidden[s.key] ? " off" : "") + '" data-key="' + esc(s.key) +
-        '"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.label) + "</span>";
-    }).join("");
+    var lx0 = log ? Math.log10(dxmin) : dxmin, lx1 = log ? Math.log10(dxmax) : dxmax;
+    function sx(x) {
+      var t = ((log ? Math.log10(x) : x) - lx0) / (lx1 - lx0 || 1);
+      return X0 + t * (X1 - X0);
+    }
+    function sy(y) { return Y1 - (y - dymin) / (dymax - dymin) * (Y1 - Y0); }
 
-    container.innerHTML = plotHTML + '<div class="q-legend">' + chips + "</div>" +
-      (scale ? sizeLegendHTML(scale, "encode time") : "") +
-      '<div class="q-tooltip" hidden></div>';
+    var svg = [];
+    xticks.forEach(function (tk) {
+      if (tk < dxmin - 1e-9 || tk > dxmax + 1e-9) return;
+      var x = sx(tk).toFixed(1);
+      svg.push('<line class="q-grid" x1="' + x + '" y1="' + Y0 + '" x2="' + x + '" y2="' + Y1 + '"/>');
+      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + esc(xAxis.fmt(tk)) + "</text>");
+    });
+    yticks.forEach(function (tk) {
+      if (tk < dymin - 1e-9 || tk > dymax + 1e-9) return;
+      var y = sy(tk).toFixed(1);
+      svg.push('<line class="q-grid" x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '"/>');
+      svg.push('<text class="q-tick" x="' + (X0 - 8) + '" y="' + (+y + 4) + '" text-anchor="end">' + esc(fmtNum(tk)) + "</text>");
+    });
+    svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
+    svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
+    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + "</text>");
+    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">' + esc(info.y) + "</text>");
 
-    // legend toggles
-    container.querySelectorAll(".q-chip").forEach(function (chip) {
-      chip.addEventListener("click", function () {
-        var k = chip.getAttribute("data-key");
-        if (hidden[k]) delete hidden[k]; else hidden[k] = 1;
-        renderRDChart(container, series, chartId, metric, showTime);
+    var hits = [];
+    vis.forEach(function (s) {
+      var pts = [];
+      s.points.forEach(function (p) {
+        var px = sx(p.x), py = sy(p.y);
+        pts.push({ x: px, y: py });
+        var r = scale ? scale.r(p.t) : PT_R;
+        hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.step, count: p.count, std: p.std, t: p.t });
+      });
+      svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+      s.points.forEach(function (p) {
+        var r = scale ? scale.r(p.t) : PT_R;
+        svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
       });
     });
+    svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
+
+    plotHTML = '<div class="q-plot"><svg role="img" aria-label="' + esc(ariaLabel) +
+      '" viewBox="0 0 ' + VBW + " " + VBH + '" preserveAspectRatio="xMidYMid meet"><title>' +
+      esc(ariaLabel) + "</title>" + svg.join("") + "</svg></div>";
+    container._hits = hits;
+
+    container.innerHTML = plotHTML +
+      (scale ? sizeLegendHTML(scale, "encode time") : "") +
+      '<div class="q-tooltip" hidden></div>';
 
     // hover
     var svgEl = container.querySelector("svg");
     var tip = container.querySelector(".q-tooltip");
     var hl = container.querySelector(".q-hl");
-    if (svgEl && container._hits && container._hits.length) {
+    if (svgEl && container._hits.length) {
       svgEl.addEventListener("mousemove", function (ev) {
         var r = svgEl.getBoundingClientRect();
         var vx = (ev.clientX - r.left) * (VBW / r.width);
@@ -390,13 +402,13 @@
           var agg = best.count > 1;
           tip.innerHTML = "<b>" + esc(best.label) + "</b><br>" +
             '<span class="k">step</span> ' + esc(best.step) + "<br>" +
-            '<span class="k">bpp</span> ' + best.x.toFixed(3) + (agg ? " (mean)" : "") + "<br>" +
+            '<span class="k">' + esc(xAxis.name) + (agg ? " (mean)" : "") + "</span> " + xAxis.fmt(best.x) + "<br>" +
             '<span class="k">' + esc(info.name) + (agg ? " (mean)" : "") + "</span> " + best.y.toFixed(2) +
             (agg && best.std > 0 ? " ± " + best.std.toFixed(2) : "") +
             (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
             '<br><span class="k">images</span> ' + (agg ? best.count : "1 (single)");
           var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
-          if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
+          if (tx + 220 > crect.width) tx = ev.clientX - crect.left - 14 - 220;
           tip.style.left = Math.max(0, tx) + "px";
           tip.style.top = ty + "px";
         } else {
@@ -409,103 +421,268 @@
     }
   }
 
-  // ---- top-level views -----------------------------------------------------
+  // ---- series builders -----------------------------------------------------
 
-  function renderCombined(agg) {
-    var host = document.getElementById("q-combined");
-    if (!host) return;
-    host.innerHTML = "";
-    var chart = document.createElement("div");
-    chart.className = "q-chart";
-    host.appendChild(chart);
+  // One series per impl of a format, mapping each point to the (x,y) of the view.
+  function seriesForFormat(aggFmt, xKey, yKey) {
+    return aggFmt.map(function (s, i) {
+      var points = s.points.map(function (p) {
+        var x = p.m[xKey], y = p.m[yKey];
+        if (!isNum(x) || !isNum(y)) return null;
+        return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count };
+      }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
+      return { key: s.impl, implName: s.impl, label: s.impl, color: PALETTE[i % PALETTE.length], points: points };
+    }).filter(function (s) { return s.points.length > 0; });
+  }
+
+  // Cross-format Pareto: each format's Pareto-front encoder(s), coloured by
+  // format, dashed per encoder within a format.
+  function seriesForPareto(AGG, xKey, yKey) {
     var series = [];
-    Object.keys(agg).sort().forEach(function (fmt) {
+    Object.keys(AGG).sort().forEach(function (fmt) {
       var keep = PARETO[fmt] || [];
       var di = 0;
-      agg[fmt].forEach(function (s) {
+      AGG[fmt].forEach(function (s) {
         if (keep.length && keep.indexOf(s.impl) < 0) return;
-        series.push({
-          key: "c/" + fmt + "/" + s.impl,
-          label: fmt.toUpperCase() + " · " + s.impl,
-          color: FORMAT_COLORS[fmt] || PALETTE[0],
-          dash: DASHES[di % DASHES.length],
-          points: s.points,
-        });
-        di++;
+        var points = s.points.map(function (p) {
+          var x = p.m[xKey], y = p.m[yKey];
+          if (!isNum(x) || !isNum(y)) return null;
+          return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count };
+        }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
+        if (points.length) {
+          series.push({
+            key: fmt + "/" + s.impl, implName: s.impl,
+            label: fmt.toUpperCase() + " · " + s.impl,
+            color: FORMAT_COLORS[fmt] || PALETTE[0], dash: DASHES[di % DASHES.length],
+            points: points,
+          });
+          di++;
+        }
       });
     });
-    if (!series.length) { host.innerHTML = '<p class="q-note">No rate-distortion data.</p>'; return; }
-    renderRDChart(chart, series, "combined", state.metric, state.showTime.rd);
+    return series;
   }
 
-  // Metrics that actually carry finite encode data. SSIMULACRA2 always present
-  // (it gates validRows); the rest appear only when measured. Order follows
-  // METRIC_INFO.
-  function availableMetrics() {
-    function hasMetric(key) {
-      return METRICS.some(function (m) { return isNum(m[key]) && m.type === "encode" && !m.lossless && !m.error; });
-    }
-    var metrics = ["ssimulacra2"];
-    ["psnr", "ssim", "butteraugli"].forEach(function (k) {
-      if (hasMetric(k)) metrics.push(k);
+  // ---- tabs (ARIA tablist) -------------------------------------------------
+
+  var AGG_ALL = null;   // aggregateAll(validRows), lazy
+  var TABS = [];        // [{id, label, fmt|null}]
+  var PRESETS = [];
+
+  function preset() { return PRESETS[state.presetIdx]; }
+
+  function legendFor(series) {
+    var wrap = el("div", { class: "q-legend", role: "group", "aria-label": "Series — activate to show or hide" });
+    series.forEach(function (s) {
+      var off = !!state.implsOff[s.implName];
+      var chip = el("button", { class: "q-chip" + (off ? " off" : ""), type: "button", "aria-pressed": off ? "false" : "true" });
+      chip.innerHTML = '<span class="sw" style="background:' + s.color + '"></span>' + esc(s.label);
+      chip.addEventListener("click", function () {
+        if (state.implsOff[s.implName]) delete state.implsOff[s.implName];
+        else state.implsOff[s.implName] = true;
+        renderActivePanel();
+        renderFilters();
+      });
+      wrap.appendChild(chip);
     });
-    return metrics;
+    return wrap;
   }
 
-  // Per format, a small-multiples grid: one rate-distortion chart per available
-  // metric (each metric has its own y-scale). Independent of the global toggle.
-  function renderPerFormat(rows, metrics) {
-    var host = document.getElementById("q-charts");
+  function renderActivePanel() {
+    var panelHost = document.getElementById("q-tabpanels");
+    if (!panelHost) return;
+    panelHost.innerHTML = "";
+    var tab = TABS.filter(function (t) { return t.id === state.tab; })[0] || TABS[0];
+    var panel = el("div", { class: "q-tabpanel", role: "tabpanel", id: "panel-" + tab.id, "aria-labelledby": "tab-" + tab.id, tabindex: "0" });
+    panelHost.appendChild(panel);
+
+    var pr = preset();
+    var xAxis = X_AXES[pr.xKey];
+    var metrics = availableMetrics().filter(function (k) { return state.metricsOn[k]; });
+    if (!metrics.length) {
+      panel.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter panel above."));
+      return;
+    }
+
+    // Build the series once (per metric) and render a stacked full-width chart each.
+    var legendSeries = null;
+    metrics.forEach(function (metricKey) {
+      var series = tab.fmt
+        ? seriesForFormat(AGG_ALL[tab.fmt] || [], pr.xKey, metricKey)
+        : seriesForPareto(AGG_ALL, pr.xKey, metricKey);
+      if (!legendSeries && series.length) legendSeries = series;
+      var sec = el("div", { class: "q-stack-item" });
+      sec.appendChild(el("div", { class: "q-metric-cap" }, METRIC_INFO[metricKey].name));
+      var chart = el("div", { class: "q-chart" });
+      sec.appendChild(chart);
+      panel.appendChild(sec);
+      renderXYChart(chart, series, {
+        xLog: pr.xLog, xAxis: xAxis, yInfo: METRIC_INFO[metricKey],
+        showTime: state.showTime.rd, title: tab.label,
+      });
+    });
+    if (legendSeries) panel.insertBefore(legendFor(legendSeries), panel.firstChild);
+  }
+
+  function selectTab(id, focusIt) {
+    state.tab = id;
+    document.querySelectorAll("#q-tablist .q-tab").forEach(function (b) {
+      var sel = b.getAttribute("data-id") === id;
+      b.classList.toggle("active", sel);
+      b.setAttribute("aria-selected", sel ? "true" : "false");
+      b.setAttribute("tabindex", sel ? "0" : "-1");
+      if (sel && focusIt) b.focus();
+    });
+    renderActivePanel();
+    var tab = TABS.filter(function (t) { return t.id === id; })[0];
+    announce("Showing " + (tab ? tab.label : id));
+  }
+
+  function onTabKey(ev, idx) {
+    var keys = { ArrowRight: 1, ArrowLeft: -1, Home: "home", End: "end" };
+    if (!(ev.key in keys)) return;
+    ev.preventDefault();
+    var next;
+    if (keys[ev.key] === "home") next = 0;
+    else if (keys[ev.key] === "end") next = TABS.length - 1;
+    else next = (idx + keys[ev.key] + TABS.length) % TABS.length;
+    selectTab(TABS[next].id, true);
+  }
+
+  function renderTabs() {
+    var host = document.getElementById("q-tabs");
     if (!host) return;
     host.innerHTML = "";
-    // Aggregate once per metric, then pivot to per-format below.
-    var aggByMetric = {};
-    metrics.forEach(function (metric) { aggByMetric[metric] = aggregate(rows, metric); });
-    var formats = {};
-    metrics.forEach(function (metric) {
-      Object.keys(aggByMetric[metric]).forEach(function (fmt) { formats[fmt] = 1; });
+    var tablist = el("div", { class: "q-tablist", id: "q-tablist", role: "tablist", "aria-label": "Rate-distortion by format" });
+    TABS.forEach(function (tab, i) {
+      var sel = state.tab === tab.id;
+      var btn = el("button", {
+        class: "q-tab" + (sel ? " active" : ""), type: "button", role: "tab",
+        id: "tab-" + tab.id, "data-id": tab.id, "aria-selected": sel ? "true" : "false",
+        "aria-controls": "panel-" + tab.id, tabindex: sel ? "0" : "-1",
+      }, tab.label);
+      btn.addEventListener("click", function () { selectTab(tab.id, false); });
+      btn.addEventListener("keydown", function (e) { onTabKey(e, i); });
+      tablist.appendChild(btn);
     });
-    Object.keys(formats).sort().forEach(function (fmt) {
-      var title = document.createElement("h4");
-      title.className = "q-chart-title";
-      title.textContent = fmt.toUpperCase();
-      host.appendChild(title);
-      var grid = document.createElement("div");
-      grid.className = "q-metric-grid";
-      host.appendChild(grid);
-      metrics.forEach(function (metric) {
-        var fmtAgg = aggByMetric[metric][fmt];
-        if (!fmtAgg) return;
-        var cell = document.createElement("div");
-        cell.className = "q-metric-cell";
-        var cap = document.createElement("div");
-        cap.className = "q-metric-cap";
-        cap.textContent = METRIC_INFO[metric].name;
-        cell.appendChild(cap);
-        var chart = document.createElement("div");
-        chart.className = "q-chart";
-        cell.appendChild(chart);
-        grid.appendChild(cell);
-        var series = fmtAgg.map(function (s, i) {
-          return { key: fmt + "/" + s.impl, label: s.impl, color: PALETTE[i % PALETTE.length], points: s.points };
-        });
-        renderRDChart(chart, series, "fmt:" + fmt + ":" + metric, metric, state.showTime.rd);
+    host.appendChild(tablist);
+    host.appendChild(el("div", { id: "q-tabpanels", class: "q-tabpanels" }));
+    renderActivePanel();
+  }
+
+  // ---- filter matrix -------------------------------------------------------
+
+  function renderFilters() {
+    var host = document.getElementById("q-filters-body");
+    if (!host) return;
+    host.innerHTML = "";
+
+    // Metrics group.
+    var metrics = availableMetrics();
+    if (metrics.length > 1) {
+      var mf = el("fieldset", { class: "q-fieldset" });
+      mf.appendChild(el("legend", null, "Metrics (which charts to stack)"));
+      metrics.forEach(function (k) {
+        var id = "flt-metric-" + k;
+        var lab = el("label", { class: "q-check" });
+        var cb = el("input", { type: "checkbox", id: id });
+        cb.checked = !!state.metricsOn[k];
+        cb.addEventListener("change", function () { state.metricsOn[k] = cb.checked; renderActivePanel(); });
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(" " + METRIC_INFO[k].name));
+        mf.appendChild(lab);
       });
+      host.appendChild(mf);
+    }
+
+    // Implementation groups (by format).
+    Object.keys(AGG_ALL).sort().forEach(function (fmt) {
+      var impls = AGG_ALL[fmt].map(function (s) { return s.impl; });
+      if (!impls.length) return;
+      var ff = el("fieldset", { class: "q-fieldset" });
+      var lg = el("legend", null, fmt.toUpperCase() + " encoders");
+      ff.appendChild(lg);
+      var allBtn = el("button", { type: "button", class: "q-mini" }, "all");
+      var noneBtn = el("button", { type: "button", class: "q-mini" }, "none");
+      allBtn.addEventListener("click", function () { impls.forEach(function (n) { delete state.implsOff[n]; }); renderActivePanel(); renderFilters(); });
+      noneBtn.addEventListener("click", function () { impls.forEach(function (n) { state.implsOff[n] = true; }); renderActivePanel(); renderFilters(); });
+      lg.appendChild(document.createTextNode(" "));
+      lg.appendChild(allBtn); lg.appendChild(noneBtn);
+      impls.forEach(function (n) {
+        var lab = el("label", { class: "q-check" });
+        var cb = el("input", { type: "checkbox" });
+        cb.checked = !state.implsOff[n];
+        cb.addEventListener("change", function () {
+          if (cb.checked) delete state.implsOff[n]; else state.implsOff[n] = true;
+          renderActivePanel();
+        });
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(" " + n));
+        ff.appendChild(lab);
+      });
+      host.appendChild(ff);
     });
   }
 
-  function renderAll() {
-    var rows = validRows(METRICS);
-    renderCombined(aggregate(rows, state.metric));
-    renderPerFormat(rows, availableMetrics());
+  // ---- controls (view preset + show-time + download) -----------------------
+
+  function renderControls() {
+    var host = document.getElementById("q-controls");
+    if (!host) return;
+    host.innerHTML = "";
+
+    // View preset (native select; Alt+[ / Alt+] also step it — see init()).
+    var vWrap = el("span", { class: "q-ctl" });
+    var vId = "q-view-select";
+    vWrap.appendChild(el("label", { class: "q-label", for: vId }, "View"));
+    var sel = el("select", { id: vId, class: "q-select" });
+    PRESETS.forEach(function (pr, i) {
+      var o = el("option", { value: String(i) }, pr.label);
+      if (i === state.presetIdx) o.setAttribute("selected", "selected");
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", function () { setPreset(parseInt(sel.value, 10)); });
+    vWrap.appendChild(sel);
+    host.appendChild(vWrap);
+
+    // Show-time toggle (encode-time bubbles; only meaningful on the bpp views).
+    var tWrap = el("span", { class: "q-ctl" });
+    var tId = "q-showtime";
+    var tcb = el("input", { type: "checkbox", id: tId });
+    tcb.checked = state.showTime.rd;
+    tcb.addEventListener("change", function () { state.showTime.rd = tcb.checked; renderActivePanel(); });
+    var tlab = el("label", { class: "q-label", for: tId });
+    tlab.appendChild(tcb);
+    tlab.appendChild(document.createTextNode(" Encode-time bubbles"));
+    tWrap.appendChild(tlab);
+    host.appendChild(tWrap);
+
+    // Download embedded raw metrics.
+    var dl = el("a", { class: "q-dl", href: "#" }, "⤓ raw metrics (JSON)");
+    dl.addEventListener("click", function (e) {
+      e.preventDefault();
+      var blob = new Blob([JSON.stringify(METRICS)], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = el("a", { href: url, download: "metrics.json" });
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+    host.appendChild(dl);
+
+    host.appendChild(el("span", { class: "q-hint" }, "Tip: ← → switch format tabs; Alt+[ / Alt+] cycle views."));
+  }
+
+  function setPreset(i) {
+    if (i < 0 || i >= PRESETS.length) return;
+    state.presetIdx = i;
+    var sel = document.getElementById("q-view-select");
+    if (sel) sel.value = String(i);
+    renderActivePanel();
+    announce("View: " + PRESETS[i].label);
   }
 
   // ---- aggregation disclosure ----------------------------------------------
 
-  // Distinct source images scored — the set every plotted point is averaged
-  // over. The charts collapse this to one mean curve, so a single-image run and
-  // a whole-dataset run draw the same shape; this number is what tells them
-  // apart, so it is stated up front (and per-point in tooltips).
   function imageCount() {
     var seen = {};
     METRICS.forEach(function (m) {
@@ -529,8 +706,8 @@
     } else {
       host.innerHTML = "Every plotted point is the <b>mean (arithmetic average)</b> " +
         "of the metric across the <b>" + n + " images</b> in " + ds + ", at one " +
-        "operating point (bpp is likewise the per-image mean). Hover a point for " +
-        "its image count and spread (±1σ across images); BD-rate below is computed " +
+        "operating point (the X value is likewise the per-image mean). Hover a point " +
+        "for its image count and spread (±1σ across images); BD-rate below is computed " +
         "per image, then averaged.";
     }
   }
@@ -560,9 +737,9 @@
       });
       function arrow(k) { return sortKey === k ? '<span class="arrow">' + (sortDir > 0 ? "▲" : "▼") + "</span>" : ""; }
       var html = '<table class="q-table"><thead><tr>' +
-        '<th data-k="fmt">Format ' + arrow("fmt") + "</th>" +
-        '<th data-k="impl">Implementation ' + arrow("impl") + "</th>" +
-        '<th data-k="bd">BD-rate vs ref ' + arrow("bd") + "</th></tr></thead><tbody>";
+        '<th data-k="fmt" scope="col">Format ' + arrow("fmt") + "</th>" +
+        '<th data-k="impl" scope="col">Implementation ' + arrow("impl") + "</th>" +
+        '<th data-k="bd" scope="col">BD-rate vs ref ' + arrow("bd") + "</th></tr></thead><tbody>";
       rows.forEach(function (r) {
         var cls = r.bd == null ? "" : r.bd < 0 ? "good" : "bad";
         var txt = r.bd == null ? "N/A" : (r.bd > 0 ? "+" : "") + r.bd.toFixed(1) + "%";
@@ -584,9 +761,6 @@
 
   // ---- lossless compression efficiency ------------------------------------
 
-  // Lossless encoders are pixel-identical, so they differ only in size. Two
-  // views from the precomputed LOSSLESS summary: a bpp leaderboard, and a
-  // size-vs-effort chart (issue #26). Independent of the metric/x-scale toggles.
   function renderLossless() {
     var host = document.getElementById("q-lossless");
     if (!host) return;
@@ -611,10 +785,6 @@
     }).sort(function (a, b) { return a.bpp - b.bpp; });
     var maxBpp = Math.max.apply(null, rows.map(function (r) { return r.bpp; }));
     var rowH = 26, padT = 8, padB = 8, valW = 150;
-    // Size the label gutter to the longest encoder name (≈7px/char at the 12px
-    // label font, + padding) so names never clip on the left; grow the viewBox so
-    // the bar area stays usable. The container scrolls (CSS) only when even this
-    // can't fit the viewport.
     var longest = rows.reduce(function (m, r) { return Math.max(m, r.impl.length); }, 0);
     var labelW = Math.min(320, Math.max(160, longest * 7 + 16));
     var W = Math.max(VBW, labelW + 380 + valW), H = padT + padB + rows.length * rowH;
@@ -632,13 +802,11 @@
       svg.push('<text class="q-ll-val" x="' + (x1 + 6) + '" y="' + (cy + 4) + '">' +
         r.bpp.toFixed(3) + " bpp" + ratio + "</text>");
     });
-    host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + W + " " + H +
+    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Best bits per pixel per lossless encoder" viewBox="0 0 ' + W + " " + H +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>";
   }
 
   function renderLosslessEffort(host, impls) {
-    // x = effort normalized to [0,1] per encoder (low -> high); y = bpp. Colour
-    // by format, dashed per encoder within a format so they stay distinguishable.
     var dashByFmt = {};
     var series = impls.map(function (impl) {
       var d = LOSSLESS[impl];
@@ -653,7 +821,6 @@
         dash: DASHES[di % DASHES.length], points: points,
       };
     });
-    // Encode-time bubble scale across every effort point (null => uniform PT_R).
     var allPts = [];
     series.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
     var scale = state.showTime.lossless ? timeScale(allPts) : null;
@@ -704,111 +871,24 @@
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
     var chips = series.map(function (s) {
-      return '<span class="q-chip"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
+      return '<span class="q-chip static"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
     }).join("");
-    host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
+    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
       '<div class="q-legend">' + chips + "</div>" +
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
       '<div class="q-tooltip" hidden></div>';
 
-    var svgEl = host.querySelector("svg");
-    var tip = host.querySelector(".q-tooltip");
-    var hl = host.querySelector(".q-hl");
-    svgEl.addEventListener("mousemove", function (ev) {
-      var r = svgEl.getBoundingClientRect();
-      var vx = (ev.clientX - r.left) * (VBW / r.width);
-      var vy = (ev.clientY - r.top) * (VBH / r.height);
-      var best = null, bd = 1e9;
-      hits.forEach(function (h) {
-        var dd = (h.sx - vx) * (h.sx - vx) + (h.sy - vy) * (h.sy - vy);
-        if (dd < bd) { bd = dd; best = h; }
-      });
-      if (best && bd <= 26 * 26) {
-        hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
-        hl.setAttribute("r", Math.max(7.5, (best.r || PT_R) + 3).toFixed(1));
-        hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
-        var crect = host.getBoundingClientRect();
-        tip.hidden = false;
-        tip.innerHTML = "<b>" + esc(best.impl) + "</b><br>" +
-          '<span class="k">setting</span> ' + esc(best.setting) + "<br>" +
-          '<span class="k">bpp</span> ' + best.bpp.toFixed(3) +
-          (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "");
-        var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
-        if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
-        tip.style.left = Math.max(0, tx) + "px";
-        tip.style.top = ty + "px";
-      } else {
-        hl.setAttribute("visibility", "hidden"); tip.hidden = true;
-      }
+    attachScatterHover(host, hits, function (best) {
+      return "<b>" + esc(best.impl) + "</b><br>" +
+        '<span class="k">setting</span> ' + esc(best.setting) + "<br>" +
+        '<span class="k">bpp</span> ' + best.bpp.toFixed(3) +
+        (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "");
     });
-    svgEl.addEventListener("mouseleave", function () {
-      hl.setAttribute("visibility", "hidden"); tip.hidden = true;
-    });
-  }
-
-  // ---- controls ------------------------------------------------------------
-
-  function group(labelText, opts, current, onPick) {
-    var wrap = document.createElement("span");
-    wrap.innerHTML = '<span class="q-label">' + esc(labelText) + "</span>";
-    var g = document.createElement("span");
-    g.className = "q-group";
-    opts.forEach(function (o) {
-      var b = document.createElement("button");
-      b.textContent = o.label;
-      if (o.value === current()) b.className = "active";
-      b.addEventListener("click", function () {
-        onPick(o.value);
-        g.querySelectorAll("button").forEach(function (x) { x.className = ""; });
-        b.className = "active";
-      });
-      g.appendChild(b);
-    });
-    wrap.appendChild(g);
-    return wrap;
-  }
-
-  function renderControls() {
-    var host = document.getElementById("q-controls");
-    if (!host) return;
-    host.innerHTML = "";
-    // The metric toggle drives only the cross-format Pareto chart; the per-format
-    // grid below always shows every available metric.
-    var metricOpts = availableMetrics().map(function (k) {
-      return { label: METRIC_INFO[k].name, value: k };
-    });
-    if (metricOpts.length > 1) {
-      host.appendChild(group("Pareto metric", metricOpts,
-        function () { return state.metric; },
-        function (v) { state.metric = v; renderAll(); }));
-    }
-    host.appendChild(group("X-axis", [
-      { label: "Linear", value: "linear" }, { label: "Log", value: "log" },
-    ], function () { return state.xscale; }, function (v) { state.xscale = v; renderAll(); }));
-
-    // download embedded raw metrics
-    var dl = document.createElement("a");
-    dl.className = "q-dl";
-    dl.textContent = "⤓ raw metrics (JSON)";
-    dl.href = "#";
-    dl.addEventListener("click", function (e) {
-      e.preventDefault();
-      var blob = new Blob([JSON.stringify(METRICS)], { type: "application/json" });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement("a");
-      a.href = url; a.download = "metrics.json"; a.click();
-      URL.revokeObjectURL(url);
-    });
-    host.appendChild(dl);
   }
 
   // ---- decoder fidelity & speed -------------------------------------------
 
-  // Decoders carry no rate-distortion tradeoff: a faithful decoder matches the
-  // golden (reference) decoder bit-for-bit (PSNR vs golden = ∞), so this is a
-  // speed + fidelity leaderboard rather than a curve. Sorted by format then
-  // ascending mean decode time (fastest first).
   function renderDecoders() {
     var host = document.getElementById("q-decoders");
     if (!host) return;
@@ -823,22 +903,20 @@
       return da.mean_time_s - db.mean_time_s;
     });
     var html = '<table class="q-table"><thead><tr>' +
-      "<th>Format</th><th>Decoder</th><th>Mean decode</th>" +
-      "<th>Mean input bpp</th><th>Fidelity vs golden</th></tr></thead><tbody>";
+      '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode</th>' +
+      '<th scope="col">Mean input bpp</th><th scope="col">Fidelity</th><th scope="col">Basis</th></tr></thead><tbody>';
     impls.forEach(function (impl) {
       var d = DECODERS[impl];
       var fid = d.bit_exact
         ? '<span class="good">∞ (bit-exact)</span>'
-        : '<span class="bad">' + d.worst_psnr.toFixed(2) + " dB (worst)</span>";
+        : '<span class="bad">' + (d.worst_psnr != null ? d.worst_psnr.toFixed(2) + " dB (worst)" : "not exact") + "</span>";
+      var basis = d.basis === "source" ? "source (ground truth)" : "golden decoder";
       html += "<tr><td>" + esc(d.format.toUpperCase()) + "</td><td>" + esc(impl) +
         '</td><td class="num">' + fmtTime(d.mean_time_s) +
         '</td><td class="num">' + d.mean_bpp.toFixed(3) + "</td><td>" + fid +
-        "</td></tr>";
+        "</td><td>" + esc(basis) + "</td></tr>";
     });
     html += "</tbody></table>";
-    // The decoder's time dimension *is* a whole chart (it carries no
-    // rate-distortion curve to overlay onto), so the per-section toggle shows or
-    // hides the speed-vs-bitrate scatter, with the table always present below.
     var chart = state.showTime.decoder ? '<div id="q-decoder-chart" class="q-chart"></div>' : "";
     host.innerHTML = chart + html;
     if (state.showTime.decoder) {
@@ -846,12 +924,9 @@
     }
   }
 
-  // Speed-vs-bitrate scatter (issue #46): X = input bpp, Y = one-pass decode
-  // time (anchored at 0; lower is better). Each decoder's golden-basis points
-  // are aggregated to one mean point per operating point; bit-exact points are
-  // filled, approximate-decode points (finite PSNR vs golden) are drawn as a
-  // hollow ring so an inexact path stands out. Format-coloured, dashed per
-  // decoder within a format (mirrors the lossless effort chart).
+  // Speed-vs-bitrate scatter: X = input bpp, Y = one-pass decode time. Bit-exact
+  // points are filled; approximate-decode points (finite PSNR vs the reference)
+  // are hollow rings.
   function renderDecoderChart(host, impls) {
     if (!host) return;
     var dashByFmt = {};
@@ -862,7 +937,8 @@
         var a = byLabel[p.label] || (byLabel[p.label] =
           { bpp: 0, t: 0, n: 0, approx: false, worst: null, label: p.label });
         a.bpp += p.bpp; a.t += isNum(p.time_s) ? p.time_s : 0; a.n += 1;
-        if (isNum(p.psnr)) { a.approx = true; a.worst = a.worst == null ? p.psnr : Math.min(a.worst, p.psnr); }
+        var notExact = p.bit_exact === false || (p.bit_exact == null && isNum(p.psnr));
+        if (notExact) { a.approx = true; if (isNum(p.psnr)) a.worst = a.worst == null ? p.psnr : Math.min(a.worst, p.psnr); }
       });
       var points = Object.keys(byLabel).map(function (k) {
         var a = byLabel[k];
@@ -927,17 +1003,30 @@
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
     var chips = series.map(function (s) {
-      return '<span class="q-chip"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
+      return '<span class="q-chip static"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
     }).join("");
-    host.innerHTML = '<div class="q-plot"><svg viewBox="0 0 ' + VBW + " " + VBH +
+    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
       '<div class="q-legend">' + chips + "</div>" +
-      '<p class="q-note">Hollow markers = approximate decode (finite PSNR vs the golden decoder); filled = bit-exact.</p>' +
+      '<p class="q-note">Hollow markers = approximate decode (differs from the reference it is scored against); filled = bit-exact.</p>' +
       '<div class="q-tooltip" hidden></div>';
 
+    attachScatterHover(host, hits, function (best) {
+      return "<b>" + esc(best.impl) + "</b><br>" +
+        '<span class="k">step</span> ' + esc(best.step) + "<br>" +
+        '<span class="k">input bpp</span> ' + best.bpp.toFixed(3) + "<br>" +
+        '<span class="k">decode time</span> ' + fmtTime(best.t) + "<br>" +
+        '<span class="k">fidelity</span> ' +
+        (best.approx ? (best.worst != null ? best.worst.toFixed(2) + " dB" : "not bit-exact") : "∞ (bit-exact)");
+    });
+  }
+
+  // Shared nearest-point hover for the scatter charts (lossless effort, decoder).
+  function attachScatterHover(host, hits, tipHTML) {
     var svgEl = host.querySelector("svg");
     var tip = host.querySelector(".q-tooltip");
     var hl = host.querySelector(".q-hl");
+    if (!svgEl) return;
     svgEl.addEventListener("mousemove", function (ev) {
       var r = svgEl.getBoundingClientRect();
       var vx = (ev.clientX - r.left) * (VBW / r.width);
@@ -949,17 +1038,13 @@
       });
       if (best && bd <= 26 * 26) {
         hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
+        hl.setAttribute("r", Math.max(7.5, (best.r || PT_R) + 3).toFixed(1));
         hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
         var crect = host.getBoundingClientRect();
         tip.hidden = false;
-        tip.innerHTML = "<b>" + esc(best.impl) + "</b><br>" +
-          '<span class="k">step</span> ' + esc(best.step) + "<br>" +
-          '<span class="k">input bpp</span> ' + best.bpp.toFixed(3) + "<br>" +
-          '<span class="k">decode time</span> ' + fmtTime(best.t) + "<br>" +
-          '<span class="k">fidelity vs golden</span> ' +
-          (best.approx ? best.worst.toFixed(2) + " dB" : "∞ (bit-exact)");
+        tip.innerHTML = tipHTML(best);
         var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
-        if (tx + 200 > crect.width) tx = ev.clientX - crect.left - 14 - 200;
+        if (tx + 220 > crect.width) tx = ev.clientX - crect.left - 14 - 220;
         tip.style.left = Math.max(0, tx) + "px";
         tip.style.top = ty + "px";
       } else {
@@ -971,30 +1056,99 @@
     });
   }
 
-  // Per-section "show time" toggle (issue #46), mounted beside a section heading.
-  // Flipping it re-renders only that section's charts; default is on.
+  // Per-section "show time" toggle, mounted beside a section heading.
   function mountSectionToggle(mountId, key, rerender) {
     var host = document.getElementById(mountId);
     if (!host) return;
     host.innerHTML = "";
-    host.appendChild(group("Show time", [
-      { label: "On", value: true }, { label: "Off", value: false },
-    ], function () { return state.showTime[key]; }, function (v) {
-      state.showTime[key] = v; rerender();
-    }));
+    var id = "q-secshow-" + key;
+    var cb = el("input", { type: "checkbox", id: id });
+    cb.checked = state.showTime[key];
+    cb.addEventListener("change", function () { state.showTime[key] = cb.checked; rerender(); });
+    var lab = el("label", { class: "q-label", for: id });
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(" Show time"));
+    host.appendChild(lab);
+  }
+
+  // ---- init ----------------------------------------------------------------
+
+  function buildPresets() {
+    PRESETS = [
+      { id: "bpp-log", label: "Quality vs Size — bpp (log x)", xKey: "bpp", xLog: true },
+      { id: "bpp-lin", label: "Quality vs Size — bpp (linear x)", xKey: "bpp", xLog: false },
+    ];
+    if (hasAxisData("time_s")) {
+      PRESETS.push({ id: "enc", label: "Quality vs Encode time (log x)", xKey: "time_s", xLog: true });
+    }
+    if (hasAxisData("decode_time_s")) {
+      PRESETS.push({ id: "dec", label: "Quality vs Decode time (log x)", xKey: "decode_time_s", xLog: true });
+    }
+  }
+
+  function buildTabs() {
+    TABS = [{ id: "pareto", label: "Cross-format Pareto", fmt: null }];
+    Object.keys(AGG_ALL).sort().forEach(function (fmt) {
+      TABS.push({ id: fmt, label: fmt.toUpperCase(), fmt: fmt });
+    });
+  }
+
+  // Generic tabbed image galleries (performance / scaling / effort): the static
+  // SVGs are grouped into ARIA tabs by report.py so each is full browser width.
+  // Reuses the same roving-tabindex + arrow-key pattern as the quality tabs.
+  function initGalleries() {
+    var boxes = document.querySelectorAll("[data-img-tabs]");
+    [].forEach.call(boxes, function (box) {
+      var tabs = [].slice.call(box.querySelectorAll('[role="tab"]'));
+      var panels = [].slice.call(box.querySelectorAll('[role="tabpanel"]'));
+      function select(i, focus) {
+        tabs.forEach(function (t, j) {
+          var sel = j === i;
+          t.setAttribute("aria-selected", sel ? "true" : "false");
+          t.setAttribute("tabindex", sel ? "0" : "-1");
+          t.classList.toggle("active", sel);
+          if (panels[j]) panels[j].hidden = !sel;
+          if (sel && focus) t.focus();
+        });
+      }
+      tabs.forEach(function (t, i) {
+        t.addEventListener("click", function () { select(i, false); });
+        t.addEventListener("keydown", function (e) {
+          var d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+          if (d) { e.preventDefault(); select((i + d + tabs.length) % tabs.length, true); }
+          else if (e.key === "Home") { e.preventDefault(); select(0, true); }
+          else if (e.key === "End") { e.preventDefault(); select(tabs.length - 1, true); }
+        });
+      });
+    });
   }
 
   function init() {
+    initGalleries();
     if (!document.getElementById("quality-app")) return;
+    AGG_ALL = aggregateAll(validRows(METRICS));
+    availableMetrics().forEach(function (k) { state.metricsOn[k] = true; });
+    buildPresets();
+    buildTabs();
+    state.tab = TABS[0] ? TABS[0].id : null;
+
     renderControls();
     renderAggregationNote();
-    renderAll();
+    renderFilters();
+    renderTabs();
     renderLossless();
     renderDecoders();
     renderBdRate();
-    mountSectionToggle("q-toggle-rd", "rd", renderAll);
     mountSectionToggle("q-toggle-lossless", "lossless", renderLossless);
     mountSectionToggle("q-toggle-decoder", "decoder", renderDecoders);
+
+    // Alt+[ / Alt+] step the view preset from anywhere (the <select> already
+    // cycles with arrow keys when focused; this is the global accelerator).
+    document.addEventListener("keydown", function (e) {
+      if (!e.altKey) return;
+      if (e.key === "]") { e.preventDefault(); setPreset((state.presetIdx + 1) % PRESETS.length); }
+      else if (e.key === "[") { e.preventDefault(); setPreset((state.presetIdx - 1 + PRESETS.length) % PRESETS.length); }
+    });
   }
 
   if (document.readyState === "loading") {

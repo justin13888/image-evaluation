@@ -20,16 +20,14 @@ dataset files, pre-builds binaries, runs hyperfine via the shared driver).
 """
 
 import json
-import math
 import os
 import subprocess
-import tempfile
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image as PILImage
 
+from bench_lib.imageprep import image_pixels, single_thread_env, to_canonical_ppm
 from bench_lib.models import (
     FORMAT_EXT_MAP,
     IMPLEMENTATIONS,
@@ -68,21 +66,11 @@ def scaling_label(target_mp: float) -> str:
     return label
 
 
-def _image_pixels(path: str) -> int:
-    """Pixel count (w*h) of an image, via PIL. 0 if unreadable."""
-    try:
-        with PILImage.open(path) as im:
-            w, h = im.size
-            return int(w) * int(h)
-    except Exception:
-        return 0
-
-
 def select_scaling_sources(files: List[str], n: int) -> List[str]:
     """The ``n`` largest source images (by pixel count). Largest first maximises
     the downscale range available for the ladder; ties break on path for
     determinism."""
-    sized = [(f, _image_pixels(f)) for f in files]
+    sized = [(f, image_pixels(f)) for f in files]
     sized = [(f, px) for f, px in sized if px > 0]
     sized.sort(key=lambda fp: (-fp[1], fp[0]))
     return [f for f, _ in sized[: max(0, n)]]
@@ -90,38 +78,6 @@ def select_scaling_sources(files: List[str], n: int) -> List[str]:
 
 # One ladder rung: the downscaled PPM plus its actual pixel count (the x-axis).
 Rung = Dict[str, object]  # {"ppm": str, "pixels": int, "target_mp": float}
-
-
-def _single_thread_env() -> Dict[str, str]:
-    return {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
-
-
-def _downscale_to_ppm(src: str, target_px: int, out_ppm: str) -> bool:
-    """Downscale ``src`` to ~``target_px`` pixels (aspect-preserving) as an 8-bit
-    P6 PPM at ``out_ppm`` (cached; atomic publish). Returns False if the source
-    can't be measured. Uses a percentage resize so ImageMagick keeps the aspect
-    ratio; the *actual* pixel count is read back from the result, not assumed."""
-    if os.path.exists(out_ppm):
-        return True
-    src_px = _image_pixels(src)
-    if src_px <= 0:
-        return False
-    pct = 100.0 * math.sqrt(target_px / src_px)
-    os.makedirs(os.path.dirname(out_ppm), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(out_ppm), suffix=".tmp")
-    os.close(fd)
-    try:
-        subprocess.run(
-            ["convert", src, "-resize", f"{pct}%", "-depth", "8", f"ppm:{tmp}"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        os.replace(tmp, out_ppm)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-    return True
 
 
 def generate_ladder(
@@ -134,7 +90,7 @@ def generate_ladder(
     cache_dir = os.path.join(_CACHE_ROOT, dataset.value)
     rungs: List[Rung] = []
     for src in sources:
-        src_px = _image_pixels(src)
+        src_px = image_pixels(src)
         if src_px <= 0:
             continue
         stem = os.path.splitext(os.path.basename(src))[0]
@@ -143,10 +99,10 @@ def generate_ladder(
             if target_px >= src_px:
                 continue  # downscale-only
             out_ppm = os.path.join(cache_dir, f"{stem}.{scaling_label(mp)}.ppm")
-            if not _downscale_to_ppm(src, target_px, out_ppm):
+            if not to_canonical_ppm(src, out_ppm, target_px):
                 continue
             rungs.append(
-                {"ppm": out_ppm, "pixels": _image_pixels(out_ppm), "target_mp": mp}
+                {"ppm": out_ppm, "pixels": image_pixels(out_ppm), "target_mp": mp}
             )
     return rungs
 
@@ -201,7 +157,7 @@ def _reference_encode_rung(ref_impl, fmt: ImageFormat, rung: Rung) -> Optional[s
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                env=_single_thread_env(),
+                env=single_thread_env(),
             )
         except subprocess.CalledProcessError:
             return None

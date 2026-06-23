@@ -26,6 +26,8 @@ from colorama import Fore, Style
 from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
+from bench_lib.imageprep import single_thread_env as _single_thread_env
+from bench_lib.imageprep import to_canonical_ppm
 from bench_lib.models import (
     DATASETS,
     FORMAT_EXT_MAP,
@@ -50,6 +52,7 @@ from bench_lib.models import (
     LOSSLESS_REFERENCE_ENCODERS,
     PerfMode,
     PPMImageFormat,
+    ReportArgs,
     RunArgs,
     SetupArgs,
     TunableSchema,
@@ -63,7 +66,7 @@ from bench_lib.effort import (
     prepare_effort_images,
     write_effort_outputs,
 )
-from bench_lib.report import generate_report_html
+from bench_lib.report import _git_info, generate_report_html
 from bench_lib.scaling import (
     SCALING_HYPERFINE_FLAGS,
     SCALING_LADDER_MP,
@@ -97,13 +100,6 @@ INPUT_FILES_CACHE: Dict[
     tuple[DatasetId, ImageFormats, Optional[int]],
     Sequence[tuple[str, str]],
 ] = {}
-
-
-def _single_thread_env() -> Dict[str, str]:
-    """Process environment that pins rayon-/OMP-based codecs (and iqa-cli) to a
-    single thread, so a parallel pool of one-thread tasks saturates the CPU
-    without oversubscribing it."""
-    return {**os.environ, "RAYON_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
 
 
 def _generate_intermediates_parallel(
@@ -266,33 +262,14 @@ def get_input_files(
 
 
 def _source_to_ppm(f: str) -> str:
-    """Return an 8-bit P6 PPM path for source `f`, generating it via ImageMagick
-    if `f` is not already a PPM (forced 8-bit, since not every implementation
-    handles 16-bit PPM).
-
-    The conversion goes to a unique temp file that is atomically `os.replace`d
-    onto the canonical path, so a concurrent reader (the parallel pre-generation
-    pool) never observes a half-written PPM. The temp name carries no `.ppm`
-    extension, so the output format is forced with ImageMagick's `ppm:` prefix
-    rather than inferred from the suffix."""
+    """Return an 8-bit P6 PPM path for source `f` (no resize), generating it via
+    the shared canonicalizer if `f` is not already a PPM. The full-resolution
+    counterpart of the scaling/effort downscale, routed through the same
+    :func:`to_canonical_ppm` so every sweep prepares inputs identically."""
     if f.lower().endswith(".ppm"):
         return f
-    base = os.path.splitext(f)[0]
-    ppm = f"{base}.ppm"
-    if not os.path.exists(ppm):
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(ppm) or ".", suffix=".tmp")
-        os.close(fd)
-        try:
-            subprocess.run(
-                ["convert", f, "-depth", "8", f"ppm:{tmp}"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            os.replace(tmp, ppm)
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+    ppm = f"{os.path.splitext(f)[0]}.ppm"
+    to_canonical_ppm(f, ppm)
     return ppm
 
 
@@ -764,6 +741,65 @@ def _run_iqa(
     )
 
 
+def _decode_input_is_lossless(task: BenchmarkTask) -> bool:
+    """Whether a decode task's input was produced by a *lossless* reference encoder
+    — i.e. the source survives the encode intact, so the decoded pixels have the
+    source as a true ground truth (and bit-exactness can be checked against it).
+
+    The producing reference is the format's lossless reference when the task is on
+    the dedicated lossless decode path (issue #21, ``input_lossless``), else the
+    format's main reference encoder — which is itself lossless for a lossless-only
+    format like PNG. Decoupled from the row's ``lossless`` flag so PNG (lossless,
+    yet not split into a separate decode path) is still recognised."""
+    if task.impl.type != BenchmarkType.DECODE or task.impl.format is None:
+        return False
+    ref_map = LOSSLESS_REFERENCE_ENCODERS if task.input_lossless else REFERENCE_ENCODERS
+    ref_name = ref_map.get(task.impl.format)
+    return bool(ref_name and schema_for(ref_name).lossless)
+
+
+def _read_ppm_raster(path: str) -> Optional[tuple[int, int, bytes]]:
+    """Read an image as ``(width, height, raw RGB bytes)`` for an exact pixel
+    compare. Goes through PIL so PPM header quirks (comments, whitespace) are
+    handled identically on both sides of the comparison; returns None if the file
+    can't be read. P6 PPM carries no colour metadata, so the bytes are the stored
+    samples verbatim."""
+    try:
+        with PILImage.open(path) as im:
+            rgb = im.convert("RGB")
+            return (rgb.width, rgb.height, rgb.tobytes())
+    except Exception:
+        return None
+
+
+def _raster_bit_exact(
+    reference_path: str, distorted_path: str
+) -> tuple[Optional[bool], Optional[int], Optional[int]]:
+    """Definitive byte-level bit-exactness of ``distorted`` vs ``reference`` (both
+    8-bit RGB rasters), independent of iqa-cli/PSNR.
+
+    Returns ``(bit_exact, first_diff_byte, diff_byte_count)``. ``bit_exact`` is
+    None (with None diagnostics) when either raster can't be read; differing
+    dimensions count as not-exact. The exact-match path is a single C-level
+    ``bytes`` compare (cheap); the per-byte diagnostic only runs on a mismatch."""
+    ref = _read_ppm_raster(reference_path)
+    dist = _read_ppm_raster(distorted_path)
+    if ref is None or dist is None:
+        return (None, None, None)
+    (rw, rh, rb), (dw, dh, db) = ref, dist
+    if (rw, rh) != (dw, dh) or len(rb) != len(db):
+        return (False, 0, max(len(rb), len(db)))
+    if rb == db:  # fast path: most rows are bit-exact
+        return (True, None, 0)
+    # Mismatch is rare → vectorise the diagnostic instead of a Python byte loop.
+    import numpy as np
+
+    a = np.frombuffer(rb, dtype=np.uint8)
+    b = np.frombuffer(db, dtype=np.uint8)
+    diff = a != b
+    return (False, int(np.argmax(diff)), int(diff.sum()))
+
+
 def _measure_one(
     task: BenchmarkTask,
     temp_dir: str,
@@ -841,28 +877,57 @@ def _measure_one(
             filesize = 0
 
         # 2. Compute IQA via iqa-cli (SSIMULACRA2 + PSNR + SSIM + Butteraugli, from
-        # the iqa crate, which consumes raw pixels):
+        # the iqa crate, which consumes raw pixels). The reference each row is
+        # scored against:
         #   - Encoders: decode the encoded output with the format's reference
         #     decoder and score against the original source ("source" basis).
-        #   - Decoders: the output is already a PPM; score it against the *golden*
-        #     (reference) decoder's PPM for the same input ("golden" basis). This
-        #     isolates decoder fidelity from the encoder loss both share, so a
-        #     bit-exact decoder scores ∞ and only approximate paths show a finite
-        #     PSNR.
+        #   - Lossless-input decoders (PNG always; WebP/JXL lossless path): the
+        #     decoded pixels MUST equal the source, so score against the *source*
+        #     ground truth ("source" basis) — the same path encoders use. This
+        #     measures true correctness, not agreement with another decoder.
+        #   - Lossy-input decoders (JPEG, AVIF, WebP/JXL lossy path): no source
+        #     ground truth exists, so score against the *golden* (reference)
+        #     decoder's PPM of the same input ("golden" basis), isolating decoder
+        #     fidelity from the encoder loss both share.
+        decode_time_s: Optional[float] = None
         if task.impl.type == BenchmarkType.ENCODE:
             distorted_ppm = os.path.join(temp_dir, f"{identifier}_decoded.ppm")
             temp_files.append(distorted_ppm)
+            # Time this single reference-decode: a real, drift-free decode cost for
+            # this exact encoded output (relative/single-pass, like time_s).
+            decode_start = time.time()
             _decode_to_ppm(task, output_path, distorted_ppm, env=env)
+            decode_time_s = time.time() - decode_start
             reference_ppm = task.source_path
             metric_basis = "source"
         else:
             distorted_ppm = output_path
-            # The golden PPM is shared across every decoder of this input
-            # (memoized + atomically published), so it is owned by the golden
-            # cache dir, not this task — do NOT add it to temp_files.
-            reference_ppm = _golden_reference_ppm(task, golden_cache, env, identifier)
-            metric_basis = "golden"
+            if _decode_input_is_lossless(task):
+                # Lossless round-trip: the source is the ground truth.
+                reference_ppm = task.source_path
+                metric_basis = "source"
+            else:
+                # Lossy: the golden PPM is shared across every decoder of this input
+                # (memoized + atomically published), so it is owned by the golden
+                # cache dir, not this task — do NOT add it to temp_files.
+                reference_ppm = _golden_reference_ppm(
+                    task, golden_cache, env, identifier
+                )
+                metric_basis = "golden"
         score, psnr, ssim, butteraugli = _run_iqa(reference_ppm, distorted_ppm, env=env)
+
+        # Definitive bit-exactness (independent of PSNR): a byte compare of the
+        # produced raster against the reference it was scored against. Meaningful
+        # for any decode row (does it reproduce its reference exactly?) and for a
+        # lossless encoder's round-trip; not for a lossy encode (intentionally not
+        # identical), where it stays None.
+        bit_exact: Optional[bool] = None
+        bit_exact_first_diff: Optional[int] = None
+        bit_exact_diff_count: Optional[int] = None
+        if task.impl.type == BenchmarkType.DECODE or lossless:
+            bit_exact, bit_exact_first_diff, bit_exact_diff_count = _raster_bit_exact(
+                reference_ppm, distorted_ppm
+            )
 
         # 3. Get image dimensions from source file
         width, height, megapixels, bpp = 0, 0, 0.0, 0.0
@@ -882,12 +947,21 @@ def _measure_one(
         psnr_str = f"{psnr:.2f}" if psnr is not None else "∞/NA"
         ssim_str = f"{ssim:.4f}" if ssim is not None else "NA"
         ba_str = f"{butteraugli:.3f}" if butteraugli is not None else "NA"
+        # Surface a genuinely non-bit-exact lossless path right in the sweep log so
+        # it's caught while running (drives the per-codec deep-fix), against the
+        # basis it was scored on (source for lossless, golden for lossy decode).
+        be_str = ""
+        if bit_exact is False:
+            be_str = (
+                f" {Fore.YELLOW}[NOT bit-exact vs {metric_basis}: "
+                f"{bit_exact_diff_count} bytes differ]{Style.RESET_ALL}"
+            )
         status = (
             f"{Fore.GREEN}✓{Style.RESET_ALL} {task.name()} — "
             f"Size: {humanize.naturalsize(filesize, binary=True)}, "
             f"SSIMULACRA2: {score:.2f}, PSNR: {psnr_str}, SSIM: {ssim_str}, "
             f"Butteraugli: {ba_str}, bpp: {bpp:.3f} "
-            f"(took {elapsed_time:.1f} s){dim_warning}"
+            f"(took {elapsed_time:.1f} s){be_str}{dim_warning}"
         )
 
         metric = BenchmarkMetrics(
@@ -913,6 +987,10 @@ def _measure_one(
             megapixels=megapixels,
             bpp=bpp,
             time_s=elapsed_time,
+            decode_time_s=decode_time_s,
+            bit_exact=bit_exact,
+            bit_exact_first_diff=bit_exact_first_diff,
+            bit_exact_diff_count=bit_exact_diff_count,
         )
         return (metric, status)
     except Exception as e:
@@ -959,6 +1037,10 @@ def _measure_one(
             # meaningless for a failed row, so record 0.0 (also: elapsed_time may
             # be unbound if subprocess.run raised).
             time_s=0.0,
+            decode_time_s=None,
+            bit_exact=None,
+            bit_exact_first_diff=None,
+            bit_exact_diff_count=None,
         )
         return (metric, status)
     finally:
@@ -1742,6 +1824,89 @@ def _abort_on_quality_failures(failures: list[str], bundle: str):
         print(f"  {Fore.RED}✗{Style.RESET_ALL} {name}")
     print()
     sys.exit(1)
+
+
+def _report_reuse_banner(bundle_dir: str) -> None:
+    """Print a loud warning that ``bench report`` only re-skins existing raw data,
+    and surface the bundle's recorded commit against the current HEAD so any
+    codebase drift is visible before the (reused) graphs are trusted."""
+    print(f"\n{Fore.YELLOW}{'=' * 70}")
+    print("REGENERATING HTML ONLY — NO BENCHMARK IS RE-RUN")
+    print(f"{'=' * 70}{Style.RESET_ALL}")
+    print(
+        "This rebuilds report.html from the raw metrics already in the bundle. "
+        "Those measurements were produced by whatever codebase made the bundle; "
+        "the regenerated graphs ASSUME that data still matches the current report "
+        "code and codec behaviour. If anything relevant changed, the charts can be "
+        f"{Fore.YELLOW}silently wrong{Style.RESET_ALL} — re-run a full sweep if in doubt."
+    )
+    bundle_git = _git_info(bundle_dir) or {}
+    bundle_commit = str(bundle_git.get("commit") or "")
+    current = get_git_info() or {}
+    current_commit = str(current.get("commit") or "")
+    if bundle_commit:
+        same = bundle_commit == current_commit
+        marker = (
+            f"{Fore.GREEN}(matches current HEAD){Style.RESET_ALL}"
+            if same
+            else f"{Fore.RED}(differs from current HEAD!){Style.RESET_ALL}"
+        )
+        print(
+            f"\n  bundle commit : {bundle_commit[:12]}"
+            f"{' · dirty' if bundle_git.get('dirty') else ''} {marker}"
+        )
+        print(
+            f"  current HEAD  : {current_commit[:12] or 'unknown'}"
+            f"{' · dirty' if current.get('dirty') else ''}"
+        )
+    else:
+        print(
+            f"\n  {Fore.YELLOW}This bundle records no git commit — its provenance "
+            f"is unknown.{Style.RESET_ALL}"
+        )
+    print()
+
+
+def run_report(args: ReportArgs) -> None:
+    """Rebuild ``report.html`` for an existing bundle from its raw metrics, without
+    re-running anything (issue: cheap report iteration on expensive results).
+
+    Reuses the single HTML entrypoint ``generate_report_html`` (the same call
+    ``_finalize_bundle`` makes), so there is no duplicate report logic — this only
+    adds the safety rail around it."""
+    bundle = os.path.abspath(args.directory)
+    if not os.path.isdir(bundle):
+        print(f"{Fore.RED}Error: not a directory: {bundle}{Style.RESET_ALL}")
+        sys.exit(1)
+    # A real bundle always has the quality suite (the metric pass always runs) or
+    # at least a top-level manifest; reject anything else early.
+    looks_like_bundle = os.path.exists(
+        os.path.join(bundle, "quality", "metrics.json")
+    ) or os.path.exists(os.path.join(bundle, "manifest.json"))
+    if not looks_like_bundle:
+        print(
+            f"{Fore.RED}Error: {bundle} does not look like a results bundle "
+            f"(no quality/metrics.json or manifest.json).{Style.RESET_ALL}"
+        )
+        sys.exit(1)
+
+    _report_reuse_banner(bundle)
+    if not args.assume_results_current:
+        try:
+            answer = (
+                input("Regenerate report.html from this reused data? [y/N] ")
+                .strip()
+                .lower()
+            )
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Aborted (pass --assume-results-current to skip this prompt).")
+            sys.exit(1)
+
+    generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    report_path = generate_report_html(bundle, generated_at=generated_at)
+    print(f"\n✓ Report regenerated: {report_path}")
 
 
 def run_compile(args: CompileArgs):

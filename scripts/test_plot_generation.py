@@ -324,7 +324,7 @@ def test_report_html():
     assert "Performance" in html and "Quality" in html
     # Quality is interactive: raw data embedded + the chart engine inlined.
     assert 'id="quality-metrics"' in html, "raw metrics must be embedded inline"
-    assert "quality-app" in html and "renderRDChart" in html, "chart engine inlined"
+    assert "quality-app" in html and "renderXYChart" in html, "chart engine inlined"
     embedded = json.loads(
         re.search(
             r'<script id="quality-metrics" type="application/json">(.*?)</script>',
@@ -340,8 +340,22 @@ def test_report_html():
         "ssim + butteraugli must round-trip into the report"
     )
     assert "Butteraugli" in html, "Butteraugli metric must be wired into the report"
-    assert "q-metric-grid" in html, (
-        "per-format section must render the all-metrics small-multiples grid"
+    # Rate-distortion now lives in per-format tabs (full-width, one stacked chart
+    # per metric) rather than a cramped small-multiples grid.
+    assert "id='q-tabs'" in html or 'id="q-tabs"' in html, (
+        "per-format tabs mount point must be present"
+    )
+    assert "q-tablist" in html and "renderTabs" in html, (
+        "the ARIA tablist engine must be inlined"
+    )
+    # A "view" preset picker switches the shared X axis (size / encode / decode
+    # time); a filter matrix controls which metrics + implementations are shown.
+    assert "q-view-select" in html and "PRESETS" in html, (
+        "the view preset picker must be wired into the engine"
+    )
+    assert "q-filters-body" in html, "the filter matrix mount point must be present"
+    assert "decode_time_s" in html, (
+        "decode-time axis must be wired into the engine (measured, never joined)"
     )
     # Dataset & Run Configuration: the report must describe what was benchmarked
     # and link to the dataset's source.
@@ -367,10 +381,11 @@ def test_report_html():
     )
     assert "arithmetic average" in html, "aggregation note must explain the mean"
     assert "hardHi" in html, "known-range axis scaling must be wired into the engine"
-    # Time dimension (issue #46): per-section toggles mounted beside each heading,
-    # the bubble-sizing + decoder-scatter engine inlined, and decode times +
-    # fidelity round-tripping into the decoder summary the scatter is drawn from.
-    for mount in ("q-toggle-rd", "q-toggle-lossless", "q-toggle-decoder"):
+    # Time dimension (issue #46): per-section toggles mounted beside the lossless
+    # and decoder headings (the rate-distortion time toggle now lives in the view
+    # controls), the bubble-sizing + decoder-scatter engine inlined, and decode
+    # times + fidelity round-tripping into the decoder summary the scatter draws from.
+    for mount in ("q-toggle-lossless", "q-toggle-decoder"):
         assert f"id='{mount}'" in html, f"missing per-section time toggle mount {mount}"
     assert "showTime" in html, "per-section show-time state must be in the engine"
     assert "timeScale" in html and "sizeLegendHTML" in html, (

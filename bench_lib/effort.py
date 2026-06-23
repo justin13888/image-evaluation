@@ -22,7 +22,7 @@ from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 
-from bench_lib import scaling
+from bench_lib.imageprep import image_pixels, to_canonical_ppm
 from bench_lib.models import (
     BenchList,
     BenchmarkMetrics,
@@ -58,17 +58,18 @@ EFFORT_AXES: Dict[str, Tuple[str, List[str]]] = {
 
 def prepare_effort_images(dataset: DatasetId, sources: List[str]) -> List[str]:
     """Downscale each source to ~``EFFORT_MP`` (never upscaling) as a cached 8-bit
-    PPM, reusing the scaling ladder's downscaler/cache. Returns the PPM paths."""
+    PPM via the shared canonicalizer (same code path every sweep uses), reusing
+    the scaling cache directory. Returns the PPM paths."""
     cache_dir = os.path.join("data", ".scaling_cache", dataset.value)
     out: List[str] = []
     for src in sources:
-        src_px = scaling._image_pixels(src)
+        src_px = image_pixels(src)
         if src_px <= 0:
             continue
         target_px = min(int(EFFORT_MP * 1_000_000), src_px)  # never upscale
         stem = os.path.splitext(os.path.basename(src))[0]
         ppm = os.path.join(cache_dir, f"{stem}.effort.ppm")
-        if scaling._downscale_to_ppm(src, target_px, ppm):
+        if to_canonical_ppm(src, ppm, target_px):
             out.append(ppm)
     return out
 

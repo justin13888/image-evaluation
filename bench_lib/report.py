@@ -59,9 +59,62 @@ def _img_tag(img_path: str) -> str:
     )
 
 
-def _embed_charts(section_dir: str) -> str:
-    """Embed every chart in a suite subdirectory, sorted by name. Prefers SVG and
-    falls back to PNG of the same basename, so older PNG-only bundles still render."""
+# Formats charts are grouped under, so the many per-(format, op, point) figures
+# tab by format rather than scrolling as one long column.
+_GROUP_FORMATS = ("jpeg", "png", "webp", "avif", "jxl")
+
+
+def _chart_group(path: str) -> str:
+    """Group key for a chart filename — the image format it belongs to, else
+    'Other'. Filenames are ``<fmt>_op_…`` (perf), ``scaling_<fmt>_op`` and
+    ``effort_<fmt>_…``, so the format token is in the first two underscore parts."""
+    parts = os.path.splitext(os.path.basename(path))[0].lower().split("_")
+    for tok in parts[:2]:
+        if tok in _GROUP_FORMATS:
+            return tok.upper()
+    return "Other"
+
+
+def _gallery_html(charts: list[str], group_id: str) -> str:
+    """Embed charts as a full-width, ARIA-tabbed gallery grouped by format, so the
+    big per-format figure sets are one tab each rather than a long scroll. A single
+    group needs no tabs (flat list). Powered by the shared gallery-tab JS in
+    report.js (it wires any ``[data-img-tabs]`` container)."""
+    groups: dict[str, list[str]] = {}
+    for p in charts:
+        groups.setdefault(_chart_group(p), []).append(p)
+    if len(groups) <= 1:
+        return "\n".join(_img_tag(p) for p in charts)
+    tabs: list[str] = []
+    panels: list[str] = []
+    for i, key in enumerate(sorted(groups)):
+        sel = i == 0
+        tabs.append(
+            f'<button class="q-tab{" active" if sel else ""}" type="button" '
+            f'role="tab" id="{group_id}-tab-{i}" aria-controls="{group_id}-panel-{i}" '
+            f'aria-selected="{"true" if sel else "false"}" '
+            f'tabindex="{"0" if sel else "-1"}">{html.escape(key)}</button>'
+        )
+        figs = "\n".join(_img_tag(p) for p in groups[key])
+        panels.append(
+            f'<div class="q-tabpanel" role="tabpanel" id="{group_id}-panel-{i}" '
+            f'aria-labelledby="{group_id}-tab-{i}" tabindex="0"'
+            f"{'' if sel else ' hidden'}>{figs}</div>"
+        )
+    return (
+        '<div class="img-tabs" data-img-tabs>'
+        '<div class="q-tablist" role="tablist" aria-label="Charts by format">'
+        + "".join(tabs)
+        + "</div>"
+        + "".join(panels)
+        + "</div>"
+    )
+
+
+def _embed_charts(section_dir: str, group_id: str) -> str:
+    """Embed every chart in a suite subdirectory, sorted by name, as a tabbed-by-
+    format gallery. Prefers SVG and falls back to PNG of the same basename, so
+    older PNG-only bundles still render."""
     by_base: dict[str, str] = {}
     # PNGs first, then let SVGs of the same basename win.
     for path in sorted(glob.glob(os.path.join(section_dir, "*.png"))):
@@ -71,7 +124,7 @@ def _embed_charts(section_dir: str) -> str:
     charts = [by_base[k] for k in sorted(by_base)]
     if not charts:
         return "<p><em>No charts.</em></p>"
-    return "\n".join(_img_tag(p) for p in charts)
+    return _gallery_html(charts, group_id)
 
 
 def _load_json(path: str) -> Optional[Any]:
@@ -240,21 +293,21 @@ def _quality_section(qual_dir: str) -> list[str]:
     qmanifest = _load_json(os.path.join(qual_dir, "manifest.json"))
     parts.append(
         "<p class='muted'>Interactive — rendered in your browser from the raw "
-        "measurements embedded below. Hover a point for details; click a legend "
-        "entry to toggle a series. The per-format charts show every metric at "
-        "once; the Pareto-metric and x-axis-scale toggles up top drive the "
-        "cross-format Pareto chart. Lossless encoders (PNG, lossless JXL/WebP) "
-        "have no rate-distortion tradeoff, so they appear in their own "
-        "compression-efficiency section rather than on the curves. Each point's "
-        "mean <em>encode/decode time</em> is shown both on hover and as the point's "
-        "<em>bubble size</em> (bigger = slower) — a single-pass wall-clock measured "
-        "while the suite runs many images in parallel, so read it as a "
-        "<em>relative</em> sense of how an operating point's cost scales (higher "
-        "quality/effort = slower), not the performance suite's isolated timing. This "
-        "single-pass time additionally includes process spawn and writing the output "
-        "file (the performance suite is compute-only via <code>--discard</code>). A "
-        "per-section <em>Show time</em> toggle (default on) hides the time dimension "
-        "when you want to read the rate-distortion shape on its own.</p>"
+        "measurements embedded below. The <em>View</em> picker sets the X axis "
+        "shared by every rate-distortion chart: quality vs size (bpp), vs encode "
+        "time, or vs decode time (← → switch the per-format tabs; Alt+[ / Alt+] "
+        "cycle views). Each format's tab stacks one full-width chart per metric "
+        "(SSIMULACRA2, PSNR, SSIM, Butteraugli), and the <em>Cross-format Pareto</em> "
+        "tab overlays each format's best encoders. Use the <em>Filters</em> panel to "
+        "choose which metrics and implementations are shown; hover a point for "
+        "details. Lossless encoders (PNG, lossless JXL/WebP) have no rate-distortion "
+        "tradeoff, so they appear in their own compression-efficiency section rather "
+        "than on the curves. Decode time is a real per-output measurement (the "
+        "reference decode of each encoded result); encode time is shown on the size "
+        "views as the point's <em>bubble size</em> (bigger = slower). Both are "
+        "single-pass wall-clocks measured under the parallel pool — a <em>relative</em> "
+        "sense of how an operating point's cost scales, not the performance suite's "
+        "isolated timing.</p>"
     )
     parts.append(
         "<div class='q-disclaimer'><strong>IQA metrics are approximations, not "
@@ -286,22 +339,23 @@ def _quality_section(qual_dir: str) -> list[str]:
 
     parts.append(
         "<div id='quality-app'>"
-        "<div id='q-controls'></div>"
+        "<div id='q-controls' class='q-controls' role='group' "
+        "aria-label='Chart view controls'></div>"
+        "<div id='q-status' class='q-visually-hidden' role='status' "
+        "aria-live='polite'></div>"
         "<div id='q-aggregation' class='q-agg'></div>"
-        "<h3>Cross-format Pareto front — best encoders of each format"
-        "<span class='q-section-toggle' id='q-toggle-rd'></span></h3>"
-        "<p class='q-note'>Each curve is a format's Pareto-optimal encoder(s) "
-        "(non-dominated in bpp vs quality), coloured by format. Up and to the "
-        "left is better. Bubble size encodes mean encode time (bigger = slower); "
-        "the <em>Show time</em> toggle governs every rate-distortion chart here.</p>"
-        "<div id='q-combined'></div>"
-        "<h3>Rate-distortion by format</h3>"
-        "<p class='q-note'>A small-multiples grid per format: every encoder's "
-        "quality sweep aggregated to a mean curve over the images (see the "
-        "aggregation note above), shown for every available metric (SSIMULACRA2, "
-        "PSNR, SSIM, Butteraugli). Each metric's y-axis is fixed to that metric's "
-        "known range, so formats are directly comparable.</p>"
-        "<div id='q-charts'></div>"
+        "<details id='q-filters' class='q-filters'>"
+        "<summary>Filters — metrics &amp; implementations shown</summary>"
+        "<div id='q-filters-body' class='q-filters-body'></div>"
+        "</details>"
+        "<h3>Rate-distortion — by format</h3>"
+        "<p class='q-note'>Per-format tabs (plus a cross-format Pareto overview); "
+        "each tab stacks one full-width chart per metric, all on the X axis chosen "
+        "by the <em>View</em> picker. Every encoder's quality sweep is aggregated to "
+        "a mean curve over the images (see the aggregation note above); each "
+        "metric's y-axis is fixed to its known range, so formats are directly "
+        "comparable. Up and to the left/up is better.</p>"
+        "<div id='q-tabs'></div>"
         "<h3>Lossless compression efficiency"
         "<span class='q-section-toggle' id='q-toggle-lossless'></span></h3>"
         "<p class='q-note'>Lossless encoders produce a pixel-identical image, so "
@@ -314,12 +368,14 @@ def _quality_section(qual_dir: str) -> list[str]:
         "<h3>Decoder fidelity &amp; speed"
         "<span class='q-section-toggle' id='q-toggle-decoder'></span></h3>"
         "<p class='q-note'>Decoders carry no rate-distortion tradeoff, so they are "
-        "judged on speed and on fidelity against the format's golden (reference) "
-        "decoder of the same input. Fidelity ∞ = pixel-identical (a faithful "
-        "decoder); a finite worst-case PSNR flags an approximate decode path. "
-        "Decode time is the relative one-pass cost across the input-bitrate sweep; "
-        "the <em>Show time</em> toggle adds a speed-vs-bitrate scatter (decode time "
-        "vs input bpp) above the table.</p>"
+        "judged on speed and on fidelity against the reference they are scored "
+        "against: the <em>source</em> ground truth for a losslessly-encoded input "
+        "(PNG always; the WebP/JXL lossless path) or the format's <em>golden</em> "
+        "(reference) decoder for a lossy input. Fidelity is computed by a definitive "
+        "byte-level compare: ∞ = bit-exact; a finite worst-case PSNR flags an "
+        "approximate decode path. Decode time is the relative one-pass cost across "
+        "the input-bitrate sweep; the <em>Show time</em> toggle adds a "
+        "speed-vs-bitrate scatter above the table.</p>"
         "<div id='q-decoders'></div>"
         "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
         "<p class='q-note'>Negative = fewer bits for equal quality (better). "
@@ -328,7 +384,6 @@ def _quality_section(qual_dir: str) -> list[str]:
         "<div id='q-bdrate'></div>"
         "</div>"
     )
-    parts.append(f"<script>{_asset('report.js')}</script>")
     return parts
 
 
@@ -383,7 +438,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "across single-threaded and all-cores modes. Quality above is primary: "
             "raw speed is only meaningful alongside the quality it trades for.</p>"
         )
-        parts.append(_embed_charts(perf_dir))
+        parts.append(_embed_charts(perf_dir, "perf"))
 
     scal_dir = os.path.join(bundle_dir, "scaling")
     if os.path.isdir(scal_dir):
@@ -398,7 +453,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "<code>scaling/summary.md</code>. Single-threaded to isolate the "
             "pixel-count exponent from parallel-scaling effects.</p>"
         )
-        parts.append(_embed_charts(scal_dir))
+        parts.append(_embed_charts(scal_dir, "scaling"))
 
     eff_dir = os.path.join(bundle_dir, "effort")
     if os.path.isdir(eff_dir):
@@ -413,7 +468,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "(relative), not the performance suite's isolated timing. Numbers are in "
             "<code>effort/summary.md</code>.</p>"
         )
-        parts.append(_embed_charts(eff_dir))
+        parts.append(_embed_charts(eff_dir, "effort"))
 
     parts.append(
         "<p class='muted'>Raw data is embedded above "
@@ -421,6 +476,9 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         "<code>performance/raw.json</code>, <code>quality/metrics.json</code>, "
         "and per-suite <code>summary.md</code>.</p>"
     )
+    # One inlined chart engine for the whole document: it draws the interactive
+    # quality view and wires every tabbed image gallery (perf/scaling/effort).
+    parts.append(f"<script>{_asset('report.js')}</script>")
     parts.append("</body></html>")
 
     out_path = os.path.join(bundle_dir, "report.html")

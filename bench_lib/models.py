@@ -1725,11 +1725,39 @@ class DocsArgs(BaseModel):
     ] = False
 
 
+class ReportArgs(BaseModel):
+    """Rebuild ``report.html`` for an EXISTING results bundle from its raw metrics,
+    without re-running the (expensive) benchmark. Only the presentation is rebuilt;
+    the embedded raw measurements are reused exactly as they are on disk.
+
+    DANGER: this assumes the bundle's raw data was produced by a codebase
+    compatible with the *current* report code. If the metrics schema or a codec's
+    behaviour changed since the bundle was made, the regenerated graphs can be
+    silently wrong. Re-run a full sweep if in doubt. Requires the
+    ``--assume-results-current`` opt-in (or an interactive confirmation)."""
+
+    directory: Annotated[
+        str,
+        tyro.conf.Positional,
+        Field(description="Path to an existing results bundle directory."),
+    ]
+    assume_results_current: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Confirm you understand this ONLY rebuilds the HTML from "
+            "reused raw metrics and assumes the codebase/results still match. "
+            "Without it you are prompted interactively."
+        ),
+    ] = False
+
+
 CliEntry = Union[
     Annotated[RunArgs, tyro.conf.subcommand(name="run")],
     Annotated[QualityArgs, tyro.conf.subcommand(name="quality")],
     Annotated[PerfArgs, tyro.conf.subcommand(name="perf")],
     Annotated[AllArgs, tyro.conf.subcommand(name="all")],
+    Annotated[ReportArgs, tyro.conf.subcommand(name="report")],
     Annotated[CleanArgs, tyro.conf.subcommand(name="clean")],
     Annotated[CompileArgs, tyro.conf.subcommand(name="compile")],
     Annotated[SetupArgs, tyro.conf.subcommand(name="setup")],
@@ -1924,3 +1952,20 @@ class BenchmarkMetrics(TypedDict):
     # an operating point's cost scales, not the rigorous-timing overlay's isolated
     # measurement. 0.0 on error.
     time_s: float
+    # Wall-clock seconds for the single reference-decode of THIS encoded output —
+    # measured (never joined) by timing the decode the encoder path already does to
+    # score IQA, so "quality vs decode time" is a real, drift-free axis. Same
+    # single-pass/relative caveat as time_s. Only set on encode rows; None on decode
+    # rows (their time_s already *is* a decode time) and on error.
+    decode_time_s: Optional[float]
+    # Definitive bit-exactness from a direct byte compare of the produced raster
+    # against the reference it is scored against (decode rows: vs source for a
+    # losslessly-encoded input, else vs the golden decoder; encode rows: vs source,
+    # lossless encoders only). True/False where a ground-truth compare applies;
+    # None where it does not (lossy encode rows) or the raster could not be read.
+    # Independent of iqa-cli's PSNR (no rounding / non-finite inference).
+    bit_exact: Optional[bool]
+    # Diagnostics for a non-bit-exact row (both None when bit-exact or N/A): the
+    # byte offset of the first differing sample, and the count of differing bytes.
+    bit_exact_first_diff: Optional[int]
+    bit_exact_diff_count: Optional[int]

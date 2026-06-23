@@ -17,6 +17,7 @@ from bench_lib.models import (
     CleanArgs,
     CompileArgs,
     DocsArgs,
+    ReportArgs,
     RunArgs,
     SetupArgs,
 )
@@ -24,6 +25,7 @@ from bench_lib.runner import (
     run_clean,
     run_compile,
     run_docs,
+    run_report,
     run_setup,
     run_sweep,
 )
@@ -45,8 +47,12 @@ if __name__ == "__main__":
         elif isinstance(args, DocsArgs):
             run_docs(args)
 
+        elif isinstance(args, ReportArgs):
+            run_report(args)
+
         # RunArgs and its backward-compatible aliases (quality/perf/all) are all
         # RunArgs subclasses, so this single branch handles every sweep command.
+        # (ReportArgs is a plain BaseModel, handled above, so order is irrelevant.)
         elif isinstance(args, RunArgs):
             run_sweep(args)
 
