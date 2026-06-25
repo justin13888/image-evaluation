@@ -57,7 +57,6 @@
 }
 .q-chip .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
 .q-chip.off { opacity: .4; text-decoration: line-through; }
-.q-chip.static { cursor: default; }
 
 .q-tooltip {
   position: absolute; pointer-events: none; z-index: 5; max-width: 260px;

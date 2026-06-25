@@ -510,21 +510,36 @@
 
   function preset() { return PRESETS[state.presetIdx]; }
 
-  function legendFor(series) {
+  // Clickable legend chips shared by every line chart. items: [{name,label,color}]
+  // where `name` keys the global state.implsOff visibility map (so toggling a
+  // series here also toggles it on the RD charts and in the filter bar). `rerender`
+  // redraws the owning chart; a hidden series stays in the legend (struck-through)
+  // so it can be brought back.
+  function interactiveLegend(items, rerender) {
     var wrap = el("div", { class: "q-legend", role: "group", "aria-label": "Series — activate to show or hide" });
-    series.forEach(function (s) {
-      var off = !!state.implsOff[s.implName];
+    items.forEach(function (it) {
+      var off = !!state.implsOff[it.name];
       var chip = el("button", { class: "q-chip" + (off ? " off" : ""), type: "button", "aria-pressed": off ? "false" : "true" });
-      chip.innerHTML = '<span class="sw" style="background:' + s.color + '"></span>' + esc(s.label);
+      chip.innerHTML = '<span class="sw" style="background:' + it.color + '"></span>' + esc(it.label);
       chip.addEventListener("click", function () {
-        if (state.implsOff[s.implName]) delete state.implsOff[s.implName];
-        else state.implsOff[s.implName] = true;
-        renderActivePanel();
-        renderFilters();
+        if (state.implsOff[it.name]) delete state.implsOff[it.name];
+        else state.implsOff[it.name] = true;
+        rerender();
+        // Keep the global filter controls in sync (the floating bar once it exists,
+        // else the legacy filter matrix).
+        if (typeof renderFilterBar === "function") renderFilterBar();
+        else if (typeof renderFilters === "function") renderFilters();
       });
       wrap.appendChild(chip);
     });
     return wrap;
+  }
+
+  function legendFor(series) {
+    return interactiveLegend(
+      series.map(function (s) { return { name: s.implName, label: s.label, color: s.color }; }),
+      renderActivePanel
+    );
   }
 
   function renderActivePanel() {
@@ -860,11 +875,25 @@
         dash: DASHES[di % DASHES.length], points: points,
       };
     });
+    // Interactive legend (toggle a line); hidden series drop from the plot/axis
+    // but stay in the legend so they can be brought back.
+    var legend = interactiveLegend(
+      series.map(function (s) { return { name: s.impl, label: s.impl, color: s.color }; }),
+      renderLossless
+    );
+    var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
+    if (!vis.length) {
+      host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort (nothing shown)" viewBox="0 0 ' +
+        VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
+        '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
+      host.appendChild(legend);
+      return;
+    }
     var allPts = [];
-    series.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
+    vis.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
     var scale = state.showTime.lossless ? timeScale(allPts) : null;
     var ys = [];
-    series.forEach(function (s) { s.points.forEach(function (p) { ys.push(p.y); }); });
+    vis.forEach(function (s) { s.points.forEach(function (p) { ys.push(p.y); }); });
     var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
     var yticks = linTicks(ymin, ymax, 6);
     var dymin = Math.min(ymin, yticks[0]), dymax = Math.max(ymax, yticks[yticks.length - 1]);
@@ -890,7 +919,7 @@
       '" text-anchor="middle">Compression effort (low → high)</text>');
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) +
       ') rotate(-90)" text-anchor="middle">Bits per pixel (lower is better)</text>');
-    series.forEach(function (s) {
+    vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
@@ -909,14 +938,11 @@
       });
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
-    var chips = series.map(function (s) {
-      return '<span class="q-chip static"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
-    }).join("");
     host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
-      '<div class="q-legend">' + chips + "</div>" +
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
       '<div class="q-tooltip" hidden></div>';
+    host.insertBefore(legend, host.children[1] || null);   // legend right after the plot
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +
@@ -1008,9 +1034,23 @@
       };
     }).filter(function (s) { return s.points.length > 0; });
     if (!series.length) { host.innerHTML = ""; return; }
+    // Interactive legend (toggle a decoder line); hidden series leave the plot but
+    // stay in the legend so they can be brought back.
+    var legend = interactiveLegend(
+      series.map(function (s) { return { name: s.impl, label: s.impl, color: s.color }; }),
+      renderDecoders
+    );
+    var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
+    if (!vis.length) {
+      host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel (nothing shown)" viewBox="0 0 ' +
+        VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
+        '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
+      host.appendChild(legend);
+      return;
+    }
 
     var xs = [], ys = [];
-    series.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
+    vis.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
     var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
     var ymax = Math.max.apply(null, ys);
     var xticks = linTicks(xmin, xmax, 6);
@@ -1038,7 +1078,7 @@
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Input bits per pixel (bpp)</text>');
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better)</text>');
-    series.forEach(function (s) {
+    vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
@@ -1058,14 +1098,11 @@
       });
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
-    var chips = series.map(function (s) {
-      return '<span class="q-chip static"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
-    }).join("");
     host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
-      '<div class="q-legend">' + chips + "</div>" +
       '<p class="q-note">Hollow markers = approximate decode (differs from the reference it is scored against); filled = bit-exact.</p>' +
       '<div class="q-tooltip" hidden></div>';
+    host.insertBefore(legend, host.children[1] || null);   // legend right after the plot
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +

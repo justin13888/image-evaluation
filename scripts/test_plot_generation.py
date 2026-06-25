@@ -460,6 +460,14 @@ def test_report_html():
     assert "negative = fewer bits for the same quality" in html, (
         "BD-rate note must define the sign convention"
     )
+    # Every line chart's legend is interactive (toggles a line via state.implsOff);
+    # the old non-clickable static chips are gone.
+    assert "q-chip static" not in html, (
+        "lossless/decoder legends must be interactive, not static chips"
+    )
+    assert "function interactiveLegend(" in html, (
+        "the shared interactive-legend helper must be inlined"
+    )
     # Per-point image gallery (this feature): the rows carry their image paths,
     # those round-trip into the embedded metrics, and the lightbox engine that
     # makes points clickable is inlined.
