@@ -20,7 +20,7 @@ from typing import (
 
 import tyro
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # Use this lock to ensure only one thread writes to the console at a time
@@ -1602,6 +1602,18 @@ class RunArgs(BaseArgs):
     ] = BenchmarkMode.BOTH
     perf: _PERF_ARG = "anchor"
     params: _PARAMS_ARG = "variants"
+    demo: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Demo preset: a fast, deliberately NON-rigorous sweep that "
+            "still fills every report section. Implies --quick plus --scaling and "
+            "--effort, defaults --sample to 2 and --jobs to all logical cores, and "
+            "keeps the default --perf anchor — a single run per point at maximum "
+            "parallelism. For showing off the whole report, not for accurate "
+            "measurements."
+        ),
+    ] = False
     quality_steps: Annotated[
         Optional[int],
         tyro.conf.arg(aliases=["-q"]),
@@ -1706,6 +1718,28 @@ class RunArgs(BaseArgs):
             "(downscaled to ~1 MP)."
         ),
     ] = 4
+
+    @model_validator(mode="after")
+    def _apply_demo(self) -> "RunArgs":
+        """Expand the ``--demo`` preset into the concrete flags the runner reads.
+
+        Demo is a fast, complete-coverage sweep (see the field help): the quick
+        metric pass (2 quality points, 1 decode point, all-cores-only timing,
+        single-run hyperfine) *plus* both opt-in suites so the scaling and effort
+        report sections have data, a small default sample, and all logical cores
+        for the always-parallel metric pass. ``--perf`` stays at its default
+        ``anchor`` so the performance section is populated cheaply. Explicit
+        ``--sample`` / ``--jobs`` still win; ``--scaling`` / ``--effort`` /
+        ``--quick`` only turn on, so forcing them on is consistent."""
+        if self.demo:
+            self.quick = True
+            self.scaling = True
+            self.effort = True
+            if self.sample is None:
+                self.sample = 2
+            if self.jobs is None:
+                self.jobs = os.cpu_count()
+        return self
 
 
 class QualityArgs(RunArgs):

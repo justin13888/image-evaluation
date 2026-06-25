@@ -1727,9 +1727,14 @@ def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
         json.dump(manifest, f, indent=2)
     print(f"\n✓ {len(tasks)} scaling benchmark(s) across {len(rungs)} ladder rung(s)\n")
 
-    raw = _run_hyperfine_tasks(
-        tasks, scal_dir, list(SCALING_HYPERFINE_FLAGS), args.debug
+    # Quick/demo: a single timed run per rung (skip statistical significance) to
+    # match the rest of the quick path — the log-log slope is only indicative here.
+    scaling_flags = (
+        ["--warmup", "0", "--min-runs", "1", "--max-runs", "1"]
+        if args.quick
+        else list(SCALING_HYPERFINE_FLAGS)
     )
+    raw = _run_hyperfine_tasks(tasks, scal_dir, scaling_flags, args.debug)
     write_scaling_outputs(scal_dir, raw, pixels_by_basename)
     return True
 

@@ -109,6 +109,15 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 # Quick smoke test (2 quality points per impl, anchor timing, all-cores only)
 ./bench run --dataset kodak --sample 3 --quick
 
+# Demo: a fast, deliberately NON-rigorous sweep that still fills EVERY section of
+# the HTML report (rate-distortion, lossless, decoder fidelity, BD-rate, plus the
+# performance / scaling / effort overlays and the image gallery). It implies
+# --quick and turns on --scaling + --effort, defaults --sample to 2 and --jobs to
+# all logical cores, and keeps --perf anchor: a single run per point at maximum
+# parallelism — meant for demonstrating the report, not for accurate numbers.
+./bench run --demo                  # built-in 'test' dataset; finishes quickly
+./bench run --demo --dataset kodak  # a few real images for richer curves
+
 # Full quality-first sweep + rigorous anchor timing (the default)
 ./bench run --dataset kodak
 
@@ -147,7 +156,7 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 ./bench clean            # remove build artifacts and results
 ```
 
-> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--decode-steps`, `--sample`, `--formats`/`--mode`, `--params`, and `--quick` all cap it. `--params variants` (default) adds a handful of curated secondary-knob series per encoder; `--params all` adds the full one-at-a-time expansion (heavier), while `--params axis` is the leanest (quality axis only). The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration.
+> **Runtime note:** the always-on metric pass scales with operating points × images × implementations; `--quality-steps`, `--decode-steps`, `--sample`, `--formats`/`--mode`, `--params`, and `--quick` all cap it. `--params variants` (default) adds a handful of curated secondary-knob series per encoder; `--params all` adds the full one-at-a-time expansion (heavier), while `--params axis` is the leanest (quality axis only). The optional `--perf all` overlay re-times every point across both thread modes — the largest cost multiplier — while the default `--perf anchor` times just one point per implementation. Use `--perf off` for the fastest quality-only iteration. To populate **every** report section in one fast pass (for a demo, not for accurate numbers), `--demo` bundles the smallest complete-coverage settings: it implies `--quick --scaling --effort`, defaults `--sample 2` and `--jobs` to all logical cores, and keeps `--perf anchor`.
 
 ### Cleanup
 
