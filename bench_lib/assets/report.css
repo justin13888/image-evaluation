@@ -90,10 +90,11 @@ table.q-table td.q-approx { color: #3a6ea5; }
 .q-ll-val { fill: #444; font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .q-note { color: #666; font-size: .85rem; margin: .2rem 0 .8rem; }
-.q-agg { border-left: 4px solid #2563eb; background: #f0f6ff; color: #1e3a5f;
+.q-agg, .q-fidelity-note {
+         border-left: 4px solid #2563eb; background: #f0f6ff; color: #1e3a5f;
          padding: .55rem .9rem; margin: .2rem 0 1.4rem; font-size: .85rem;
          border-radius: 0 4px 4px 0; line-height: 1.45; }
-.q-agg b { color: #15366b; }
+.q-agg b, .q-fidelity-note b { color: #15366b; }
 .q-agg:empty { display: none; }
 .q-disclaimer { border-left: 4px solid #d9a300; background: #fffaf0; color: #5c4a00;
                 padding: .6rem .9rem; margin: .8rem 0 1.2rem; font-size: .85rem;

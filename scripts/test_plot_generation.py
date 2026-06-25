@@ -448,6 +448,18 @@ def test_report_html():
     assert "q-approx" in html and "vs golden (faithful)" in html, (
         "expected-approximate decoders must render neutrally, not as a failure"
     )
+    # Each correctness graph (lossless efficiency, decoder fidelity, BD-rate)
+    # carries a concise blue definition note.
+    assert html.count("q-fidelity-note") >= 3, (
+        "each correctness section needs a blue definition note"
+    )
+    assert "Reading this table" in html and "faithful, not broken" in html, (
+        "decoder fidelity note must define bit-exact/basis and why lossy isn't exact"
+    )
+    assert "pixel-for-pixel" in html, "lossless note must define correctness-at-a-size"
+    assert "negative = fewer bits for the same quality" in html, (
+        "BD-rate note must define the sign convention"
+    )
     # Per-point image gallery (this feature): the rows carry their image paths,
     # those round-trip into the embedded metrics, and the lightbox engine that
     # makes points clickable is inlined.
