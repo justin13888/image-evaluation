@@ -370,11 +370,14 @@ def test_report_html():
     assert "q-tablist" in html and "renderTabs" in html, (
         "the ARIA tablist engine must be inlined"
     )
-    # A "view" preset picker switches the shared X axis (size / encode / decode
-    # time); a centralized floating filter bar controls formats + implementations
-    # + metrics + view across every chart.
-    assert "q-view-select" in html and "PRESETS" in html, (
-        "the view preset picker must be wired into the engine"
+    # An X-axis chooser + a log/linear scale toggle (button groups) switch the
+    # shared X axis (size / encode / decode time); a centralized filter bar
+    # controls formats + implementations + metrics across every chart.
+    assert "setAxis" in html and "state.xLog" in html, (
+        "the X-axis + scale controls must be wired into the engine"
+    )
+    assert "Logarithmic" in html and "Linear" in html, (
+        "the log/linear scale toggle must be present"
     )
     assert "q-filterbar" in html and "renderFilterBar" in html, (
         "the centralized floating filter bar mount + engine must be present"

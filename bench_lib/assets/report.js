@@ -4,15 +4,16 @@
    single source of truth.
 
    Layout:
-     - A "view" preset (<select>) picks the X axis shared by every chart: quality
-       vs size (bpp), vs encode time, or vs decode time. Y is always an IQA metric.
+     - An X-axis chooser + a log/linear scale toggle (button groups) set the X
+       axis shared by every rate-distortion chart: quality vs size (bpp), vs
+       encode time, or vs decode time. Y is always an IQA metric.
      - Rate-distortion charts live in per-format TABS (plus a cross-format Pareto
        tab); each tab stacks one full-width chart per metric.
      - A filter matrix toggles which metrics and which implementations are shown.
      - Below the tabs: lossless compression efficiency, decoder fidelity/speed, and
        a sortable BD-rate table.
    Accessibility: the tabs are a real ARIA tablist (roving tabindex + arrow keys),
-   the view picker is a native <select> (Alt+[ / Alt+] also step it), the filter
+   the X-axis chooser is a button group (Alt+[ / Alt+] also step it), the filter
    matrix uses fieldset/legend groups, charts expose role=img + <title>, and view
    changes are announced via an aria-live region. */
 (function () {
@@ -71,8 +72,9 @@
 
   // state
   var state = {
-    presetIdx: 0,
-    tab: null,                 // set after PRESETS/TABS resolve
+    xKey: "bpp",               // X axis: "bpp" | "time_s" | "decode_time_s"
+    xLog: true,                // X scale: log (true) or linear (false)
+    tab: null,                 // set after TABS resolve
     metricsOn: {},             // metric key -> bool (shown)
     implsOff: {},              // impl name -> true (hidden globally)
     formatsOff: {},            // lowercase format key -> true (format hidden everywhere)
@@ -509,9 +511,19 @@
 
   var AGG_ALL = null;   // aggregateAll(validRows), lazy
   var TABS = [];        // [{id, label, fmt|null}]
-  var PRESETS = [];
 
-  function preset() { return PRESETS[state.presetIdx]; }
+  // X axes offered by the controls box: bpp always, time axes only when measured.
+  function availableXAxes() {
+    var keys = ["bpp"];
+    if (hasAxisData("time_s")) keys.push("time_s");
+    if (hasAxisData("decode_time_s")) keys.push("decode_time_s");
+    return keys;
+  }
+  // Short label for an X-axis chooser button.
+  function axisLabel(k) {
+    return k === "bpp" ? "Size" : k === "time_s" ? "Encode time"
+      : k === "decode_time_s" ? "Decode time" : X_AXES[k].name;
+  }
 
   // Clickable legend chips shared by every line chart. items: [{name,label,color}]
   // where `name` keys the global state.implsOff visibility map (so toggling a
@@ -550,8 +562,7 @@
     var panel = el("div", { class: "q-tabpanel", role: "tabpanel", id: "panel-" + tab.id, "aria-labelledby": "tab-" + tab.id, tabindex: "0" });
     panelHost.appendChild(panel);
 
-    var pr = preset();
-    var xAxis = X_AXES[pr.xKey];
+    var xAxis = X_AXES[state.xKey];
     var metrics = availableMetrics().filter(function (k) { return state.metricsOn[k]; });
     if (!metrics.length) {
       panel.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter bar at the bottom of the page."));
@@ -562,8 +573,8 @@
     var legendSeries = null;
     metrics.forEach(function (metricKey) {
       var series = tab.fmt
-        ? seriesForFormat(AGG_ALL[tab.fmt] || [], pr.xKey, metricKey, tab.fmt)
-        : seriesForPareto(AGG_ALL, pr.xKey, metricKey);
+        ? seriesForFormat(AGG_ALL[tab.fmt] || [], state.xKey, metricKey, tab.fmt)
+        : seriesForPareto(AGG_ALL, state.xKey, metricKey);
       if (!legendSeries && series.length) legendSeries = series;
       var sec = el("div", { class: "q-stack-item" });
       sec.appendChild(el("div", { class: "q-metric-cap" }, METRIC_INFO[metricKey].name));
@@ -571,7 +582,7 @@
       sec.appendChild(chart);
       panel.appendChild(sec);
       renderXYChart(chart, series, {
-        xLog: pr.xLog, xAxis: xAxis, yInfo: METRIC_INFO[metricKey],
+        xLog: state.xLog, xAxis: xAxis, yInfo: METRIC_INFO[metricKey],
         showTime: state.showTime.rd, title: tab.label,
       });
     });
@@ -813,18 +824,7 @@
           });
         });
       }
-      // View preset (keeps id="q-view-select" so setPreset + Alt+[ /Alt+] work).
-      if (PRESETS.length) {
-        var vf = group("View");
-        var sel = el("select", { id: "q-view-select", class: "q-select" });
-        PRESETS.forEach(function (pr, i) {
-          var o = el("option", { value: String(i) }, pr.label);
-          if (i === state.presetIdx) o.setAttribute("selected", "selected");
-          sel.appendChild(o);
-        });
-        sel.addEventListener("change", function () { setPreset(parseInt(sel.value, 10)); });
-        vf.appendChild(sel);
-      }
+      // X axis + scale now live in the controls box (renderControls), not here.
     }
 
     syncBarPadding();
@@ -837,8 +837,31 @@
     if (!host) return;
     host.innerHTML = "";
 
-    // The View preset now lives on the floating filter bar (renderFilterBar);
-    // these controls keep the display-only utilities inline with the charts.
+    // X-axis chooser — quality vs size / encode time / decode time. Only shown
+    // when more than one axis was measured.
+    var axes = availableXAxes();
+    if (axes.length > 1) {
+      host.appendChild(el("span", { class: "q-label" }, "Quality vs"));
+      var axGroup = el("div", { class: "q-group", role: "group", "aria-label": "X axis" });
+      axes.forEach(function (k) {
+        var on = state.xKey === k;
+        var b = el("button", { type: "button", class: on ? "active" : "", "aria-pressed": on ? "true" : "false" }, axisLabel(k));
+        b.addEventListener("click", function () { setAxis(k); });
+        axGroup.appendChild(b);
+      });
+      host.appendChild(axGroup);
+    }
+
+    // X-scale toggle — logarithmic vs linear (independent of the axis choice).
+    host.appendChild(el("span", { class: "q-label" }, "Scale"));
+    var scGroup = el("div", { class: "q-group", role: "group", "aria-label": "X scale" });
+    [["Logarithmic", true], ["Linear", false]].forEach(function (opt) {
+      var on = state.xLog === opt[1];
+      var b = el("button", { type: "button", class: on ? "active" : "", "aria-pressed": on ? "true" : "false" }, opt[0]);
+      b.addEventListener("click", function () { setScale(opt[1]); });
+      scGroup.appendChild(b);
+    });
+    host.appendChild(scGroup);
 
     // Show-time toggle (encode-time bubbles; only meaningful on the bpp views).
     var tWrap = el("span", { class: "q-ctl" });
@@ -864,16 +887,22 @@
     });
     host.appendChild(dl);
 
-    host.appendChild(el("span", { class: "q-hint" }, "Tip: ← → switch format tabs; Alt+[ / Alt+] cycle views."));
+    host.appendChild(el("span", { class: "q-hint" }, "Tip: ← → switch format tabs; Alt+[ / Alt+] cycle the X axis."));
   }
 
-  function setPreset(i) {
-    if (i < 0 || i >= PRESETS.length) return;
-    state.presetIdx = i;
-    var sel = document.getElementById("q-view-select");
-    if (sel) sel.value = String(i);
+  function setAxis(k) {
+    if (!X_AXES[k] || availableXAxes().indexOf(k) < 0) return;
+    state.xKey = k;
+    renderControls();
     renderActivePanel();
-    announce("View: " + PRESETS[i].label);
+    announce("X axis: quality vs " + X_AXES[k].name);
+  }
+
+  function setScale(log) {
+    state.xLog = !!log;
+    renderControls();
+    renderActivePanel();
+    announce(log ? "Logarithmic X axis" : "Linear X axis");
   }
 
   // ---- aggregation disclosure ----------------------------------------------
@@ -1331,19 +1360,6 @@
 
   // ---- init ----------------------------------------------------------------
 
-  function buildPresets() {
-    PRESETS = [
-      { id: "bpp-log", label: "Quality vs Size — bpp (log x)", xKey: "bpp", xLog: true },
-      { id: "bpp-lin", label: "Quality vs Size — bpp (linear x)", xKey: "bpp", xLog: false },
-    ];
-    if (hasAxisData("time_s")) {
-      PRESETS.push({ id: "enc", label: "Quality vs Encode time (log x)", xKey: "time_s", xLog: true });
-    }
-    if (hasAxisData("decode_time_s")) {
-      PRESETS.push({ id: "dec", label: "Quality vs Decode time (log x)", xKey: "decode_time_s", xLog: true });
-    }
-  }
-
   function buildTabs() {
     TABS = [{ id: "pareto", label: "Cross-format Pareto", fmt: null }];
     Object.keys(AGG_ALL).sort().forEach(function (fmt) {
@@ -1519,7 +1535,6 @@
     if (!document.getElementById("quality-app")) return;
     AGG_ALL = aggregateAll(validRows(METRICS));
     availableMetrics().forEach(function (k) { state.metricsOn[k] = true; });
-    buildPresets();
     buildTabs();
     state.tab = TABS[0] ? TABS[0].id : null;
 
@@ -1533,12 +1548,14 @@
     mountSectionToggle("q-toggle-lossless", "lossless", renderLossless);
     mountSectionToggle("q-toggle-decoder", "decoder", renderDecoders);
 
-    // Alt+[ / Alt+] step the view preset from anywhere (the <select> already
-    // cycles with arrow keys when focused; this is the global accelerator).
+    // Alt+[ / Alt+] cycle the X axis from anywhere (the button group also takes
+    // direct clicks; this is the global accelerator).
     document.addEventListener("keydown", function (e) {
       if (!e.altKey) return;
-      if (e.key === "]") { e.preventDefault(); setPreset((state.presetIdx + 1) % PRESETS.length); }
-      else if (e.key === "[") { e.preventDefault(); setPreset((state.presetIdx - 1 + PRESETS.length) % PRESETS.length); }
+      var axes = availableXAxes();
+      var i = axes.indexOf(state.xKey); if (i < 0) i = 0;
+      if (e.key === "]") { e.preventDefault(); setAxis(axes[(i + 1) % axes.length]); }
+      else if (e.key === "[") { e.preventDefault(); setAxis(axes[(i - 1 + axes.length) % axes.length]); }
     });
     window.addEventListener("resize", syncBarPadding);
   }
