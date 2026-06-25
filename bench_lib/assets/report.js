@@ -75,6 +75,8 @@
     tab: null,                 // set after PRESETS/TABS resolve
     metricsOn: {},             // metric key -> bool (shown)
     implsOff: {},              // impl name -> true (hidden globally)
+    formatsOff: {},            // lowercase format key -> true (format hidden everywhere)
+    barCollapsed: false,       // floating filter bar minimised to its header
     showTime: { rd: true, lossless: true, decoder: true },
   };
 
@@ -479,6 +481,7 @@
   function seriesForPareto(AGG, xKey, yKey) {
     var series = [];
     Object.keys(AGG).sort().forEach(function (fmt) {
+      if (state.formatsOff[fmt]) return;   // format filtered out in the bar
       var keep = PARETO[fmt] || [];
       var di = 0;
       AGG[fmt].forEach(function (s) {
@@ -525,10 +528,7 @@
         if (state.implsOff[it.name]) delete state.implsOff[it.name];
         else state.implsOff[it.name] = true;
         rerender();
-        // Keep the global filter controls in sync (the floating bar once it exists,
-        // else the legacy filter matrix).
-        if (typeof renderFilterBar === "function") renderFilterBar();
-        else if (typeof renderFilters === "function") renderFilters();
+        renderFilterBar();   // keep the floating bar's checkboxes in sync
       });
       wrap.appendChild(chip);
     });
@@ -554,7 +554,7 @@
     var xAxis = X_AXES[pr.xKey];
     var metrics = availableMetrics().filter(function (k) { return state.metricsOn[k]; });
     if (!metrics.length) {
-      panel.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter panel above."));
+      panel.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter bar at the bottom of the page."));
       return;
     }
 
@@ -592,20 +592,33 @@
     announce("Showing " + (tab ? tab.label : id));
   }
 
+  // Format tabs hidden by the format filter are skipped (Pareto, fmt:null, never is).
+  function tabHidden(tab) { return !!(tab.fmt && state.formatsOff[tab.fmt]); }
+
   function onTabKey(ev, idx) {
     var keys = { ArrowRight: 1, ArrowLeft: -1, Home: "home", End: "end" };
     if (!(ev.key in keys)) return;
     ev.preventDefault();
+    var visible = [];
+    TABS.forEach(function (t, i) { if (!tabHidden(t)) visible.push(i); });
+    if (!visible.length) return;
+    var pos = visible.indexOf(idx); if (pos < 0) pos = 0;
     var next;
-    if (keys[ev.key] === "home") next = 0;
-    else if (keys[ev.key] === "end") next = TABS.length - 1;
-    else next = (idx + keys[ev.key] + TABS.length) % TABS.length;
+    if (keys[ev.key] === "home") next = visible[0];
+    else if (keys[ev.key] === "end") next = visible[visible.length - 1];
+    else next = visible[(pos + keys[ev.key] + visible.length) % visible.length];
     selectTab(TABS[next].id, true);
   }
 
   function renderTabs() {
     var host = document.getElementById("q-tabs");
     if (!host) return;
+    // If the active tab's format was just filtered out, fall back to the first
+    // visible tab (Cross-format Pareto is never hidden).
+    if (!TABS.some(function (t) { return t.id === state.tab && !tabHidden(t); })) {
+      var firstVis = TABS.filter(function (t) { return !tabHidden(t); })[0];
+      state.tab = firstVis ? firstVis.id : (TABS[0] && TABS[0].id);
+    }
     host.innerHTML = "";
     var tablist = el("div", { class: "q-tablist", id: "q-tablist", role: "tablist", "aria-label": "Rate-distortion by format" });
     TABS.forEach(function (tab, i) {
@@ -615,6 +628,7 @@
         id: "tab-" + tab.id, "data-id": tab.id, "aria-selected": sel ? "true" : "false",
         "aria-controls": "panel-" + tab.id, tabindex: sel ? "0" : "-1",
       }, tab.label);
+      if (tabHidden(tab)) btn.hidden = true;
       btn.addEventListener("click", function () { selectTab(tab.id, false); });
       btn.addEventListener("keydown", function (e) { onTabKey(e, i); });
       tablist.appendChild(btn);
@@ -624,58 +638,196 @@
     renderActivePanel();
   }
 
-  // ---- filter matrix -------------------------------------------------------
+  // ---- centralized floating filter bar -------------------------------------
 
-  function renderFilters() {
-    var host = document.getElementById("q-filters-body");
-    if (!host) return;
-    host.innerHTML = "";
+  // Every implementation grouped by format, unioning the lossy-encoder, lossless
+  // and decoder datasets so toggling a "test" is consistent everywhere it appears.
+  function implsByFormat() {
+    var map = {};
+    function add(f, n) { if (!f) return; (map[f] = map[f] || {})[n] = 1; }
+    if (AGG_ALL) Object.keys(AGG_ALL).forEach(function (f) {
+      AGG_ALL[f].forEach(function (s) { add(f, s.impl); });
+    });
+    Object.keys(LOSSLESS).forEach(function (n) { add(LOSSLESS[n].format, n); });
+    Object.keys(DECODERS).forEach(function (n) { add(DECODERS[n].format, n); });
+    var out = {};
+    Object.keys(map).forEach(function (f) { out[f] = Object.keys(map[f]).sort(); });
+    return out;
+  }
 
-    // Metrics group.
-    var metrics = availableMetrics();
-    if (metrics.length > 1) {
-      var mf = el("fieldset", { class: "q-fieldset" });
-      mf.appendChild(el("legend", null, "Metrics (which charts to stack)"));
-      metrics.forEach(function (k) {
-        var id = "flt-metric-" + k;
-        var lab = el("label", { class: "q-check" });
-        var cb = el("input", { type: "checkbox", id: id });
-        cb.checked = !!state.metricsOn[k];
-        cb.addEventListener("change", function () { state.metricsOn[k] = cb.checked; renderActivePanel(); });
-        lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(" " + METRIC_INFO[k].name));
-        mf.appendChild(lab);
+  // Formats present in the quality data and/or the static galleries (minus the
+  // non-format "other" gallery group).
+  function allFormats() {
+    var s = {};
+    Object.keys(implsByFormat()).forEach(function (f) { s[f] = 1; });
+    [].forEach.call(document.querySelectorAll("[data-img-tabs] [data-format]"), function (n) {
+      var f = (n.getAttribute("data-format") || "").toLowerCase();
+      if (f && f !== "other") s[f] = 1;
+    });
+    return Object.keys(s).sort();
+  }
+
+  // Re-render everything the filters touch: the interactive quality charts (when
+  // present) plus the static galleries.
+  function rerenderAll() {
+    if (document.getElementById("quality-app") && AGG_ALL) {
+      renderTabs();
+      renderLossless();
+      renderDecoders();
+      renderBdRate();
+    }
+    applyGalleryFilter();
+  }
+
+  // The Tests groups depend on which formats are shown, so the bar rebuilds too.
+  function onFormatChange() { renderFilterBar(); rerenderAll(); }
+
+  // Show/hide static gallery charts (pre-rendered PNGs can't be re-plotted, only
+  // shown/hidden) by their data-format; collapse a fully-empty suite section.
+  function applyGalleryFilter() {
+    [].forEach.call(document.querySelectorAll("[data-img-tabs]"), function (box) {
+      function hiddenF(n) {
+        var f = (n.getAttribute("data-format") || "").toLowerCase();
+        return f && f !== "other" && state.formatsOff[f];
+      }
+      var tabs = [].slice.call(box.querySelectorAll('[role="tab"][data-format]'));
+      var panels = [].slice.call(box.querySelectorAll('[role="tabpanel"][data-format]'));
+      var anyVis = false, firstVis = -1;
+      tabs.forEach(function (t, i) {
+        var hide = hiddenF(t);
+        t.hidden = hide;
+        if (panels[i] && hide) panels[i].hidden = true;
+        if (!hide) { anyVis = true; if (firstVis < 0) firstVis = i; }
       });
-      host.appendChild(mf);
+      // If the active tab was hidden, activate the first visible one (its own
+      // gallery handler shows the panel).
+      if (tabs.length) {
+        var activeVisible = tabs.some(function (t) {
+          return t.getAttribute("aria-selected") === "true" && !t.hidden;
+        });
+        if (!activeVisible && firstVis >= 0) tabs[firstVis].click();
+      }
+      // Flat (single-group) galleries carry data-format on the figures directly.
+      var figs = [].slice.call(box.querySelectorAll("figure[data-format]"));
+      figs.forEach(function (fig) { fig.hidden = hiddenF(fig); });
+      if (!tabs.length && figs.length) anyVis = figs.some(function (f) { return !f.hidden; });
+      var section = box.closest("[data-chart-section]");
+      if (section) section.hidden = !anyVis;
+    });
+  }
+
+  // Keep page content clear of the fixed bar regardless of how tall it wraps.
+  function syncBarPadding() {
+    var bar = document.getElementById("q-filterbar");
+    document.body.style.paddingBottom = (bar && !bar.hidden ? bar.offsetHeight + 24 : 0) + "px";
+  }
+
+  // Build the bar: Formats + per-format Tests + Metrics + View. Format toggles
+  // reach every chart (interactive + static galleries); Tests/Metrics/View drive
+  // the interactive quality charts. Rebuilt on any change that reshapes it.
+  function renderFilterBar() {
+    var bar = document.getElementById("q-filterbar");
+    if (!bar) return;
+    var fmts = allFormats();
+    var hasQuality = !!document.getElementById("quality-app") && !!AGG_ALL;
+    if (!fmts.length && !hasQuality) { bar.hidden = true; return; }
+    bar.hidden = false;
+    bar.innerHTML = "";
+
+    var head = el("div", { class: "q-fb-row" });
+    var toggle = el("button", {
+      type: "button", class: "q-fb-toggle", "aria-controls": "q-fb-body",
+      "aria-expanded": state.barCollapsed ? "false" : "true",
+    }, (state.barCollapsed ? "▸" : "▾") + " Filters");
+    toggle.addEventListener("click", function () {
+      state.barCollapsed = !state.barCollapsed;
+      renderFilterBar();
+    });
+    head.appendChild(toggle);
+    bar.appendChild(head);
+
+    var body = el("div", { class: "q-fb-body", id: "q-fb-body" });
+    if (state.barCollapsed) body.hidden = true;
+    bar.appendChild(body);
+
+    function group(legendText) {
+      var ff = el("fieldset", { class: "q-fieldset" });
+      ff.appendChild(el("legend", null, legendText));
+      body.appendChild(ff);
+      return ff;
+    }
+    function allNone(ff, names, off, after) {
+      var lg = ff.querySelector("legend");
+      var a = el("button", { type: "button", class: "q-mini" }, "all");
+      var n = el("button", { type: "button", class: "q-mini" }, "none");
+      a.addEventListener("click", function () { names.forEach(function (k) { delete off[k]; }); after(); });
+      n.addEventListener("click", function () { names.forEach(function (k) { off[k] = true; }); after(); });
+      lg.appendChild(document.createTextNode(" ")); lg.appendChild(a); lg.appendChild(n);
+    }
+    function check(ff, label, checked, onToggle) {
+      var lab = el("label", { class: "q-check" });
+      var cb = el("input", { type: "checkbox" });
+      cb.checked = checked;
+      cb.addEventListener("change", function () { onToggle(cb.checked); });
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(" " + label));
+      ff.appendChild(lab);
     }
 
-    // Implementation groups (by format).
-    Object.keys(AGG_ALL).sort().forEach(function (fmt) {
-      var impls = AGG_ALL[fmt].map(function (s) { return s.impl; });
-      if (!impls.length) return;
-      var ff = el("fieldset", { class: "q-fieldset" });
-      var lg = el("legend", null, fmt.toUpperCase() + " encoders");
-      ff.appendChild(lg);
-      var allBtn = el("button", { type: "button", class: "q-mini" }, "all");
-      var noneBtn = el("button", { type: "button", class: "q-mini" }, "none");
-      allBtn.addEventListener("click", function () { impls.forEach(function (n) { delete state.implsOff[n]; }); renderActivePanel(); renderFilters(); });
-      noneBtn.addEventListener("click", function () { impls.forEach(function (n) { state.implsOff[n] = true; }); renderActivePanel(); renderFilters(); });
-      lg.appendChild(document.createTextNode(" "));
-      lg.appendChild(allBtn); lg.appendChild(noneBtn);
-      impls.forEach(function (n) {
-        var lab = el("label", { class: "q-check" });
-        var cb = el("input", { type: "checkbox" });
-        cb.checked = !state.implsOff[n];
-        cb.addEventListener("change", function () {
-          if (cb.checked) delete state.implsOff[n]; else state.implsOff[n] = true;
-          renderActivePanel();
+    // Formats — apply everywhere (interactive charts + static galleries).
+    if (fmts.length) {
+      var ff = group("Formats");
+      allNone(ff, fmts, state.formatsOff, onFormatChange);
+      fmts.forEach(function (f) {
+        check(ff, f.toUpperCase(), !state.formatsOff[f], function (on) {
+          if (on) delete state.formatsOff[f]; else state.formatsOff[f] = true;
+          onFormatChange();
         });
-        lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(" " + n));
-        ff.appendChild(lab);
       });
-      host.appendChild(ff);
+    }
+
+    // Tests (implementations) for each shown format — drive the interactive charts.
+    var ibf = implsByFormat();
+    Object.keys(ibf).sort().forEach(function (fmt) {
+      if (state.formatsOff[fmt]) return;   // hidden-format groups self-prune
+      var impls = ibf[fmt];
+      if (!impls.length) return;
+      var tf = group(fmt.toUpperCase() + " tests");
+      allNone(tf, impls, state.implsOff, function () { rerenderAll(); renderFilterBar(); });
+      impls.forEach(function (n) {
+        check(tf, n, !state.implsOff[n], function (on) {
+          if (on) delete state.implsOff[n]; else state.implsOff[n] = true;
+          rerenderAll();
+        });
+      });
     });
+
+    if (hasQuality) {
+      // Metrics — which IQA charts to stack.
+      var metrics = availableMetrics();
+      if (metrics.length > 1) {
+        var mf = group("Metrics");
+        metrics.forEach(function (k) {
+          check(mf, METRIC_INFO[k].name, !!state.metricsOn[k], function (on) {
+            state.metricsOn[k] = on; renderActivePanel();
+          });
+        });
+      }
+      // View preset (keeps id="q-view-select" so setPreset + Alt+[ /Alt+] work).
+      if (PRESETS.length) {
+        var vf = group("View");
+        var sel = el("select", { id: "q-view-select", class: "q-select" });
+        PRESETS.forEach(function (pr, i) {
+          var o = el("option", { value: String(i) }, pr.label);
+          if (i === state.presetIdx) o.setAttribute("selected", "selected");
+          sel.appendChild(o);
+        });
+        sel.addEventListener("change", function () { setPreset(parseInt(sel.value, 10)); });
+        vf.appendChild(sel);
+      }
+    }
+
+    syncBarPadding();
   }
 
   // ---- controls (view preset + show-time + download) -----------------------
@@ -685,19 +837,8 @@
     if (!host) return;
     host.innerHTML = "";
 
-    // View preset (native select; Alt+[ / Alt+] also step it — see init()).
-    var vWrap = el("span", { class: "q-ctl" });
-    var vId = "q-view-select";
-    vWrap.appendChild(el("label", { class: "q-label", for: vId }, "View"));
-    var sel = el("select", { id: vId, class: "q-select" });
-    PRESETS.forEach(function (pr, i) {
-      var o = el("option", { value: String(i) }, pr.label);
-      if (i === state.presetIdx) o.setAttribute("selected", "selected");
-      sel.appendChild(o);
-    });
-    sel.addEventListener("change", function () { setPreset(parseInt(sel.value, 10)); });
-    vWrap.appendChild(sel);
-    host.appendChild(vWrap);
+    // The View preset now lives on the floating filter bar (renderFilterBar);
+    // these controls keep the display-only utilities inline with the charts.
 
     // Show-time toggle (encode-time bubbles; only meaningful on the bpp views).
     var tWrap = el("span", { class: "q-ctl" });
@@ -773,7 +914,9 @@
     if (!host) return;
     var rows = [];
     Object.keys(BDRATE).forEach(function (fmt) {
+      if (state.formatsOff[fmt]) return;
       Object.keys(BDRATE[fmt]).forEach(function (impl) {
+        if (state.implsOff[impl]) return;
         rows.push({ fmt: fmt, impl: impl, bd: BDRATE[fmt][impl] });
       });
     });
@@ -818,9 +961,16 @@
   function renderLossless() {
     var host = document.getElementById("q-lossless");
     if (!host) return;
-    var impls = Object.keys(LOSSLESS);
-    if (!impls.length) {
+    if (!Object.keys(LOSSLESS).length) {
       host.innerHTML = '<p class="q-note">No lossless encoders measured.</p>';
+      return;
+    }
+    // The format filter applies to both views; the bars additionally drop
+    // impl-hidden encoders, while the effort chart keeps them in its interactive
+    // legend (so they can be toggled back in place).
+    var impls = Object.keys(LOSSLESS).filter(function (n) { return !state.formatsOff[LOSSLESS[n].format]; });
+    if (!impls.length) {
+      host.innerHTML = '<p class="q-note">No lossless encoders for the selected formats.</p>';
       return;
     }
     host.innerHTML =
@@ -828,11 +978,13 @@
       '<div id="q-lossless-bars"></div>' +
       '<div class="q-metric-cap">Size vs compression effort</div>' +
       '<div id="q-lossless-effort" class="q-chart"></div>';
-    renderLosslessBars(document.getElementById("q-lossless-bars"), impls);
+    renderLosslessBars(document.getElementById("q-lossless-bars"),
+      impls.filter(function (n) { return !state.implsOff[n]; }));
     renderLosslessEffort(document.getElementById("q-lossless-effort"), impls);
   }
 
   function renderLosslessBars(host, impls) {
+    if (!impls.length) { host.innerHTML = '<p class="q-note">All lossless encoders hidden.</p>'; return; }
     var rows = impls.map(function (impl) {
       var d = LOSSLESS[impl];
       return { impl: impl, fmt: d.format, bpp: d.best_bpp, ratio: d.ratio };
@@ -957,9 +1109,15 @@
   function renderDecoders() {
     var host = document.getElementById("q-decoders");
     if (!host) return;
-    var impls = Object.keys(DECODERS);
-    if (!impls.length) {
+    if (!Object.keys(DECODERS).length) {
       host.innerHTML = '<p class="q-note">No decoders measured.</p>';
+      return;
+    }
+    // Format filter applies to the table + chart; the table additionally drops
+    // impl-hidden decoders, while the chart keeps them in its interactive legend.
+    var impls = Object.keys(DECODERS).filter(function (k) { return !state.formatsOff[DECODERS[k].format]; });
+    if (!impls.length) {
+      host.innerHTML = '<p class="q-note">No decoders for the selected formats.</p>';
       return;
     }
     impls.sort(function (a, b) {
@@ -967,10 +1125,11 @@
       if (da.format !== db.format) return da.format < db.format ? -1 : 1;
       return da.mean_time_s - db.mean_time_s;
     });
+    var tableImpls = impls.filter(function (k) { return !state.implsOff[k]; });
     var html = '<table class="q-table"><thead><tr>' +
       '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode</th>' +
       '<th scope="col">Mean input bpp</th><th scope="col">Fidelity</th><th scope="col">Basis</th></tr></thead><tbody>';
-    impls.forEach(function (impl) {
+    tableImpls.forEach(function (impl) {
       var d = DECODERS[impl];
       // Three fidelity states (so expected lossy non-exactness is not flagged as a
       // failure): bit-exact -> good; a finite PSNR that is EXPECTED for a
@@ -1352,6 +1511,11 @@
 
   function init() {
     initGalleries();
+    // Build the bar up front so the format filter governs the static galleries
+    // even in a perf-only bundle (no quality app); it is rebuilt below with the
+    // impl/metric/view groups once the quality data resolves.
+    renderFilterBar();
+    applyGalleryFilter();
     if (!document.getElementById("quality-app")) return;
     AGG_ALL = aggregateAll(validRows(METRICS));
     availableMetrics().forEach(function (k) { state.metricsOn[k] = true; });
@@ -1361,7 +1525,7 @@
 
     renderControls();
     renderAggregationNote();
-    renderFilters();
+    renderFilterBar();
     renderTabs();
     renderLossless();
     renderDecoders();
@@ -1376,6 +1540,7 @@
       if (e.key === "]") { e.preventDefault(); setPreset((state.presetIdx + 1) % PRESETS.length); }
       else if (e.key === "[") { e.preventDefault(); setPreset((state.presetIdx - 1 + PRESETS.length) % PRESETS.length); }
     });
+    window.addEventListener("resize", syncBarPadding);
   }
 
   if (document.readyState === "loading") {

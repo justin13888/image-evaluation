@@ -371,11 +371,20 @@ def test_report_html():
         "the ARIA tablist engine must be inlined"
     )
     # A "view" preset picker switches the shared X axis (size / encode / decode
-    # time); a filter matrix controls which metrics + implementations are shown.
+    # time); a centralized floating filter bar controls formats + implementations
+    # + metrics + view across every chart.
     assert "q-view-select" in html and "PRESETS" in html, (
         "the view preset picker must be wired into the engine"
     )
-    assert "q-filters-body" in html, "the filter matrix mount point must be present"
+    assert "q-filterbar" in html and "renderFilterBar" in html, (
+        "the centralized floating filter bar mount + engine must be present"
+    )
+    assert "formatsOff" in html and "applyGalleryFilter" in html, (
+        "the format filter must reach both interactive charts and static galleries"
+    )
+    assert "data-chart-section=" in html, (
+        "static suites must be wrapped so the format filter can hide an empty one"
+    )
     assert "decode_time_s" in html, (
         "decode-time axis must be wired into the engine (measured, never joined)"
     )

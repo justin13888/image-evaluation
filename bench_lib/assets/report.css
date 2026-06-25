@@ -114,12 +114,40 @@ table.q-table td.q-approx { color: #3a6ea5; }
 }
 .q-hint { color: #888; font-size: .78rem; }
 
-/* Filter matrix (a <details> with fieldset/legend groups). */
-.q-filters { margin: 0 0 1.2rem; font-size: .85rem; }
-.q-filters > summary { cursor: pointer; color: #2563eb; font-size: .85rem; padding: .2rem 0; }
-.q-filters > summary:hover { text-decoration: underline; }
-.q-filters-body {
-  display: flex; flex-wrap: wrap; gap: .6rem 1.1rem; margin: .6rem 0 .2rem;
+/* Centralized floating filter bar (replaces the old <details> filter matrix):
+   pinned to the bottom, wraps its content, capped width + centred. Governs every
+   chart — interactive and static galleries — so the controls are consistent
+   regardless of which graph you're looking at. Sits below the lightbox (z 1000)
+   and is removed entirely while a modal is open. */
+.q-filterbar {
+  position: fixed; left: 0; right: 0; bottom: .75rem; margin-inline: auto;
+  width: max-content; max-width: min(1100px, calc(100vw - 1.25rem));
+  box-sizing: border-box; z-index: 900;
+  background: rgba(255, 255, 255, .94);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border: 1px solid #d6d6d6; border-radius: 16px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
+  padding: .5rem .7rem; font-size: .85rem;
+}
+.q-filterbar[hidden] { display: none; }
+.q-fb-row { display: flex; align-items: center; gap: .5rem; }
+.q-fb-toggle {
+  font: inherit; font-size: .8rem; border: 1px solid #bbb; background: #fff;
+  color: #1a1a1a; border-radius: 999px; padding: .2rem .7rem; cursor: pointer;
+}
+.q-fb-toggle:hover { background: #f2f2f2; }
+.q-fb-body {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem 1rem;
+  max-height: 42vh; overflow-y: auto; padding-top: .45rem;
+}
+.q-fb-body[hidden] { display: none; }
+.q-filterbar .q-fieldset { padding: .2rem .5rem .35rem; }
+.q-filterbar .q-select { font-size: .82rem; }
+.q-lb-open .q-filterbar { display: none; }   /* never compete with the lightbox */
+
+@media (max-width: 760px) {
+  .q-filterbar { left: .5rem; right: .5rem; width: auto; max-width: none; border-radius: 14px; }
+  .q-fb-body { max-height: 50vh; }
 }
 .q-fieldset {
   border: 1px solid #ddd; border-radius: 6px; padding: .3rem .6rem .5rem;
@@ -154,7 +182,7 @@ table.q-table td.q-approx { color: #3a6ea5; }
 
 /* Visible keyboard focus for every interactive control. */
 .q-tab:focus-visible, .q-chip:focus-visible, .q-select:focus-visible,
-.q-mini:focus-visible, .q-filters > summary:focus-visible,
+.q-mini:focus-visible, .q-fb-toggle:focus-visible,
 .q-tabpanel:focus-visible, table.q-table th:focus-visible,
 .q-check input:focus-visible, .q-dl:focus-visible {
   outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 3px;

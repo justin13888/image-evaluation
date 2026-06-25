@@ -305,8 +305,9 @@ def _quality_section(qual_dir: str) -> list[str]:
         "time, or vs decode time (← → switch the per-format tabs; Alt+[ / Alt+] "
         "cycle views). Each format's tab stacks one full-width chart per metric "
         "(SSIMULACRA2, PSNR, SSIM, Butteraugli), and the <em>Cross-format Pareto</em> "
-        "tab overlays each format's best encoders. Use the <em>Filters</em> panel to "
-        "choose which metrics and implementations are shown; hover a point for "
+        "tab overlays each format's best encoders. Use the <em>filter bar</em> "
+        "pinned to the bottom of the page to choose formats, implementations and "
+        "metrics across every chart; hover a point for "
         "details, and <strong>click a point (or focus a chart and press Enter) to "
         "view the exact images aggregated into it</strong>. Lossless encoders "
         "(PNG, lossless JXL/WebP) have no rate-distortion "
@@ -353,10 +354,6 @@ def _quality_section(qual_dir: str) -> list[str]:
         "<div id='q-status' class='q-visually-hidden' role='status' "
         "aria-live='polite'></div>"
         "<div id='q-aggregation' class='q-agg'></div>"
-        "<details id='q-filters' class='q-filters'>"
-        "<summary>Filters — metrics &amp; implementations shown</summary>"
-        "<div id='q-filters-body' class='q-filters-body'></div>"
-        "</details>"
         "<h3>Rate-distortion — by format</h3>"
         "<p class='q-note'>Per-format tabs (plus a cross-format Pareto overview); "
         "each tab stacks one full-width chart per metric, all on the X axis chosen "
@@ -417,7 +414,7 @@ def _quality_section(qual_dir: str) -> list[str]:
 
 _CSS = """
 body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem auto;
-       max-width: 1100px; padding: 0 1rem; color: #1a1a1a; }
+       max-width: 1100px; padding: 0 1rem 6rem; color: #1a1a1a; }
 h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
 h2 { margin-top: 2.5rem; border-bottom: 1px solid #ccc; }
 figure { margin: 1rem 0; }
@@ -459,6 +456,7 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         parts.extend(_quality_section(qual_dir))
 
     if os.path.isdir(perf_dir):
+        parts.append("<section class='chart-section' data-chart-section='perf'>")
         parts.append("<h2>Performance &mdash; rigorous timing overlay</h2>")
         parts.append(
             "<p class='muted'>Optional, secondary view. Isolated hyperfine timing "
@@ -467,9 +465,11 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "raw speed is only meaningful alongside the quality it trades for.</p>"
         )
         parts.append(_embed_charts(perf_dir, "perf"))
+        parts.append("</section>")
 
     scal_dir = os.path.join(bundle_dir, "scaling")
     if os.path.isdir(scal_dir):
+        parts.append("<section class='chart-section' data-chart-section='scaling'>")
         parts.append("<h2>Scaling &mdash; time vs pixel count</h2>")
         parts.append(
             "<p class='muted'>Each codec timed single-threaded at its performance "
@@ -482,9 +482,11 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "pixel-count exponent from parallel-scaling effects.</p>"
         )
         parts.append(_embed_charts(scal_dir, "scaling"))
+        parts.append("</section>")
 
     eff_dir = os.path.join(bundle_dir, "effort")
     if os.path.isdir(eff_dir):
+        parts.append("<section class='chart-section' data-chart-section='effort'>")
         parts.append("<h2>Effort / speed &mdash; time vs quality vs size</h2>")
         parts.append(
             "<p class='muted'>The lever the rate-distortion sweep pins: each lossy "
@@ -497,12 +499,21 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "<code>effort/summary.md</code>.</p>"
         )
         parts.append(_embed_charts(eff_dir, "effort"))
+        parts.append("</section>")
 
     parts.append(
         "<p class='muted'>Raw data is embedded above "
         "(<code>#quality-metrics</code>) and also on disk alongside this file: "
         "<code>performance/raw.json</code>, <code>quality/metrics.json</code>, "
         "and per-suite <code>summary.md</code>.</p>"
+    )
+    # Centralized floating filter bar (filled in by report.js). Mounted at body
+    # level so its format filter governs every chart — the interactive quality
+    # view and the static perf/scaling/effort galleries alike — and so it sits
+    # last in tab order. Hidden until the engine finds something to filter.
+    parts.append(
+        "<div id='q-filterbar' class='q-filterbar' role='region' "
+        "aria-label='Chart filters' hidden></div>"
     )
     # One inlined chart engine for the whole document: it draws the interactive
     # quality view and wires every tabbed image gallery (perf/scaling/effort).
