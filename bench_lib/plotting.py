@@ -20,6 +20,7 @@ from bench_lib.models import (
     BenchmarkMetrics,
     BenchmarkType,
     ImageFormat,
+    decode_approx_expected,
     quality_label,
     schema_for,
 )
@@ -219,9 +220,11 @@ def decoder_fidelity(
     approximate lossy one in the same decoder's aggregate.
 
     Returns ``{key: {format, mean_time_s, mean_bpp, count, bit_exact,
-    worst_psnr, basis, points:[{bpp, time_s, psnr, bit_exact, label}]}}`` where
-    ``key`` is the decoder name (lossy path) or ``"<impl> (lossless)"`` (lossless
-    path). Decoders with no valid scored row are omitted."""
+    worst_psnr, basis, approx_expected, points:[{bpp, time_s, psnr, bit_exact,
+    label}]}}`` where ``key`` is the decoder name (lossy path) or ``"<impl>
+    (lossless)"`` (lossless path), and ``approx_expected`` marks a non-bit-exact
+    result that is expected/faithful (lossy JPEG or JXL vs golden) rather than a
+    failure. Decoders with no valid scored row are omitted."""
     rows = [
         m
         for m in metrics
@@ -258,17 +261,25 @@ def decoder_fidelity(
             ),
             key=lambda p: p["bpp"],
         )
+        basis = impl_rows[0].get("metric_basis", "golden")
+        fmt = impl_rows[0]["format"]
         # Lossy path keeps the bare impl name; the lossless path (issue #21) is a
         # distinct, self-describing row so the two are not conflated.
         display = f"{impl} (lossless)" if is_lossless else impl
         result[display] = {
-            "format": impl_rows[0]["format"],
+            "format": fmt,
             "mean_time_s": (sum(times) / len(times)) if times else 0.0,
             "mean_bpp": (sum(bpps) / len(bpps)) if bpps else 0.0,
             "count": len(impl_rows),
             "bit_exact": bit_exact,
             "worst_psnr": (min(finite_psnrs) if finite_psnrs else None),
-            "basis": impl_rows[0].get("metric_basis", "golden"),
+            "basis": basis,
+            # True when a finite PSNR here is EXPECTED (a faithful, sub-LSB lossy
+            # decode of a non-normative format: JPEG, lossy JXL) so the report
+            # shows it neutrally, not as a failure. False for the lossless path
+            # (source basis) and normative lossy formats (AV1/AVIF, VP8/WebP),
+            # where bit-exact is required.
+            "approx_expected": decode_approx_expected(fmt, basis),
             "points": points,
         }
     return result

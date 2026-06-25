@@ -946,13 +946,29 @@
       '<th scope="col">Mean input bpp</th><th scope="col">Fidelity</th><th scope="col">Basis</th></tr></thead><tbody>';
     impls.forEach(function (impl) {
       var d = DECODERS[impl];
-      var fid = d.bit_exact
-        ? '<span class="good">∞ (bit-exact)</span>'
-        : '<span class="bad">' + (d.worst_psnr != null ? d.worst_psnr.toFixed(2) + " dB (worst)" : "not exact") + "</span>";
+      // Three fidelity states (so expected lossy non-exactness is not flagged as a
+      // failure): bit-exact -> good; a finite PSNR that is EXPECTED for a
+      // non-normative lossy format (JPEG, lossy JXL) -> neutral "faithful"; a
+      // finite PSNR where bit-exact IS required (lossless path, or AV1/VP8) -> bad.
+      // The class goes on the <td> so .good/.bad/.q-approx actually match.
+      var fidClass, fidText;
+      if (d.bit_exact) {
+        fidClass = "good"; fidText = "∞ (bit-exact)";
+      } else if (d.approx_expected) {
+        fidClass = "q-approx";
+        fidText = d.worst_psnr != null
+          ? "≈ " + d.worst_psnr.toFixed(2) + " dB vs golden (faithful)"
+          : "≈ vs golden (faithful)";
+      } else {
+        fidClass = "bad";
+        fidText = d.worst_psnr != null
+          ? d.worst_psnr.toFixed(2) + " dB (worst)" : "not exact";
+      }
       var basis = d.basis === "source" ? "source (ground truth)" : "golden decoder";
       html += "<tr><td>" + esc(d.format.toUpperCase()) + "</td><td>" + esc(impl) +
         '</td><td class="num">' + fmtTime(d.mean_time_s) +
-        '</td><td class="num">' + d.mean_bpp.toFixed(3) + "</td><td>" + fid +
+        '</td><td class="num">' + d.mean_bpp.toFixed(3) +
+        '</td><td class="' + fidClass + '">' + fidText +
         "</td><td>" + esc(basis) + "</td></tr>";
     });
     html += "</tbody></table>";
@@ -988,6 +1004,7 @@
       return {
         impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
         dash: DASHES[di % DASHES.length], points: points,
+        approxExpected: d.approx_expected,
       };
     }).filter(function (s) { return s.points.length > 0; });
     if (!series.length) { host.innerHTML = ""; return; }
@@ -1026,7 +1043,7 @@
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
         pts.push({ x: px, y: py });
-        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst });
+        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst, approxExpected: s.approxExpected });
       });
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
@@ -1056,7 +1073,13 @@
         '<span class="k">input bpp</span> ' + best.bpp.toFixed(3) + "<br>" +
         '<span class="k">decode time</span> ' + fmtTime(best.t) + "<br>" +
         '<span class="k">fidelity</span> ' +
-        (best.approx ? (best.worst != null ? best.worst.toFixed(2) + " dB" : "not bit-exact") : "∞ (bit-exact)");
+        (best.approx
+          ? (best.worst != null
+              ? (best.approxExpected
+                  ? "≈ " + best.worst.toFixed(2) + " dB vs golden (faithful)"
+                  : best.worst.toFixed(2) + " dB (worst)")
+              : "not bit-exact")
+          : "∞ (bit-exact)");
     });
   }
 

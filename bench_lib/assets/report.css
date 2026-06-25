@@ -74,6 +74,10 @@ table.q-table th .arrow { color: #999; font-size: .8em; }
 table.q-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.q-table td.good { color: #157f3b; }
 table.q-table td.bad { color: #b3261e; }
+/* Expected, faithful lossy decode (JPEG / lossy JXL): a non-bit-exact result vs
+   the golden reference is by design (non-normative inverse transform), so it
+   reads neutrally — a fact, not a failure — never the red `.bad`. */
+table.q-table td.q-approx { color: #3a6ea5; }
 /* Lossless compression-efficiency view (issue #26): a bpp leaderboard + a
    size-vs-effort chart. The effort chart reuses .q-chart; the bars need their
    own plot framing since they are not a .q-chart. */

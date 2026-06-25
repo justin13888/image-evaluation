@@ -751,6 +751,42 @@ REFERENCE_DECODERS: Dict[ImageFormats, str] = {
 }
 
 
+# Lossy formats whose decode inverse transform is NON-normative: the spec does
+# not fix an exact integer inverse transform, so two correct, independent
+# decoders legitimately produce sub-LSB-different pixels. A decode that is *not*
+# bit-exact versus the format's golden reference decoder is therefore EXPECTED
+# here, not a defect:
+#   JPEG - the IDCT is only accuracy-bounded (ITU-T T.81 Annex A / IEEE 1180),
+#          never specified bit-for-bit, and chroma upsampling differs by decoder.
+#   JXL  - the VarDCT inverse transform is floating-point, not bit-reproducible
+#          across implementations.
+# AV1/AVIF and VP8/WebP are deliberately ABSENT: their integer inverse transforms
+# are normative, so every conformant decoder must match the reference bit-for-bit
+# and a mismatch there IS a real defect. PNG is lossless (scored vs the source,
+# not a golden decoder), so it never reaches this gate.
+NON_NORMATIVE_LOSSY_DECODE_FORMATS: frozenset = frozenset(
+    {ImageFormat.JPEG, ImageFormat.JXL}
+)
+
+
+def decode_approx_expected(format: str, basis: str) -> bool:
+    """True when a non-bit-exact decode is EXPECTED (faithful, not a defect).
+
+    Holds only for a *lossy* decode (scored vs the format's ``golden`` reference
+    decoder, ``basis == "golden"``) of a format whose inverse transform is
+    non-normative (JPEG, JXL; see ``NON_NORMATIVE_LOSSY_DECODE_FORMATS``). A
+    ``source``-basis decode (the lossless path: PNG always, the WebP/JXL lossless
+    path) must always be bit-exact, as must a ``golden``-basis decode of a
+    normative format (AV1/AVIF, VP8/WebP); for those a finite PSNR is a genuine
+    failure, so this returns ``False``."""
+    if basis != "golden":
+        return False
+    try:
+        return ImageFormat(format) in NON_NORMATIVE_LOSSY_DECODE_FORMATS
+    except ValueError:
+        return False
+
+
 # Threading configurations: single-threaded (per-core efficiency) then all-cores
 # (real-world throughput). Output bytes are identical across these, so metrics
 # are collected for only one of them; only timing/memory vary by thread count.

@@ -436,6 +436,18 @@ def test_report_html():
         isinstance(p.get("time_s"), (int, float)) and p["time_s"] > 0
         for p in decoders["zune-jpeg-decode"]["points"]
     ), "decode time must round-trip into the points the scatter is drawn from"
+    # A non-bit-exact lossy decode is EXPECTED (faithful) for a non-normative
+    # format (JPEG, lossy JXL) and a genuine failure for a normative one (WebP),
+    # so the report can present the former neutrally instead of as a red failure.
+    assert decoders["zune-jpeg-decode"]["approx_expected"] is True, (
+        "JPEG lossy decode: non-bit-exactness vs golden is expected (faithful)"
+    )
+    assert decoders["libwebp-decode"]["approx_expected"] is False, (
+        "WebP inverse transform is normative — bit-exact is required"
+    )
+    assert "q-approx" in html and "vs golden (faithful)" in html, (
+        "expected-approximate decoders must render neutrally, not as a failure"
+    )
     # Per-point image gallery (this feature): the rows carry their image paths,
     # those round-trip into the embedded metrics, and the lightbox engine that
     # makes points clickable is inlined.
