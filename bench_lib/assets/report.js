@@ -7,15 +7,14 @@
      - An X-axis chooser + a log/linear scale toggle (button groups) set the X
        axis shared by every rate-distortion chart: quality vs size (bpp), vs
        encode time, or vs decode time. Y is always an IQA metric.
-     - Rate-distortion charts live in per-format TABS (plus a cross-format Pareto
-       tab); each tab stacks one full-width chart per metric.
+     - Rate-distortion charts overlay every selected format's encoders, one
+       full-width chart stacked per metric.
      - A filter matrix toggles which metrics and which implementations are shown.
-     - Below the tabs: lossless compression efficiency, decoder fidelity/speed, and
-       a sortable BD-rate table.
-   Accessibility: the tabs are a real ARIA tablist (roving tabindex + arrow keys),
-   the X-axis chooser is a button group (Alt+[ / Alt+] also step it), the filter
-   matrix uses fieldset/legend groups, charts expose role=img + <title>, and view
-   changes are announced via an aria-live region. */
+     - Alongside: lossless compression efficiency, decoder fidelity/speed, and a
+       sortable BD-rate table.
+   Accessibility: the X-axis chooser is a button group (Alt+[ / Alt+] also step
+   it), the filter matrix uses fieldset/legend groups, charts expose role=img +
+   <title>, and view changes are announced via an aria-live region. */
 (function () {
   "use strict";
 
@@ -74,7 +73,6 @@
   var state = {
     xKey: "bpp",               // X axis: "bpp" | "time_s" | "decode_time_s"
     xLog: true,                // X scale: log (true) or linear (false)
-    tab: null,                 // set after TABS resolve
     metricsOn: {},             // metric key -> bool (shown)
     implsOff: {},              // impl name -> true (hidden globally)
     formatsOff: {},            // lowercase format key -> true (format hidden everywhere)
@@ -465,29 +463,17 @@
 
   // ---- series builders -----------------------------------------------------
 
-  // One series per impl of a format, mapping each point to the (x,y) of the view.
-  // `fmt` is carried on the series so a clicked point can resolve its image group.
-  function seriesForFormat(aggFmt, xKey, yKey, fmt) {
-    return aggFmt.map(function (s, i) {
-      var points = s.points.map(function (p) {
-        var x = p.m[xKey], y = p.m[yKey];
-        if (!isNum(x) || !isNum(y)) return null;
-        return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count };
-      }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
-      return { key: s.impl, implName: s.impl, label: s.impl, fmt: fmt, color: PALETTE[i % PALETTE.length], points: points };
-    }).filter(function (s) { return s.points.length > 0; });
-  }
-
-  // Cross-format Pareto: each format's Pareto-front encoder(s), coloured by
-  // format, dashed per encoder within a format.
-  function seriesForPareto(AGG, xKey, yKey) {
+  // Cross-format rate-distortion: every implementation of every shown format,
+  // mapped to the (x,y) of the active view, coloured by format and dashed per
+  // encoder within a format. `fmt` is carried on each series so a clicked point
+  // can resolve its image group. The Tests filter (state.implsOff) is the
+  // authoritative series selector — renderXYChart drops the hidden ones.
+  function seriesForView(AGG, xKey, yKey) {
     var series = [];
     Object.keys(AGG).sort().forEach(function (fmt) {
       if (state.formatsOff[fmt]) return;   // format filtered out in the bar
-      var keep = PARETO[fmt] || [];
       var di = 0;
       AGG[fmt].forEach(function (s) {
-        if (keep.length && keep.indexOf(s.impl) < 0) return;
         var points = s.points.map(function (p) {
           var x = p.m[xKey], y = p.m[yKey];
           if (!isNum(x) || !isNum(y)) return null;
@@ -507,10 +493,9 @@
     return series;
   }
 
-  // ---- tabs (ARIA tablist) -------------------------------------------------
+  // ---- rate-distortion view ------------------------------------------------
 
   var AGG_ALL = null;   // aggregateAll(validRows), lazy
-  var TABS = [];        // [{id, label, fmt|null}]
 
   // X axes offered by the controls box: bpp always, time axes only when measured.
   function availableXAxes() {
@@ -550,103 +535,37 @@
   function legendFor(series) {
     return interactiveLegend(
       series.map(function (s) { return { name: s.implName, label: s.label, color: s.color }; }),
-      renderActivePanel
+      renderRD
     );
   }
 
-  function renderActivePanel() {
-    var panelHost = document.getElementById("q-tabpanels");
-    if (!panelHost) return;
-    panelHost.innerHTML = "";
-    var tab = TABS.filter(function (t) { return t.id === state.tab; })[0] || TABS[0];
-    var panel = el("div", { class: "q-tabpanel", role: "tabpanel", id: "panel-" + tab.id, "aria-labelledby": "tab-" + tab.id, tabindex: "0" });
-    panelHost.appendChild(panel);
-
+  // Rate-distortion: one full-width chart per selected metric, each overlaying
+  // every shown format's encoders on the X axis chosen in the controls box.
+  function renderRD() {
+    var host = document.getElementById("q-rd");
+    if (!host) return;
+    host.innerHTML = "";
     var xAxis = X_AXES[state.xKey];
     var metrics = availableMetrics().filter(function (k) { return state.metricsOn[k]; });
     if (!metrics.length) {
-      panel.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter bar at the bottom of the page."));
+      host.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter bar."));
       return;
     }
-
-    // Build the series once (per metric) and render a stacked full-width chart each.
     var legendSeries = null;
     metrics.forEach(function (metricKey) {
-      var series = tab.fmt
-        ? seriesForFormat(AGG_ALL[tab.fmt] || [], state.xKey, metricKey, tab.fmt)
-        : seriesForPareto(AGG_ALL, state.xKey, metricKey);
+      var series = seriesForView(AGG_ALL, state.xKey, metricKey);
       if (!legendSeries && series.length) legendSeries = series;
       var sec = el("div", { class: "q-stack-item" });
       sec.appendChild(el("div", { class: "q-metric-cap" }, METRIC_INFO[metricKey].name));
       var chart = el("div", { class: "q-chart" });
       sec.appendChild(chart);
-      panel.appendChild(sec);
+      host.appendChild(sec);
       renderXYChart(chart, series, {
         xLog: state.xLog, xAxis: xAxis, yInfo: METRIC_INFO[metricKey],
-        showTime: state.showTime.rd, title: tab.label,
+        showTime: state.showTime.rd,
       });
     });
-    if (legendSeries) panel.insertBefore(legendFor(legendSeries), panel.firstChild);
-  }
-
-  function selectTab(id, focusIt) {
-    state.tab = id;
-    document.querySelectorAll("#q-tablist .q-tab").forEach(function (b) {
-      var sel = b.getAttribute("data-id") === id;
-      b.classList.toggle("active", sel);
-      b.setAttribute("aria-selected", sel ? "true" : "false");
-      b.setAttribute("tabindex", sel ? "0" : "-1");
-      if (sel && focusIt) b.focus();
-    });
-    renderActivePanel();
-    var tab = TABS.filter(function (t) { return t.id === id; })[0];
-    announce("Showing " + (tab ? tab.label : id));
-  }
-
-  // Format tabs hidden by the format filter are skipped (Pareto, fmt:null, never is).
-  function tabHidden(tab) { return !!(tab.fmt && state.formatsOff[tab.fmt]); }
-
-  function onTabKey(ev, idx) {
-    var keys = { ArrowRight: 1, ArrowLeft: -1, Home: "home", End: "end" };
-    if (!(ev.key in keys)) return;
-    ev.preventDefault();
-    var visible = [];
-    TABS.forEach(function (t, i) { if (!tabHidden(t)) visible.push(i); });
-    if (!visible.length) return;
-    var pos = visible.indexOf(idx); if (pos < 0) pos = 0;
-    var next;
-    if (keys[ev.key] === "home") next = visible[0];
-    else if (keys[ev.key] === "end") next = visible[visible.length - 1];
-    else next = visible[(pos + keys[ev.key] + visible.length) % visible.length];
-    selectTab(TABS[next].id, true);
-  }
-
-  function renderTabs() {
-    var host = document.getElementById("q-tabs");
-    if (!host) return;
-    // If the active tab's format was just filtered out, fall back to the first
-    // visible tab (Cross-format Pareto is never hidden).
-    if (!TABS.some(function (t) { return t.id === state.tab && !tabHidden(t); })) {
-      var firstVis = TABS.filter(function (t) { return !tabHidden(t); })[0];
-      state.tab = firstVis ? firstVis.id : (TABS[0] && TABS[0].id);
-    }
-    host.innerHTML = "";
-    var tablist = el("div", { class: "q-tablist", id: "q-tablist", role: "tablist", "aria-label": "Rate-distortion by format" });
-    TABS.forEach(function (tab, i) {
-      var sel = state.tab === tab.id;
-      var btn = el("button", {
-        class: "q-tab" + (sel ? " active" : ""), type: "button", role: "tab",
-        id: "tab-" + tab.id, "data-id": tab.id, "aria-selected": sel ? "true" : "false",
-        "aria-controls": "panel-" + tab.id, tabindex: sel ? "0" : "-1",
-      }, tab.label);
-      if (tabHidden(tab)) btn.hidden = true;
-      btn.addEventListener("click", function () { selectTab(tab.id, false); });
-      btn.addEventListener("keydown", function (e) { onTabKey(e, i); });
-      tablist.appendChild(btn);
-    });
-    host.appendChild(tablist);
-    host.appendChild(el("div", { id: "q-tabpanels", class: "q-tabpanels" }));
-    renderActivePanel();
+    if (legendSeries) host.insertBefore(legendFor(legendSeries), host.firstChild);
   }
 
   // ---- centralized floating filter bar -------------------------------------
@@ -682,7 +601,7 @@
   // present) plus the static galleries.
   function rerenderAll() {
     if (document.getElementById("quality-app") && AGG_ALL) {
-      renderTabs();
+      renderRD();
       renderLossless();
       renderDecoders();
       renderBdRate();
@@ -820,7 +739,7 @@
         var mf = group("Metrics");
         metrics.forEach(function (k) {
           check(mf, METRIC_INFO[k].name, !!state.metricsOn[k], function (on) {
-            state.metricsOn[k] = on; renderActivePanel();
+            state.metricsOn[k] = on; renderRD();
           });
         });
       }
@@ -868,7 +787,7 @@
     var tId = "q-showtime";
     var tcb = el("input", { type: "checkbox", id: tId });
     tcb.checked = state.showTime.rd;
-    tcb.addEventListener("change", function () { state.showTime.rd = tcb.checked; renderActivePanel(); });
+    tcb.addEventListener("change", function () { state.showTime.rd = tcb.checked; renderRD(); });
     var tlab = el("label", { class: "q-label", for: tId });
     tlab.appendChild(tcb);
     tlab.appendChild(document.createTextNode(" Encode-time bubbles"));
@@ -894,14 +813,14 @@
     if (!X_AXES[k] || availableXAxes().indexOf(k) < 0) return;
     state.xKey = k;
     renderControls();
-    renderActivePanel();
+    renderRD();
     announce("X axis: quality vs " + X_AXES[k].name);
   }
 
   function setScale(log) {
     state.xLog = !!log;
     renderControls();
-    renderActivePanel();
+    renderRD();
     announce(log ? "Logarithmic X axis" : "Linear X axis");
   }
 
@@ -1360,13 +1279,6 @@
 
   // ---- init ----------------------------------------------------------------
 
-  function buildTabs() {
-    TABS = [{ id: "pareto", label: "Cross-format Pareto", fmt: null }];
-    Object.keys(AGG_ALL).sort().forEach(function (fmt) {
-      TABS.push({ id: fmt, label: fmt.toUpperCase(), fmt: fmt });
-    });
-  }
-
   // Generic tabbed image galleries (performance / scaling / effort): the static
   // SVGs are grouped into ARIA tabs by report.py so each is full browser width.
   // Reuses the same roving-tabindex + arrow-key pattern as the quality tabs.
@@ -1535,13 +1447,11 @@
     if (!document.getElementById("quality-app")) return;
     AGG_ALL = aggregateAll(validRows(METRICS));
     availableMetrics().forEach(function (k) { state.metricsOn[k] = true; });
-    buildTabs();
-    state.tab = TABS[0] ? TABS[0].id : null;
 
     renderControls();
     renderAggregationNote();
     renderFilterBar();
-    renderTabs();
+    renderRD();
     renderLossless();
     renderDecoders();
     renderBdRate();

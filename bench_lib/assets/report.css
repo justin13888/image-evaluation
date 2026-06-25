@@ -257,7 +257,7 @@ table.q-table td.q-approx { color: #3a6ea5; }
    margin centres the wider block without causing horizontal scroll. The readable
    prose/notes stay in the narrow column. */
 @media (min-width: 1180px) {
-  #q-tabs, [data-img-tabs], #q-lossless, #q-decoders {
+  #q-rd, [data-img-tabs], #q-lossless, #q-decoders {
     width: min(96vw, 1700px);
     margin-left: calc(-1 * (min(96vw, 1700px) - 100%) / 2);
   }

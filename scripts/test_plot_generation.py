@@ -362,13 +362,14 @@ def test_report_html():
         "ssim + butteraugli must round-trip into the report"
     )
     assert "Butteraugli" in html, "Butteraugli metric must be wired into the report"
-    # Rate-distortion now lives in per-format tabs (full-width, one stacked chart
-    # per metric) rather than a cramped small-multiples grid.
-    assert "id='q-tabs'" in html or 'id="q-tabs"' in html, (
-        "per-format tabs mount point must be present"
+    # Rate-distortion is one full-width chart per metric, each overlaying every
+    # selected format's encoders (the per-format tabs are gone — format is a
+    # filter dimension, not a tab).
+    assert "id='q-rd'" in html or 'id="q-rd"' in html, (
+        "rate-distortion mount point must be present"
     )
-    assert "q-tablist" in html and "renderTabs" in html, (
-        "the ARIA tablist engine must be inlined"
+    assert "renderRD" in html and "seriesForView" in html, (
+        "the cross-format rate-distortion engine must be inlined"
     )
     # An X-axis chooser + a log/linear scale toggle (button groups) switch the
     # shared X axis (size / encode / decode time); a centralized filter bar
