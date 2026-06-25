@@ -49,14 +49,10 @@
 .q-size-item svg { overflow: visible; }
 .q-size-bub { fill: #c9c9c9; stroke: #888; stroke-width: 1; }
 
-.q-legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; margin: .5rem .2rem .6rem; }
-.q-chip {
-  display: inline-flex; align-items: center; gap: .35rem; cursor: pointer;
-  font-size: .82rem; color: #222; user-select: none; padding: .15rem .3rem;
-  border: 1px solid transparent; background: none; font-family: inherit; border-radius: 4px;
-}
-.q-chip .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
-.q-chip.off { opacity: .4; text-decoration: line-through; }
+/* Filter-checkbox colour swatch — the Tests groups double as the chart legend
+   (every chart colours its series by format), so each test's swatch is its
+   series colour. */
+.q-fb-sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; display: inline-block; }
 
 .q-tooltip {
   position: absolute; pointer-events: none; z-index: 5; max-width: 260px;
@@ -181,7 +177,7 @@ table.q-table td.q-approx { color: #3a6ea5; }
 .q-stack-item .q-metric-cap { font-size: .95rem; margin: 0 0 .25rem; }
 
 /* Visible keyboard focus for every interactive control. */
-.q-tab:focus-visible, .q-chip:focus-visible, .q-select:focus-visible,
+.q-tab:focus-visible, .q-select:focus-visible,
 .q-mini:focus-visible, .q-fb-toggle:focus-visible,
 .q-tabpanel:focus-visible, table.q-table th:focus-visible,
 .q-check input:focus-visible, .q-dl:focus-visible {

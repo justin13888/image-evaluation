@@ -510,34 +510,10 @@
       : k === "decode_time_s" ? "Decode time" : X_AXES[k].name;
   }
 
-  // Clickable legend chips shared by every line chart. items: [{name,label,color}]
-  // where `name` keys the global state.implsOff visibility map (so toggling a
-  // series here also toggles it on the RD charts and in the filter bar). `rerender`
-  // redraws the owning chart; a hidden series stays in the legend (struck-through)
-  // so it can be brought back.
-  function interactiveLegend(items, rerender) {
-    var wrap = el("div", { class: "q-legend", role: "group", "aria-label": "Series — activate to show or hide" });
-    items.forEach(function (it) {
-      var off = !!state.implsOff[it.name];
-      var chip = el("button", { class: "q-chip" + (off ? " off" : ""), type: "button", "aria-pressed": off ? "false" : "true" });
-      chip.innerHTML = '<span class="sw" style="background:' + it.color + '"></span>' + esc(it.label);
-      chip.addEventListener("click", function () {
-        if (state.implsOff[it.name]) delete state.implsOff[it.name];
-        else state.implsOff[it.name] = true;
-        rerender();
-        renderFilterBar();   // keep the floating bar's checkboxes in sync
-      });
-      wrap.appendChild(chip);
-    });
-    return wrap;
-  }
-
-  function legendFor(series) {
-    return interactiveLegend(
-      series.map(function (s) { return { name: s.implName, label: s.label, color: s.color }; }),
-      renderRD
-    );
-  }
+  // Series visibility is driven entirely by the Tests filter (state.implsOff):
+  // its checkboxes carry the format colour swatch and double as the legend, so
+  // there are no separate per-chart legend chips. Every renderer reads implsOff
+  // to drop hidden series, and toggling a Test re-renders all charts + tables.
 
   // Rate-distortion: one full-width chart per selected metric, each overlaying
   // every shown format's encoders on the X axis chosen in the controls box.
@@ -551,10 +527,8 @@
       host.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter bar."));
       return;
     }
-    var legendSeries = null;
     metrics.forEach(function (metricKey) {
       var series = seriesForView(AGG_ALL, state.xKey, metricKey);
-      if (!legendSeries && series.length) legendSeries = series;
       var sec = el("div", { class: "q-stack-item" });
       sec.appendChild(el("div", { class: "q-metric-cap" }, METRIC_INFO[metricKey].name));
       var chart = el("div", { class: "q-chart" });
@@ -565,7 +539,6 @@
         showTime: state.showTime.rd,
       });
     });
-    if (legendSeries) host.insertBefore(legendFor(legendSeries), host.firstChild);
   }
 
   // ---- centralized floating filter bar -------------------------------------
@@ -694,12 +667,15 @@
       n.addEventListener("click", function () { names.forEach(function (k) { off[k] = true; }); after(); });
       lg.appendChild(document.createTextNode(" ")); lg.appendChild(a); lg.appendChild(n);
     }
-    function check(ff, label, checked, onToggle) {
+    // A filter checkbox; an optional colour swatch makes the Tests groups double
+    // as the chart legend (the charts colour every series by its format).
+    function check(ff, label, checked, onToggle, swColor) {
       var lab = el("label", { class: "q-check" });
       var cb = el("input", { type: "checkbox" });
       cb.checked = checked;
       cb.addEventListener("change", function () { onToggle(cb.checked); });
       lab.appendChild(cb);
+      if (swColor) lab.appendChild(el("span", { class: "q-fb-sw", style: "background:" + swColor }));
       lab.appendChild(document.createTextNode(" " + label));
       ff.appendChild(lab);
     }
@@ -712,11 +688,12 @@
         check(ff, f.toUpperCase(), !state.formatsOff[f], function (on) {
           if (on) delete state.formatsOff[f]; else state.formatsOff[f] = true;
           onFormatChange();
-        });
+        }, FORMAT_COLORS[f] || PALETTE[0]);
       });
     }
 
-    // Tests (implementations) for each shown format — drive the interactive charts.
+    // Tests (implementations) for each shown format — drive the interactive
+    // charts and double as their legend (swatch = the series' format colour).
     var ibf = implsByFormat();
     Object.keys(ibf).sort().forEach(function (fmt) {
       if (state.formatsOff[fmt]) return;   // hidden-format groups self-prune
@@ -728,7 +705,7 @@
         check(tf, n, !state.implsOff[n], function (on) {
           if (on) delete state.implsOff[n]; else state.implsOff[n] = true;
           rerenderAll();
-        });
+        }, FORMAT_COLORS[fmt] || PALETTE[0]);
       });
     });
 
@@ -975,18 +952,13 @@
         dash: DASHES[di % DASHES.length], points: points,
       };
     });
-    // Interactive legend (toggle a line); hidden series drop from the plot/axis
-    // but stay in the legend so they can be brought back.
-    var legend = interactiveLegend(
-      series.map(function (s) { return { name: s.impl, label: s.impl, color: s.color }; }),
-      renderLossless
-    );
+    // Series visibility follows the Tests filter (state.implsOff); the swatched
+    // checkboxes there are the legend, so no per-chart legend is drawn here.
     var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
     if (!vis.length) {
       host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort (nothing shown)" viewBox="0 0 ' +
         VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
         '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
-      host.appendChild(legend);
       return;
     }
     var allPts = [];
@@ -1042,7 +1014,6 @@
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
       '<div class="q-tooltip" hidden></div>';
-    host.insertBefore(legend, host.children[1] || null);   // legend right after the plot
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +
@@ -1141,18 +1112,13 @@
       };
     }).filter(function (s) { return s.points.length > 0; });
     if (!series.length) { host.innerHTML = ""; return; }
-    // Interactive legend (toggle a decoder line); hidden series leave the plot but
-    // stay in the legend so they can be brought back.
-    var legend = interactiveLegend(
-      series.map(function (s) { return { name: s.impl, label: s.impl, color: s.color }; }),
-      renderDecoders
-    );
+    // Series visibility follows the Tests filter (state.implsOff); its swatched
+    // checkboxes are the legend, so no per-chart legend is drawn here.
     var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
     if (!vis.length) {
       host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel (nothing shown)" viewBox="0 0 ' +
         VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
         '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
-      host.appendChild(legend);
       return;
     }
 
@@ -1209,7 +1175,6 @@
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
       '<p class="q-note">Hollow markers = approximate decode (differs from the reference it is scored against); filled = bit-exact.</p>' +
       '<div class="q-tooltip" hidden></div>';
-    host.insertBefore(legend, host.children[1] || null);   // legend right after the plot
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +

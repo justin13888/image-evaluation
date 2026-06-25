@@ -473,13 +473,12 @@ def test_report_html():
     assert "negative = fewer bits for the same quality" in html, (
         "BD-rate note must define the sign convention"
     )
-    # Every line chart's legend is interactive (toggles a line via state.implsOff);
-    # the old non-clickable static chips are gone.
-    assert "q-chip static" not in html, (
-        "lossless/decoder legends must be interactive, not static chips"
-    )
-    assert "function interactiveLegend(" in html, (
-        "the shared interactive-legend helper must be inlined"
+    # Series visibility folds into the Tests filter: each test checkbox carries a
+    # colour swatch (q-fb-sw) and toggles state.implsOff, so there are no separate
+    # per-chart legends — and toggling a test re-renders every chart and table.
+    assert "q-chip static" not in html, "there must be no static legend chips"
+    assert "q-fb-sw" in html and "implsOff" in html, (
+        "series toggles must live on the swatched Tests filter checkboxes"
     )
     # Per-point image gallery (this feature): the rows carry their image paths,
     # those round-trip into the embedded metrics, and the lightbox engine that
