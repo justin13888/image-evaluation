@@ -213,6 +213,17 @@ table.q-table td.q-approx { color: #3a6ea5; }
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
 
+/* Centre every chart by itself. The static (matplotlib) charts are fixed-size
+   PNG/SVG inside a full-width gallery, so without this they sit left-aligned;
+   centre the figure, its image, and its caption. The interactive SVG charts are
+   already width:100%, but margin:auto guards any chart narrower than its box
+   (e.g. the lossless bars at min-width:600px). Scoped to [data-img-tabs] so the
+   lightbox figures (.q-lb-fig) are untouched. */
+[data-img-tabs] figure     { margin: 1rem auto; text-align: center; }
+[data-img-tabs] figure img { display: block; margin: 0 auto; }
+[data-img-tabs] figcaption { text-align: center; }
+.q-chart svg, #q-lossless-bars svg { margin-left: auto; margin-right: auto; }
+
 /* Full-bleed the chart areas past the readable text column (body is capped at
    ~1100px) so a single full-width chart per tab really uses the browser width.
    Only kicks in once the viewport is wider than the text column; the negative

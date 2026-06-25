@@ -43,17 +43,20 @@ def _json_script(elem_id: str, obj: Any) -> str:
     return f'<script id="{elem_id}" type="application/json">{payload}</script>'
 
 
-def _img_tag(img_path: str) -> str:
+def _img_tag(img_path: str, fmt: str = "") -> str:
     """Embed a chart as a base64 <img> data URI (self-contained, no external src).
     SVG charts use ``image/svg+xml``; anything else is treated as PNG. A data-URI
     <img> (rather than inlined markup) isolates each SVG so matplotlib's shared
-    ids/clip-paths can't collide across charts."""
+    ids/clip-paths can't collide across charts. ``fmt`` (the chart's image format,
+    lowercase) is stamped as ``data-format`` so the report's format filter can
+    show/hide this chart."""
     mime = "image/svg+xml" if img_path.endswith(".svg") else "image/png"
     with open(img_path, "rb") as f:
         data = base64.b64encode(f.read()).decode("ascii")
     alt = html.escape(os.path.basename(img_path))
+    fmt_attr = f' data-format="{html.escape(fmt)}"' if fmt else ""
     return (
-        f'<figure><img alt="{alt}" '
+        f'<figure{fmt_attr}><img alt="{alt}" '
         f'src="data:{mime};base64,{data}">'
         f"<figcaption>{alt}</figcaption></figure>"
     )
@@ -84,21 +87,25 @@ def _gallery_html(charts: list[str], group_id: str) -> str:
     for p in charts:
         groups.setdefault(_chart_group(p), []).append(p)
     if len(groups) <= 1:
-        return "\n".join(_img_tag(p) for p in charts)
+        # Single group: no tabs, but still wrap in a [data-img-tabs] block so every
+        # gallery is uniform (same full-bleed centring + format-filter hooks).
+        figs = "\n".join(_img_tag(p, _chart_group(p).lower()) for p in charts)
+        return f'<div class="img-tabs" data-img-tabs>{figs}</div>'
     tabs: list[str] = []
     panels: list[str] = []
     for i, key in enumerate(sorted(groups)):
         sel = i == 0
+        fmt = key.lower()
         tabs.append(
             f'<button class="q-tab{" active" if sel else ""}" type="button" '
             f'role="tab" id="{group_id}-tab-{i}" aria-controls="{group_id}-panel-{i}" '
-            f'aria-selected="{"true" if sel else "false"}" '
+            f'aria-selected="{"true" if sel else "false"}" data-format="{fmt}" '
             f'tabindex="{"0" if sel else "-1"}">{html.escape(key)}</button>'
         )
-        figs = "\n".join(_img_tag(p) for p in groups[key])
+        figs = "\n".join(_img_tag(p, fmt) for p in groups[key])
         panels.append(
             f'<div class="q-tabpanel" role="tabpanel" id="{group_id}-panel-{i}" '
-            f'aria-labelledby="{group_id}-tab-{i}" tabindex="0"'
+            f'aria-labelledby="{group_id}-tab-{i}" data-format="{fmt}" tabindex="0"'
             f"{'' if sel else ' hidden'}>{figs}</div>"
         )
     return (
