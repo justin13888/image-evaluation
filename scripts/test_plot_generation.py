@@ -371,6 +371,17 @@ def test_report_html():
     assert "renderRD" in html and "seriesForView" in html, (
         "the cross-format rate-distortion engine must be inlined"
     )
+    # No-scroll dashboard: a left-rail nav drives a single-graph stage; run config
+    # and environment live behind an Information modal.
+    assert "id='dash-stage'" in html and "id='dash-nav'" in html, (
+        "the dashboard stage + nav rail mounts must be present"
+    )
+    assert "renderNav" in html and "showGraph" in html, (
+        "the dashboard navigation engine must be inlined"
+    )
+    assert "id='dash-info-btn'" in html and "openInfoModal" in html, (
+        "the Information modal trigger + engine must be present"
+    )
     # An X-axis chooser + a log/linear scale toggle (button groups) switch the
     # shared X axis (size / encode / decode time); a centralized filter bar
     # controls formats + implementations + metrics across every chart.
@@ -416,13 +427,11 @@ def test_report_html():
     )
     assert "arithmetic average" in html, "aggregation note must explain the mean"
     assert "hardHi" in html, "known-range axis scaling must be wired into the engine"
-    # Time dimension (issue #46): per-section toggles mounted beside the lossless
-    # and decoder headings (the rate-distortion time toggle now lives in the view
-    # controls), the bubble-sizing + decoder-scatter engine inlined, and decode
-    # times + fidelity round-tripping into the decoder summary the scatter draws from.
-    for mount in ("q-toggle-lossless", "q-toggle-decoder"):
-        assert f"id='{mount}'" in html, f"missing per-section time toggle mount {mount}"
-    assert "showTime" in html, "per-section show-time state must be in the engine"
+    # Time dimension (issue #46): a contextual "show time" toggle in the controls
+    # box (encode-time bubbles on the rate-distortion + lossless-effort charts),
+    # the bubble-sizing engine inlined, and decode times + fidelity round-tripping
+    # into the decoder summary the speed-vs-bitrate scatter draws from.
+    assert "showTime" in html, "show-time state must be in the engine"
     assert "timeScale" in html and "sizeLegendHTML" in html, (
         "encode-time bubble sizing + size legend must be wired into the engine"
     )

@@ -71,13 +71,18 @@
 
   // state
   var state = {
+    cat: null,                 // active category id (quality | lossless | … | sec:perf)
+    graph: null,               // active graph id within the category
+    graphKind: null,           // active graph kind — drives the controls box
+    metric: "ssimulacra2",     // active rate-distortion metric (single-select nav step)
     xKey: "bpp",               // X axis: "bpp" | "time_s" | "decode_time_s"
     xLog: true,                // X scale: log (true) or linear (false)
-    metricsOn: {},             // metric key -> bool (shown)
-    implsOff: {},              // impl name -> true (hidden globally)
+    losslessView: "bars",      // lossless graph: "bars" | "effort"
+    decoderView: "table",      // decoder graph: "table" | "chart"
+    implsOff: {},              // impl name -> true (hidden everywhere; its legend swatch off)
     formatsOff: {},            // lowercase format key -> true (format hidden everywhere)
-    barCollapsed: false,       // floating filter bar minimised to its header
-    showTime: { rd: true, lossless: true, decoder: true },
+    barCollapsed: false,       // filter panel minimised to its header
+    showTime: { rd: true, lossless: true },
   };
 
   // ---- data helpers --------------------------------------------------------
@@ -515,29 +520,22 @@
   // there are no separate per-chart legend chips. Every renderer reads implsOff
   // to drop hidden series, and toggling a Test re-renders all charts + tables.
 
-  // Rate-distortion: one full-width chart per selected metric, each overlaying
-  // every shown format's encoders on the X axis chosen in the controls box.
+  // Rate-distortion: the active metric (chosen on the nav rail) as one full-width
+  // chart overlaying every shown format's encoders on the chosen X axis.
   function renderRD() {
     var host = document.getElementById("q-rd");
     if (!host) return;
     host.innerHTML = "";
-    var xAxis = X_AXES[state.xKey];
-    var metrics = availableMetrics().filter(function (k) { return state.metricsOn[k]; });
-    if (!metrics.length) {
-      host.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter bar."));
-      return;
-    }
-    metrics.forEach(function (metricKey) {
-      var series = seriesForView(AGG_ALL, state.xKey, metricKey);
-      var sec = el("div", { class: "q-stack-item" });
-      sec.appendChild(el("div", { class: "q-metric-cap" }, METRIC_INFO[metricKey].name));
-      var chart = el("div", { class: "q-chart" });
-      sec.appendChild(chart);
-      host.appendChild(sec);
-      renderXYChart(chart, series, {
-        xLog: state.xLog, xAxis: xAxis, yInfo: METRIC_INFO[metricKey],
-        showTime: state.showTime.rd,
-      });
+    var avail = availableMetrics();
+    var m = avail.indexOf(state.metric) >= 0 ? state.metric : avail[0];
+    if (!m) { host.appendChild(el("p", { class: "q-note" }, "No metric data.")); return; }
+    host.appendChild(el("div", { class: "q-metric-cap" },
+      METRIC_INFO[m].name + " vs " + X_AXES[state.xKey].name));
+    var chart = el("div", { class: "q-chart" });
+    host.appendChild(chart);
+    renderXYChart(chart, seriesForView(AGG_ALL, state.xKey, m), {
+      xLog: state.xLog, xAxis: X_AXES[state.xKey], yInfo: METRIC_INFO[m],
+      showTime: state.showTime.rd,
     });
   }
 
@@ -570,23 +568,20 @@
     return Object.keys(s).sort();
   }
 
-  // Re-render everything the filters touch: the interactive quality charts (when
-  // present) plus the static galleries.
+  // A filter changed: prune the galleries, then rebuild the rail (categories /
+  // graphs may have dropped) and re-render the active graph in the stage. Hidden
+  // graphs re-render lazily when next shown, so they always reflect the filters.
   function rerenderAll() {
-    if (document.getElementById("quality-app") && AGG_ALL) {
-      renderRD();
-      renderLossless();
-      renderDecoders();
-      renderBdRate();
-    }
     applyGalleryFilter();
+    if (state.cat) showGraph(state.cat, state.graph);
+    else renderNav();
   }
 
   // The Tests groups depend on which formats are shown, so the bar rebuilds too.
   function onFormatChange() { renderFilterBar(); rerenderAll(); }
 
   // Show/hide static gallery charts (pre-rendered PNGs can't be re-plotted, only
-  // shown/hidden) by their data-format; collapse a fully-empty suite section.
+  // shown/hidden) by their data-format within each suite section.
   function applyGalleryFilter() {
     [].forEach.call(document.querySelectorAll("[data-img-tabs]"), function (box) {
       function hiddenF(n) {
@@ -595,12 +590,12 @@
       }
       var tabs = [].slice.call(box.querySelectorAll('[role="tab"][data-format]'));
       var panels = [].slice.call(box.querySelectorAll('[role="tabpanel"][data-format]'));
-      var anyVis = false, firstVis = -1;
+      var firstVis = -1;
       tabs.forEach(function (t, i) {
         var hide = hiddenF(t);
         t.hidden = hide;
         if (panels[i] && hide) panels[i].hidden = true;
-        if (!hide) { anyVis = true; if (firstVis < 0) firstVis = i; }
+        if (!hide && firstVis < 0) firstVis = i;
       });
       // If the active tab was hidden, activate the first visible one (its own
       // gallery handler shows the panel).
@@ -613,10 +608,21 @@
       // Flat (single-group) galleries carry data-format on the figures directly.
       var figs = [].slice.call(box.querySelectorAll("figure[data-format]"));
       figs.forEach(function (fig) { fig.hidden = hiddenF(fig); });
-      if (!tabs.length && figs.length) anyVis = figs.some(function (f) { return !f.hidden; });
-      var section = box.closest("[data-chart-section]");
-      if (section) section.hidden = !anyVis;
+      // Section show/hide is owned by the dashboard (one panel at a time); here we
+      // only prune the per-format tabs/figures within it. buildCategories consults
+      // sectionHasVisible() to drop a category whose formats are all filtered out.
     });
+  }
+
+  // Whether a static suite section still has any visible per-format tab/figure
+  // under the current format filter (used to prune empty dashboard categories).
+  function sectionHasVisible(section) {
+    if (!section) return false;
+    var tabs = [].slice.call(section.querySelectorAll('[role="tab"][data-format]'));
+    if (tabs.length) return tabs.some(function (t) { return !t.hidden; });
+    var figs = [].slice.call(section.querySelectorAll("figure[data-format]"));
+    if (figs.length) return figs.some(function (f) { return !f.hidden; });
+    return true;   // no per-format grouping → always present
   }
 
 
@@ -704,80 +710,77 @@
         }, FORMAT_COLORS[fmt] || PALETTE[0]);
       });
     });
-
-    if (hasQuality) {
-      // Metrics — which IQA charts to stack.
-      var metrics = availableMetrics();
-      if (metrics.length > 1) {
-        var mf = group("Metrics");
-        metrics.forEach(function (k) {
-          check(mf, METRIC_INFO[k].name, !!state.metricsOn[k], function (on) {
-            state.metricsOn[k] = on; renderRD();
-          });
-        });
-      }
-      // X axis + scale now live in the controls box (renderControls), not here.
-    }
+    // Metric is a Quality nav step (single-select on the rail); X axis + scale
+    // live in the controls box. The filter bar is just Formats + Tests.
   }
 
-  // ---- controls (view preset + show-time + download) -----------------------
+  // ---- controls box (axis + scale + show-time + download) ------------------
 
+  // The controls box adapts to the active graph: the X-axis + scale choosers and
+  // the encode-time-bubble toggle only apply to charts that carry those axes.
   function renderControls() {
     var host = document.getElementById("q-controls");
     if (!host) return;
     host.innerHTML = "";
+    var kind = state.graphKind;
 
-    // X-axis chooser — quality vs size / encode time / decode time. Only shown
-    // when more than one axis was measured.
-    var axes = availableXAxes();
-    if (axes.length > 1) {
-      host.appendChild(el("span", { class: "q-label" }, "Quality vs"));
-      var axGroup = el("div", { class: "q-group", role: "group", "aria-label": "X axis" });
-      axes.forEach(function (k) {
-        var on = state.xKey === k;
-        var b = el("button", { type: "button", class: on ? "active" : "", "aria-pressed": on ? "true" : "false" }, axisLabel(k));
-        b.addEventListener("click", function () { setAxis(k); });
-        axGroup.appendChild(b);
+    if (kind === "rd") {
+      // X-axis chooser — quality vs size / encode time / decode time (if measured).
+      var axes = availableXAxes();
+      if (axes.length > 1) {
+        host.appendChild(el("span", { class: "q-label" }, "Quality vs"));
+        var axGroup = el("div", { class: "q-group", role: "group", "aria-label": "X axis" });
+        axes.forEach(function (k) {
+          var onA = state.xKey === k;
+          var b = el("button", { type: "button", class: onA ? "active" : "", "aria-pressed": onA ? "true" : "false" }, axisLabel(k));
+          b.addEventListener("click", function () { setAxis(k); });
+          axGroup.appendChild(b);
+        });
+        host.appendChild(axGroup);
+      }
+      // X-scale toggle — logarithmic vs linear (independent of the axis choice).
+      host.appendChild(el("span", { class: "q-label" }, "Scale"));
+      var scGroup = el("div", { class: "q-group", role: "group", "aria-label": "X scale" });
+      [["Logarithmic", true], ["Linear", false]].forEach(function (opt) {
+        var onS = state.xLog === opt[1];
+        var b = el("button", { type: "button", class: onS ? "active" : "", "aria-pressed": onS ? "true" : "false" }, opt[0]);
+        b.addEventListener("click", function () { setScale(opt[1]); });
+        scGroup.appendChild(b);
       });
-      host.appendChild(axGroup);
+      host.appendChild(scGroup);
     }
 
-    // X-scale toggle — logarithmic vs linear (independent of the axis choice).
-    host.appendChild(el("span", { class: "q-label" }, "Scale"));
-    var scGroup = el("div", { class: "q-group", role: "group", "aria-label": "X scale" });
-    [["Logarithmic", true], ["Linear", false]].forEach(function (opt) {
-      var on = state.xLog === opt[1];
-      var b = el("button", { type: "button", class: on ? "active" : "", "aria-pressed": on ? "true" : "false" }, opt[0]);
-      b.addEventListener("click", function () { setScale(opt[1]); });
-      scGroup.appendChild(b);
-    });
-    host.appendChild(scGroup);
+    // Encode-time bubbles — meaningful on the size RD chart and the lossless
+    // size-vs-effort chart (both encode bubble size from mean encode time).
+    var timeKey = kind === "rd" ? "rd" : kind === "lossless-effort" ? "lossless" : null;
+    if (timeKey) {
+      var tWrap = el("span", { class: "q-ctl" });
+      var tcb = el("input", { type: "checkbox", id: "q-showtime" });
+      tcb.checked = state.showTime[timeKey];
+      tcb.addEventListener("change", function () {
+        state.showTime[timeKey] = tcb.checked;
+        if (timeKey === "rd") renderRD(); else renderLossless();
+      });
+      var tlab = el("label", { class: "q-label", for: "q-showtime" });
+      tlab.appendChild(tcb);
+      tlab.appendChild(document.createTextNode(" Encode-time bubbles"));
+      tWrap.appendChild(tlab);
+      host.appendChild(tWrap);
+    }
 
-    // Show-time toggle (encode-time bubbles; only meaningful on the bpp views).
-    var tWrap = el("span", { class: "q-ctl" });
-    var tId = "q-showtime";
-    var tcb = el("input", { type: "checkbox", id: tId });
-    tcb.checked = state.showTime.rd;
-    tcb.addEventListener("change", function () { state.showTime.rd = tcb.checked; renderRD(); });
-    var tlab = el("label", { class: "q-label", for: tId });
-    tlab.appendChild(tcb);
-    tlab.appendChild(document.createTextNode(" Encode-time bubbles"));
-    tWrap.appendChild(tlab);
-    host.appendChild(tWrap);
-
-    // Download embedded raw metrics.
-    var dl = el("a", { class: "q-dl", href: "#" }, "⤓ raw metrics (JSON)");
-    dl.addEventListener("click", function (e) {
-      e.preventDefault();
-      var blob = new Blob([JSON.stringify(METRICS)], { type: "application/json" });
-      var url = URL.createObjectURL(blob);
-      var a = el("a", { href: url, download: "metrics.json" });
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-    host.appendChild(dl);
-
-    host.appendChild(el("span", { class: "q-hint" }, "Tip: Alt+[ / Alt+] cycle the X axis."));
+    // Download embedded raw metrics (available whenever quality data is present).
+    if (METRICS.length) {
+      var dl = el("a", { class: "q-dl", href: "#" }, "⤓ raw metrics (JSON)");
+      dl.addEventListener("click", function (e) {
+        e.preventDefault();
+        var blob = new Blob([JSON.stringify(METRICS)], { type: "application/json" });
+        var url = URL.createObjectURL(blob);
+        var a = el("a", { href: url, download: "metrics.json" });
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+      host.appendChild(dl);
+    }
   }
 
   function setAxis(k) {
@@ -892,14 +895,18 @@
       host.innerHTML = '<p class="q-note">No lossless encoders for the selected formats.</p>';
       return;
     }
-    host.innerHTML =
-      '<div class="q-metric-cap">Best bits per pixel — lower is better</div>' +
-      '<div id="q-lossless-bars"></div>' +
-      '<div class="q-metric-cap">Size vs compression effort</div>' +
-      '<div id="q-lossless-effort" class="q-chart"></div>';
-    renderLosslessBars(document.getElementById("q-lossless-bars"),
-      impls.filter(function (n) { return !state.implsOff[n]; }));
-    renderLosslessEffort(document.getElementById("q-lossless-effort"), impls);
+    host.innerHTML = "";
+    if (state.losslessView === "effort") {
+      host.appendChild(el("div", { class: "q-metric-cap" }, "Size vs compression effort"));
+      var eff = el("div", { id: "q-lossless-effort", class: "q-chart" });
+      host.appendChild(eff);
+      renderLosslessEffort(eff, impls);
+    } else {
+      host.appendChild(el("div", { class: "q-metric-cap" }, "Best bits per pixel — lower is better"));
+      var bars = el("div", { id: "q-lossless-bars" });
+      host.appendChild(bars);
+      renderLosslessBars(bars, impls.filter(function (n) { return !state.implsOff[n]; }));
+    }
   }
 
   function renderLosslessBars(host, impls) {
@@ -1026,8 +1033,8 @@
       host.innerHTML = '<p class="q-note">No decoders measured.</p>';
       return;
     }
-    // Format filter applies to the table + chart; the table additionally drops
-    // impl-hidden decoders, while the chart keeps them in its interactive legend.
+    // Format filter applies to both views; the table additionally drops
+    // impl-hidden decoders (the chart honours implsOff per series).
     var impls = Object.keys(DECODERS).filter(function (k) { return !state.formatsOff[DECODERS[k].format]; });
     if (!impls.length) {
       host.innerHTML = '<p class="q-note">No decoders for the selected formats.</p>';
@@ -1038,6 +1045,11 @@
       if (da.format !== db.format) return da.format < db.format ? -1 : 1;
       return da.mean_time_s - db.mean_time_s;
     });
+    if (state.decoderView === "chart") {
+      host.innerHTML = '<div id="q-decoder-chart" class="q-chart"></div>';
+      renderDecoderChart(document.getElementById("q-decoder-chart"), impls);
+      return;
+    }
     var tableImpls = impls.filter(function (k) { return !state.implsOff[k]; });
     var html = '<table class="q-table"><thead><tr>' +
       '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode</th>' +
@@ -1070,11 +1082,7 @@
         "</td><td>" + esc(basis) + "</td></tr>";
     });
     html += "</tbody></table>";
-    var chart = state.showTime.decoder ? '<div id="q-decoder-chart" class="q-chart"></div>' : "";
-    host.innerHTML = chart + html;
-    if (state.showTime.decoder) {
-      renderDecoderChart(document.getElementById("q-decoder-chart"), impls);
-    }
+    host.innerHTML = html;
   }
 
   // Speed-vs-bitrate scatter: X = input bpp, Y = one-pass decode time. Bit-exact
@@ -1221,32 +1229,12 @@
     });
   }
 
-  // Per-section "show time" toggle, mounted beside a section heading.
-  function mountSectionToggle(mountId, key, rerender) {
-    var host = document.getElementById(mountId);
-    if (!host) return;
-    host.innerHTML = "";
-    var id = "q-secshow-" + key;
-    var cb = el("input", { type: "checkbox", id: id });
-    cb.checked = state.showTime[key];
-    cb.addEventListener("change", function () { state.showTime[key] = cb.checked; rerender(); });
-    var lab = el("label", { class: "q-label", for: id });
-    lab.appendChild(cb);
-    lab.appendChild(document.createTextNode(" Show time"));
-    host.appendChild(lab);
-  }
-
-  // ---- init ----------------------------------------------------------------
-
-  // Generic tabbed image galleries (performance / scaling / effort): the static
-  // SVGs are grouped into ARIA tabs by report.py so each is full browser width.
-  // Reuses the same roving-tabindex + arrow-key pattern as the quality tabs.
   // ---- per-point image lightbox -------------------------------------------
   // Clicking a data point opens the exact images aggregated into it (the run's
   // assets/, referenced by relative URL — never embedded, so report.html stays
   // small and a multi-GB tree loads only the on-screen thumbnails, lazily).
 
-  var _lb = null;   // the open lightbox, or null
+  var _modal = null;   // the open modal (image lightbox or Information card), or null
 
   function fmtBytes(n) {
     if (!isNum(n) || n <= 0) return "—";
@@ -1281,13 +1269,45 @@
     else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
   }
 
-  function closeLightbox() {
-    if (!_lb) return;
-    document.removeEventListener("keydown", _lb.onKey, true);
-    if (_lb.overlay.parentNode) _lb.overlay.parentNode.removeChild(_lb.overlay);
+  function closeModal() {
+    if (!_modal) return;
+    document.removeEventListener("keydown", _modal.onKey, true);
+    if (_modal.overlay.parentNode) _modal.overlay.parentNode.removeChild(_modal.overlay);
     document.body.classList.remove("q-lb-open");
-    if (_lb.prevFocus && _lb.prevFocus.focus) _lb.prevFocus.focus();
-    _lb = null;
+    if (_modal.prevFocus && _modal.prevFocus.focus) _modal.prevFocus.focus();
+    _modal = null;
+  }
+
+  // Shared modal scaffold (overlay, header, focus trap, Escape, background
+  // freeze, focus restore) for the image lightbox and the Information card.
+  // opts: {title, ariaLabel?, actions?:[el], body?:el, focus?:el}.
+  function openModal(opts) {
+    closeModal();
+    var prevFocus = document.activeElement;
+    var overlay = el("div", { class: "q-lightbox", role: "dialog", "aria-modal": "true",
+      "aria-label": opts.ariaLabel || opts.title || "Dialog" });
+    var dialog = el("div", { class: "q-lb-dialog" });
+    overlay.appendChild(dialog);
+    var head = el("div", { class: "q-lb-head" });
+    head.appendChild(el("h3", { class: "q-lb-title" }, opts.title || ""));
+    var actions = el("div", { class: "q-lb-actions" });
+    (opts.actions || []).forEach(function (a) { actions.appendChild(a); });
+    var closeBtn = el("button", { type: "button", class: "q-lb-close", "aria-label": "Close" }, "✕");
+    closeBtn.addEventListener("click", closeModal);
+    actions.appendChild(closeBtn);
+    head.appendChild(actions);
+    dialog.appendChild(head);
+    if (opts.body) dialog.appendChild(opts.body);
+    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) closeModal(); });
+    document.body.appendChild(overlay);
+    document.body.classList.add("q-lb-open");
+    _modal = { overlay: overlay, prevFocus: prevFocus, onKey: function (ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); closeModal(); }
+      else if (ev.key === "Tab") { trapFocus(ev, dialog); }
+    } };
+    document.addEventListener("keydown", _modal.onKey, true);
+    (opts.focus || closeBtn).focus();
+    return dialog;
   }
 
   function openLightbox(fmt, impl, label) {
@@ -1295,37 +1315,7 @@
       return m.format === fmt && m.impl === impl && m.label === label && m.asset_path;
     });
     if (!rows.length) return;
-    closeLightbox();
-    var prevFocus = document.activeElement;
     var showOrig = false;
-
-    var overlay = el("div", { class: "q-lightbox", role: "dialog", "aria-modal": "true",
-      "aria-label": impl + " — " + fmt + " " + label + " images" });
-    var dialog = el("div", { class: "q-lb-dialog" });
-    overlay.appendChild(dialog);
-
-    var head = el("div", { class: "q-lb-head" });
-    head.appendChild(el("h3", { class: "q-lb-title" },
-      impl + " · " + fmt.toUpperCase() + " · " + label +
-      " (" + rows.length + " image" + (rows.length === 1 ? "" : "s") + ")"));
-    var actions = el("div", { class: "q-lb-actions" });
-    var hasSources = rows.some(function (r) { return r.source_asset; });
-    var toggle = null;
-    if (hasSources) {
-      toggle = el("button", { type: "button", class: "q-lb-toggle", "aria-pressed": "false" }, "Show original");
-      toggle.addEventListener("click", function () {
-        showOrig = !showOrig;
-        toggle.textContent = showOrig ? "Show reconstruction" : "Show original";
-        toggle.setAttribute("aria-pressed", showOrig ? "true" : "false");
-        applyMode();
-      });
-      actions.appendChild(toggle);
-    }
-    var closeBtn = el("button", { type: "button", class: "q-lb-close", "aria-label": "Close gallery" }, "✕");
-    closeBtn.addEventListener("click", closeLightbox);
-    actions.appendChild(closeBtn);
-    head.appendChild(actions);
-    dialog.appendChild(head);
 
     var grid = el("div", { class: "q-lb-grid" });
     var cells = [];
@@ -1346,7 +1336,6 @@
       grid.appendChild(fig);
       cells.push({ img: img, fig: fig, row: r });
     });
-    dialog.appendChild(grid);
 
     function applyMode() {
       cells.forEach(function (c) {
@@ -1358,15 +1347,210 @@
       });
     }
 
-    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) closeLightbox(); });
-    document.body.appendChild(overlay);
-    document.body.classList.add("q-lb-open");
-    _lb = { overlay: overlay, prevFocus: prevFocus, onKey: function (ev) {
-      if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }
-      else if (ev.key === "Tab") { trapFocus(ev, dialog); }
-    } };
-    document.addEventListener("keydown", _lb.onKey, true);
-    (toggle || closeBtn).focus();
+    var toggle = null;
+    if (rows.some(function (r) { return r.source_asset; })) {
+      toggle = el("button", { type: "button", class: "q-lb-toggle", "aria-pressed": "false" }, "Show original");
+      toggle.addEventListener("click", function () {
+        showOrig = !showOrig;
+        toggle.textContent = showOrig ? "Show reconstruction" : "Show original";
+        toggle.setAttribute("aria-pressed", showOrig ? "true" : "false");
+        applyMode();
+      });
+    }
+    openModal({
+      title: impl + " · " + fmt.toUpperCase() + " · " + label +
+        " (" + rows.length + " image" + (rows.length === 1 ? "" : "s") + ")",
+      ariaLabel: impl + " — " + fmt + " " + label + " images",
+      actions: toggle ? [toggle] : [], body: grid, focus: toggle,
+    });
+  }
+
+  // The Information hero card: clone the hidden #dash-info body into a modal.
+  function openInfoModal() {
+    var src = document.getElementById("dash-info");
+    if (!src) return;
+    var body = el("div", { class: "q-info-body" });
+    body.innerHTML = src.innerHTML;
+    openModal({ title: "Run information", ariaLabel: "Run information", body: body });
+  }
+
+  // ---- dashboard navigation ------------------------------------------------
+  // A left rail of categories + per-category graphs drives a single-graph stage
+  // (the only scroll region). Graphs render on demand, so each reflects the live
+  // filter state when shown; switching never reloads the page.
+
+  var SECTION_LABELS = { perf: "Performance", scaling: "Scaling", effort: "Effort" };
+
+  // Categories actually present in this bundle, in a fixed order. A static suite
+  // drops out when the format filter hides every chart in it.
+  function buildCategories() {
+    var cats = [];
+    if (document.getElementById("quality-app") && AGG_ALL && Object.keys(AGG_ALL).length)
+      cats.push({ id: "quality", label: "Quality" });
+    if (Object.keys(LOSSLESS).length) cats.push({ id: "lossless", label: "Lossless" });
+    if (Object.keys(DECODERS).length) cats.push({ id: "decoder", label: "Decoder" });
+    ["perf", "scaling", "effort"].forEach(function (s) {
+      var sec = document.querySelector("[data-chart-section='" + s + "']");
+      if (sec && sectionHasVisible(sec))
+        cats.push({ id: "sec:" + s, label: SECTION_LABELS[s] });
+    });
+    return cats;
+  }
+
+  // The graphs (rail steps) within a category. Each carries the stage panel
+  // group it lives in and the kind that drives the controls box + renderer.
+  function buildGraphList(catId) {
+    if (catId === "quality") {
+      var L = availableMetrics().map(function (m) {
+        return { id: "rd-" + m, label: METRIC_INFO[m].name, group: "rd", kind: "rd", metric: m };
+      });
+      if (Object.keys(BDRATE).length)
+        L.push({ id: "bdrate", label: "BD-rate", group: "bdrate", kind: "bdrate" });
+      return L;
+    }
+    if (catId === "lossless") return [
+      { id: "ll-bars", label: "Best bpp", group: "lossless", kind: "lossless-bars", view: "bars" },
+      { id: "ll-effort", label: "Size vs effort", group: "lossless", kind: "lossless-effort", view: "effort" },
+    ];
+    if (catId === "decoder") return [
+      { id: "dec-table", label: "Fidelity & speed", group: "decoder", kind: "decoder-table", view: "table" },
+      { id: "dec-chart", label: "Speed vs bitrate", group: "decoder", kind: "decoder-chart", view: "chart" },
+    ];
+    return galleryGraphs(catId);
+  }
+
+  // Static gallery category -> one rail step per visible format group (or a
+  // single step for a flat, ungrouped gallery).
+  function galleryGraphs(catId) {
+    var s = catId.indexOf("sec:") === 0 ? catId.slice(4) : catId;
+    var sec = document.querySelector("[data-chart-section='" + s + "']");
+    if (!sec) return [];
+    var tabs = [].slice.call(sec.querySelectorAll('[role="tab"][data-format]'))
+      .filter(function (t) { return !t.hidden; });
+    if (!tabs.length)
+      return [{ id: s + "-all", label: SECTION_LABELS[s] || s, group: "sec:" + s, kind: "gallery" }];
+    return tabs.map(function (t, i) {
+      return { id: s + "-" + i, label: t.textContent || ("Group " + (i + 1)),
+        group: "sec:" + s, kind: "gallery", tab: t };
+    });
+  }
+
+  // The stage panel hosting a graph group.
+  function panelEl(group) {
+    if (group.indexOf("sec:") === 0)
+      return document.querySelector("[data-chart-section='" + group.slice(4) + "']");
+    return document.querySelector("#dash-stage [data-graph-group='" + group + "']");
+  }
+
+  function navButton(cls, label, on, onClick) {
+    var attrs = { type: "button", class: cls + (on ? " active" : "") };
+    if (on) attrs["aria-current"] = "true";
+    var b = el("button", attrs, label);
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function renderNav() {
+    var nav = document.getElementById("dash-nav");
+    if (!nav) return;
+    var cats = buildCategories();
+    nav.innerHTML = "";
+    if (!cats.length) { nav.hidden = true; return; }
+    nav.hidden = false;
+    if (!cats.some(function (c) { return c.id === state.cat; })) state.cat = cats[0].id;
+
+    nav.appendChild(el("div", { class: "dash-title" }, "Image Evaluation"));
+
+    var catWrap = el("div", { class: "dash-cats" });
+    cats.forEach(function (c) {
+      catWrap.appendChild(navButton("dash-cat", c.label, c.id === state.cat,
+        function () { selectCategory(c.id); }));
+    });
+    nav.appendChild(catWrap);
+
+    var list = buildGraphList(state.cat);
+    if (!list.some(function (g) { return g.id === state.graph; }))
+      state.graph = list[0] ? list[0].id : null;
+    var gWrap = el("div", { class: "dash-graphs" });
+    list.forEach(function (g) {
+      gWrap.appendChild(navButton("dash-graph", g.label, g.id === state.graph,
+        function () { showGraph(state.cat, g.id); }));
+    });
+    nav.appendChild(gWrap);
+
+    if (list.length > 1) {
+      var pn = el("div", { class: "dash-prevnext" });
+      var prev = el("button", { type: "button", class: "dash-step", "aria-label": "Previous graph" }, "‹ Prev");
+      var next = el("button", { type: "button", class: "dash-step", "aria-label": "Next graph" }, "Next ›");
+      prev.addEventListener("click", function () { stepGraph(-1); });
+      next.addEventListener("click", function () { stepGraph(1); });
+      pn.appendChild(prev); pn.appendChild(next);
+      nav.appendChild(pn);
+    }
+  }
+
+  function selectCategory(catId) {
+    state.cat = catId;
+    var list = buildGraphList(catId);
+    showGraph(catId, list[0] ? list[0].id : null);
+  }
+
+  // Reveal one graph: show its stage panel, configure + render it, refresh the
+  // rail + controls. Falls back to the first category/graph if the requested one
+  // is gone (e.g. filtered out).
+  function showGraph(catId, graphId) {
+    var cats = buildCategories();
+    var cat = cats.filter(function (c) { return c.id === catId; })[0] || cats[0];
+    if (!cat) { renderNav(); return; }
+    var list = buildGraphList(cat.id);
+    var g = list.filter(function (x) { return x.id === graphId; })[0] || list[0];
+    state.cat = cat.id;
+    state.graph = g ? g.id : null;
+    state.graphKind = g ? g.kind : null;
+
+    var stage = document.getElementById("dash-stage");
+    var target = g ? panelEl(g.group) : null;
+    if (stage) [].forEach.call(stage.children, function (p) { p.hidden = p !== target; });
+
+    if (g) {
+      if (g.kind === "rd") { state.metric = g.metric; renderRD(); }
+      else if (g.kind === "bdrate") renderBdRate();
+      else if (g.kind === "lossless-bars" || g.kind === "lossless-effort") { state.losslessView = g.view; renderLossless(); }
+      else if (g.kind === "decoder-table" || g.kind === "decoder-chart") { state.decoderView = g.view; renderDecoders(); }
+      else if (g.kind === "gallery" && g.tab) g.tab.click();
+    }
+
+    renderControls();
+    renderNav();
+    if (stage) stage.scrollTop = 0;
+    if (g) announce("Showing " + cat.label + " — " + g.label);
+  }
+
+  // Prev / Next step within the active category, crossing into the adjacent
+  // category at the ends.
+  function stepGraph(d) {
+    var list = buildGraphList(state.cat);
+    var i = list.map(function (g) { return g.id; }).indexOf(state.graph);
+    var ni = (i < 0 ? 0 : i) + d;
+    if (ni >= 0 && ni < list.length) { showGraph(state.cat, list[ni].id); return; }
+    var cats = buildCategories().map(function (c) { return c.id; });
+    var ci = cats.indexOf(state.cat) + d;
+    if (ci < 0 || ci >= cats.length) return;
+    var l2 = buildGraphList(cats[ci]);
+    var pick = d < 0 && l2.length ? l2[l2.length - 1] : l2[0];
+    showGraph(cats[ci], pick ? pick.id : null);
+  }
+
+  function initDashboard() {
+    var cats = buildCategories();
+    if (cats.length) {
+      var list = buildGraphList(cats[0].id);
+      showGraph(cats[0].id, list[0] ? list[0].id : null);
+    } else {
+      renderNav();
+    }
+    var info = document.getElementById("dash-info-btn");
+    if (info) info.addEventListener("click", openInfoModal);
   }
 
   function initGalleries() {
@@ -1398,29 +1582,24 @@
 
   function init() {
     initGalleries();
-    // Build the bar up front so the format filter governs the static galleries
-    // even in a perf-only bundle (no quality app); it is rebuilt below with the
-    // impl/metric/view groups once the quality data resolves.
+    // Build the filter bar up front so the format filter governs the static
+    // galleries even in a perf-only bundle; it is rebuilt with the Tests groups
+    // once the quality data resolves.
     renderFilterBar();
     applyGalleryFilter();
-    if (!document.getElementById("quality-app")) return;
-    AGG_ALL = aggregateAll(validRows(METRICS));
-    availableMetrics().forEach(function (k) { state.metricsOn[k] = true; });
+    if (document.getElementById("quality-app")) {
+      AGG_ALL = aggregateAll(validRows(METRICS));
+      renderAggregationNote();
+      renderFilterBar();
+    }
+    // Build the navigation rail and show the first graph (works with or without
+    // a quality app — a perf-only bundle just gets the static categories).
+    initDashboard();
 
-    renderControls();
-    renderAggregationNote();
-    renderFilterBar();
-    renderRD();
-    renderLossless();
-    renderDecoders();
-    renderBdRate();
-    mountSectionToggle("q-toggle-lossless", "lossless", renderLossless);
-    mountSectionToggle("q-toggle-decoder", "decoder", renderDecoders);
-
-    // Alt+[ / Alt+] cycle the X axis from anywhere (the button group also takes
-    // direct clicks; this is the global accelerator).
+    // Alt+[ / Alt+] cycle the X axis from anywhere while a rate-distortion graph
+    // is active (the button group also takes direct clicks).
     document.addEventListener("keydown", function (e) {
-      if (!e.altKey) return;
+      if (!e.altKey || state.graphKind !== "rd") return;
       var axes = availableXAxes();
       var i = axes.indexOf(state.xKey); if (i < 0) i = 0;
       if (e.key === "]") { e.preventDefault(); setAxis(axes[(i + 1) % axes.length]); }
