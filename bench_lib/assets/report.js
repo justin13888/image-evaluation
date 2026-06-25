@@ -619,11 +619,6 @@
     });
   }
 
-  // Keep page content clear of the fixed bar regardless of how tall it wraps.
-  function syncBarPadding() {
-    var bar = document.getElementById("q-filterbar");
-    document.body.style.paddingBottom = (bar && !bar.hidden ? bar.offsetHeight + 24 : 0) + "px";
-  }
 
   // Build the bar: Formats + per-format Tests + Metrics + View. Format toggles
   // reach every chart (interactive + static galleries); Tests/Metrics/View drive
@@ -653,14 +648,15 @@
     if (state.barCollapsed) body.hidden = true;
     bar.appendChild(body);
 
-    function group(legendText) {
-      var ff = el("fieldset", { class: "q-fieldset" });
-      ff.appendChild(el("legend", null, legendText));
-      body.appendChild(ff);
-      return ff;
+    // A one-line pill group: a label span followed by inline checkboxes.
+    function group(labelText) {
+      var g = el("div", { class: "q-fb-group", role: "group", "aria-label": labelText });
+      g.appendChild(el("span", { class: "q-fb-lab" }, labelText));
+      body.appendChild(g);
+      return g;
     }
-    function allNone(ff, names, off, after) {
-      var lg = ff.querySelector("legend");
+    function allNone(g, names, off, after) {
+      var lg = g.querySelector(".q-fb-lab");
       var a = el("button", { type: "button", class: "q-mini" }, "all");
       var n = el("button", { type: "button", class: "q-mini" }, "none");
       a.addEventListener("click", function () { names.forEach(function (k) { delete off[k]; }); after(); });
@@ -722,8 +718,6 @@
       }
       // X axis + scale now live in the controls box (renderControls), not here.
     }
-
-    syncBarPadding();
   }
 
   // ---- controls (view preset + show-time + download) -----------------------
@@ -783,7 +777,7 @@
     });
     host.appendChild(dl);
 
-    host.appendChild(el("span", { class: "q-hint" }, "Tip: ← → switch format tabs; Alt+[ / Alt+] cycle the X axis."));
+    host.appendChild(el("span", { class: "q-hint" }, "Tip: Alt+[ / Alt+] cycle the X axis."));
   }
 
   function setAxis(k) {
@@ -1432,7 +1426,6 @@
       if (e.key === "]") { e.preventDefault(); setAxis(axes[(i + 1) % axes.length]); }
       else if (e.key === "[") { e.preventDefault(); setAxis(axes[(i - 1 + axes.length) % axes.length]); }
     });
-    window.addEventListener("resize", syncBarPadding);
   }
 
   if (document.readyState === "loading") {

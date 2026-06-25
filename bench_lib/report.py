@@ -348,8 +348,6 @@ def _quality_section(qual_dir: str) -> list[str]:
 
     parts.append(
         "<div id='quality-app'>"
-        "<div id='q-controls' class='q-controls' role='group' "
-        "aria-label='Chart view controls'></div>"
         "<div id='q-status' class='q-visually-hidden' role='status' "
         "aria-live='polite'></div>"
         "<div id='q-aggregation' class='q-agg'></div>"
@@ -437,6 +435,16 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         "<title>Benchmark Report</title>",
         f"<style>{_CSS}\n{_asset('report.css')}</style></head><body>",
+        # Sticky top control bar (filled in by report.js): the centralized filter
+        # panel (left, scales horizontally) + the axis/scale controls box (right).
+        # Mounted first so it rides above every chart and stays in reach while
+        # scrolling; hidden until the engine finds something to filter.
+        "<div class='q-topbar'>"
+        "<div id='q-filterbar' class='q-filterbar' role='region' "
+        "aria-label='Chart filters' hidden></div>"
+        "<div id='q-controls' class='q-controls' role='group' "
+        "aria-label='Chart axis and scale controls'></div>"
+        "</div>",
         "<h1>Image Evaluation — Report</h1>",
     ]
     if generated_at:
@@ -505,14 +513,6 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
         "(<code>#quality-metrics</code>) and also on disk alongside this file: "
         "<code>performance/raw.json</code>, <code>quality/metrics.json</code>, "
         "and per-suite <code>summary.md</code>.</p>"
-    )
-    # Centralized floating filter bar (filled in by report.js). Mounted at body
-    # level so its format filter governs every chart — the interactive quality
-    # view and the static perf/scaling/effort galleries alike — and so it sits
-    # last in tab order. Hidden until the engine finds something to filter.
-    parts.append(
-        "<div id='q-filterbar' class='q-filterbar' role='region' "
-        "aria-label='Chart filters' hidden></div>"
     )
     # One inlined chart engine for the whole document: it draws the interactive
     # quality view and wires every tabbed image gallery (perf/scaling/effort).
