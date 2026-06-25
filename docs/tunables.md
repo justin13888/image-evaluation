@@ -22,7 +22,7 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 | Encoder | Lang | Swept axis | Curated variants (default) | `--params all` adds | Other knobs read |
 |---|---|---|---|---|---|
 | `image-png-encode` | rust | `compression` — fast→best (3 pts, effort, lossless) | `filter-none` | `filter-sub`, `filter-up`, `filter-avg`, `filter-paeth` | `filter`=adaptive |
-| `zune-png-encode` | rust | `effort` — 0→9 (10 pts, effort, lossless) | — | — | — |
+| `zune-png-encode` | rust | — (single lossless point) | — | — | — |
 | `zenpng-encode` | rust | `effort` — 0→24 (9 pts, effort, lossless) | — | — | — |
 | `libpng-encode` | c | `compression` — 0→9 (10 pts, effort, lossless) | — | — | — |
 | `spng-encode` | c | — (single lossless point) | — | — | — |

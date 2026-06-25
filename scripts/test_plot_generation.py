@@ -37,6 +37,22 @@ if repo_root not in sys.path:
 
 from bench_lib.report import generate_report_html  # noqa: E402
 from bench_lib.summary import generate_summary  # noqa: E402
+from bench_lib.models import image_slug, slug  # noqa: E402
+
+_EXT = {"jpeg": "jpg", "png": "png", "webp": "webp", "avif": "avif", "jxl": "jxl"}
+
+
+def _asset_paths(impl, fmt, label, img, decode=False):
+    """Bundle-relative (asset_path, source_asset) for a synthetic row, mirroring
+    BenchmarkTask.asset_relpath: encoders nest under the impl, decoders share an
+    _inputs/ dir, and every source resolves to one PNG under _sources/."""
+    ext = _EXT.get(fmt, fmt)
+    base = (
+        f"assets/{fmt}/_inputs/{slug(label)}"
+        if decode
+        else f"assets/{fmt}/{slug(impl)}/{slug(label)}"
+    )
+    return f"{base}/{image_slug(img)}.{ext}", f"assets/_sources/{image_slug(img)}.png"
 
 
 def _metric(
@@ -52,6 +68,7 @@ def _metric(
     time_s=0.0,
 ):
     axis = "quality"
+    asset_path, source_asset = _asset_paths(impl, fmt, label, img)
     return {
         "name": f"{impl} ({fmt}, encode, {label}, t0, {img})",
         "impl": impl,
@@ -77,6 +94,8 @@ def _metric(
         "megapixels": 0.01,
         "bpp": bpp,
         "time_s": time_s,
+        "asset_path": asset_path,
+        "source_asset": source_asset,
     }
 
 
@@ -84,6 +103,7 @@ def _decode(impl, fmt, label, bpp, psnr, time_s, img="file.png"):
     """A golden-basis decode row (issue #21/#46): PSNR vs the golden decoder is
     None for a bit-exact path, finite for an approximate one; ``time_s`` is the
     one-pass decode time that feeds the speed-vs-bitrate scatter."""
+    asset_path, source_asset = _asset_paths(impl, fmt, label, img, decode=True)
     return {
         "name": f"{impl} ({fmt}, decode, {label}, t0, {img})",
         "impl": impl,
@@ -110,6 +130,8 @@ def _decode(impl, fmt, label, bpp, psnr, time_s, img="file.png"):
         "megapixels": 0.01,
         "bpp": bpp,
         "time_s": time_s,
+        "asset_path": asset_path,
+        "source_asset": source_asset,
     }
 
 
@@ -414,6 +436,22 @@ def test_report_html():
         isinstance(p.get("time_s"), (int, float)) and p["time_s"] > 0
         for p in decoders["zune-jpeg-decode"]["points"]
     ), "decode time must round-trip into the points the scatter is drawn from"
+    # Per-point image gallery (this feature): the rows carry their image paths,
+    # those round-trip into the embedded metrics, and the lightbox engine that
+    # makes points clickable is inlined.
+    assert all("asset_path" in r and "source_asset" in r for r in embedded), (
+        "asset_path + source_asset must round-trip into the report"
+    )
+    assert any(
+        r["asset_path"] and r["asset_path"].startswith("assets/") for r in embedded
+    ), "rows must reference their image under assets/"
+    assert "openLightbox" in html and "q-lightbox" in html, (
+        "the per-point lightbox engine must be inlined"
+    )
+    assert "HAS_ASSETS" in html, "the engine must gate clickability on captured images"
+    assert "click to view images" in html or "opens that point's images" in html, (
+        "points must advertise that they open an image gallery"
+    )
     print("✓ report.html (interactive quality):", os.path.basename(out))
 
 
@@ -470,11 +508,61 @@ def test_tunables_doc_in_sync():
     print("✓ tunables overview in sync with TUNABLE_SCHEMAS")
 
 
+def test_asset_paths():
+    """Deterministic asset grouping: an encoder nests its artifact under
+    <fmt>/<impl>/<label>, every decoder of one input shares a single _inputs/
+    file (deduped), the path is stable across calls (unlike identifier(), which
+    is random by design), and the source resolves to one PNG."""
+    from bench_lib.models import IMPLEMENTATIONS, BenchmarkTask
+
+    by_name = {i.name: i for i in IMPLEMENTATIONS}
+    enc = by_name["image-png-encode"]
+    dec_a = by_name["libpng-decode"]
+    dec_b = by_name["zune-png-decode"]
+
+    def mk(impl, label, ip, sp):
+        return BenchmarkTask(
+            impl=impl,
+            params={},
+            label=label,
+            input_path=ip,
+            source_path=sp,
+            iterations=1,
+            warmup=0,
+            threads=1,
+            discard_output=False,
+            measure_memory=False,
+            pin_cores=False,
+        )
+
+    src = "vendor/codec-corpus/clic2025/final-test/AbC123.ppm"
+    enc_t = mk(enc, "compression-best", src, src)
+    assert (
+        enc_t.asset_relpath()
+        == "assets/png/image-png-encode/compression-best/abc123.png"
+    )
+    assert enc_t.source_asset_relpath() == "assets/_sources/abc123.png"
+    # Deterministic across calls; identifier() is intentionally not.
+    assert enc_t.asset_relpath() == enc_t.asset_relpath()
+    assert enc_t.identifier() != enc_t.identifier()
+
+    # Two decoders of the same input bitstream dedup to one _inputs/ file.
+    inp = "vendor/codec-corpus/clic2025/final-test/AbC123.compression-best.png"
+    da = mk(dec_a, "compression-best", inp, src)
+    db = mk(dec_b, "compression-best", inp, src)
+    assert da.asset_relpath() == "assets/png/_inputs/compression-best/abc123.png"
+    assert da.asset_relpath() == db.asset_relpath(), (
+        "decoders must share one input asset"
+    )
+    print("✓ asset paths: deterministic grouping + decode-input dedup")
+
+
 def main():
     test_timing_summary()
     test_quality_summary()
     test_report_html()
     test_variant_series_roundtrip()
+    test_asset_paths()
     test_tunables_doc_in_sync()
     print("\nAll plot/report generation checks passed.")
 

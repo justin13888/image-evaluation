@@ -80,6 +80,24 @@ trap 'rm -rf "$staging"' EXIT
 cp -R "$report_dir"/. "$staging"/
 cp "$staging/report.html" "$staging/index.html"
 
+# --- 3b. Enforce Cloudflare Pages free-tier limits before uploading ------
+# A run with --report-images can add thousands of image files; catch a bundle
+# that would be rejected (20,000 files / 25 MiB per file) here, with a fix.
+CF_MAX_FILES=20000
+file_count="$(find "$staging" -type f | wc -l | tr -d ' ')"
+if [ "$file_count" -gt "$CF_MAX_FILES" ]; then
+    err "bundle has $file_count files, over Cloudflare Pages' $CF_MAX_FILES-file limit."
+    err "re-run the benchmark with --no-report-images, or deploy a --sample'd subset."
+    exit 1
+fi
+oversized="$(find "$staging" -type f -size +25M)"
+if [ -n "$oversized" ]; then
+    err "these files exceed Cloudflare Pages' 25 MiB per-file limit:"
+    printf '%s\n' "$oversized" | sed 's/^/  /' >&2
+    exit 1
+fi
+info "Pre-flight: $file_count files, all within Cloudflare Pages limits."
+
 # --- 4. Deploy ----------------------------------------------------------
 info "Deploying to Cloudflare Pages project '$PROJECT_NAME' (branch '$BRANCH')..."
 wrangler pages deploy "$staging" \

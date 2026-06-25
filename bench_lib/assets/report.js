@@ -38,6 +38,11 @@
   // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, basis, points} }.
   var DECODERS = readJSON("quality-decoders") || {};
 
+  // Whether this bundle persisted per-result images (asset_path on the rows; see
+  // BenchmarkTask.asset_relpath). When false (legacy bundle / --no-report-images)
+  // data points are not made clickable and no gallery is offered.
+  var HAS_ASSETS = METRICS.some(function (m) { return m && m.asset_path; });
+
   // Each metric's y-axis is anchored to the metric's *known* range rather than to
   // the data, so the same metric reads on identical axes across every chart (and
   // whether you ran one image or a whole dataset). iqa-cli does not report the
@@ -360,7 +365,7 @@
         var px = sx(p.x), py = sy(p.y);
         pts.push({ x: px, y: py });
         var r = scale ? scale.r(p.t) : PT_R;
-        hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, x: p.x, y: p.y, q: p.q, step: p.step, count: p.count, std: p.std, t: p.t });
+        hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, impl: s.implName, format: s.fmt, x: p.x, y: p.y, q: p.q, step: p.step, count: p.count, std: p.std, t: p.t });
       });
       svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       s.points.forEach(function (p) {
@@ -379,59 +384,93 @@
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
       '<div class="q-tooltip" hidden></div>';
 
-    // hover
+    // hover / click / keyboard — all share one nearest-point selection
     var svgEl = container.querySelector("svg");
     var tip = container.querySelector(".q-tooltip");
     var hl = container.querySelector(".q-hl");
+    var clickable = HAS_ASSETS;   // points open their image group when captured
+
+    function nearest(vx, vy) {
+      var best = null, bd = 1e9;
+      container._hits.forEach(function (h) {
+        var dd = (h.sx - vx) * (h.sx - vx) + (h.sy - vy) * (h.sy - vy);
+        if (dd < bd) { bd = dd; best = h; }
+      });
+      return (best && bd <= 26 * 26) ? best : null;
+    }
+    function showHit(best, clientX, clientY) {
+      hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
+      hl.setAttribute("r", Math.max(7.5, (best.r || PT_R) + 3).toFixed(1));
+      hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
+      var crect = container.getBoundingClientRect();
+      tip.hidden = false;
+      var agg = best.count > 1;
+      tip.innerHTML = "<b>" + esc(best.label) + "</b><br>" +
+        '<span class="k">step</span> ' + esc(best.step) + "<br>" +
+        '<span class="k">' + esc(xAxis.name) + (agg ? " (mean)" : "") + "</span> " + xAxis.fmt(best.x) + "<br>" +
+        '<span class="k">' + esc(info.name) + (agg ? " (mean)" : "") + "</span> " + best.y.toFixed(2) +
+        (agg && best.std > 0 ? " ± " + best.std.toFixed(2) : "") +
+        (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
+        '<br><span class="k">images</span> ' + (agg ? best.count : "1 (single)") +
+        (clickable && best.format ? '<br><span class="q-open-hint">click to view images</span>' : "");
+      var tx = clientX - crect.left + 14, ty = clientY - crect.top + 12;
+      if (tx + 220 > crect.width) tx = clientX - crect.left - 14 - 220;
+      tip.style.left = Math.max(0, tx) + "px";
+      tip.style.top = ty + "px";
+    }
+    function clearHit() { hl.setAttribute("visibility", "hidden"); tip.hidden = true; }
+    function openHit(h) { if (h && h.format && clickable) openLightbox(h.format, h.impl, h.step); }
+
     if (svgEl && container._hits.length) {
       svgEl.addEventListener("mousemove", function (ev) {
         var r = svgEl.getBoundingClientRect();
-        var vx = (ev.clientX - r.left) * (VBW / r.width);
-        var vy = (ev.clientY - r.top) * (VBH / r.height);
-        var best = null, bd = 1e9;
-        container._hits.forEach(function (h) {
-          var dd = (h.sx - vx) * (h.sx - vx) + (h.sy - vy) * (h.sy - vy);
-          if (dd < bd) { bd = dd; best = h; }
-        });
-        if (best && bd <= 26 * 26) {
-          hl.setAttribute("cx", best.sx); hl.setAttribute("cy", best.sy);
-          hl.setAttribute("r", Math.max(7.5, (best.r || PT_R) + 3).toFixed(1));
-          hl.setAttribute("stroke", best.color); hl.setAttribute("visibility", "visible");
-          var crect = container.getBoundingClientRect();
-          tip.hidden = false;
-          var agg = best.count > 1;
-          tip.innerHTML = "<b>" + esc(best.label) + "</b><br>" +
-            '<span class="k">step</span> ' + esc(best.step) + "<br>" +
-            '<span class="k">' + esc(xAxis.name) + (agg ? " (mean)" : "") + "</span> " + xAxis.fmt(best.x) + "<br>" +
-            '<span class="k">' + esc(info.name) + (agg ? " (mean)" : "") + "</span> " + best.y.toFixed(2) +
-            (agg && best.std > 0 ? " ± " + best.std.toFixed(2) : "") +
-            (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
-            '<br><span class="k">images</span> ' + (agg ? best.count : "1 (single)");
-          var tx = ev.clientX - crect.left + 14, ty = ev.clientY - crect.top + 12;
-          if (tx + 220 > crect.width) tx = ev.clientX - crect.left - 14 - 220;
-          tip.style.left = Math.max(0, tx) + "px";
-          tip.style.top = ty + "px";
-        } else {
-          hl.setAttribute("visibility", "hidden"); tip.hidden = true;
+        var best = nearest((ev.clientX - r.left) * (VBW / r.width), (ev.clientY - r.top) * (VBH / r.height));
+        if (best) showHit(best, ev.clientX, ev.clientY); else clearHit();
+      });
+      svgEl.addEventListener("mouseleave", clearHit);
+
+      if (clickable) {
+        // The plot is a keyboard-navigable widget: Tab focuses it, arrow keys
+        // step a cursor between points (highlighting + tooltip), Enter/Space
+        // opens the focused point's image group; the mouse path is the click.
+        svgEl.style.cursor = "pointer";
+        svgEl.setAttribute("tabindex", "0");
+        svgEl.setAttribute("aria-label", ariaLabel +
+          " — interactive: arrow keys move between data points, Enter opens that point's images.");
+        var cur = -1;
+        function focusHit(i) {
+          var n = container._hits.length; if (!n) return;
+          cur = (i % n + n) % n;
+          var h = container._hits[cur];
+          var r = svgEl.getBoundingClientRect();
+          showHit(h, r.left + h.sx * (r.width / VBW), r.top + h.sy * (r.height / VBH));
         }
-      });
-      svgEl.addEventListener("mouseleave", function () {
-        hl.setAttribute("visibility", "hidden"); tip.hidden = true;
-      });
+        svgEl.addEventListener("click", function (ev) {
+          var r = svgEl.getBoundingClientRect();
+          openHit(nearest((ev.clientX - r.left) * (VBW / r.width), (ev.clientY - r.top) * (VBH / r.height)));
+        });
+        svgEl.addEventListener("keydown", function (ev) {
+          if (ev.key === "ArrowRight" || ev.key === "ArrowDown") { ev.preventDefault(); focusHit(cur + 1); }
+          else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") { ev.preventDefault(); focusHit(cur - 1); }
+          else if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openHit(container._hits[cur]); }
+        });
+        svgEl.addEventListener("blur", clearHit);
+      }
     }
   }
 
   // ---- series builders -----------------------------------------------------
 
   // One series per impl of a format, mapping each point to the (x,y) of the view.
-  function seriesForFormat(aggFmt, xKey, yKey) {
+  // `fmt` is carried on the series so a clicked point can resolve its image group.
+  function seriesForFormat(aggFmt, xKey, yKey, fmt) {
     return aggFmt.map(function (s, i) {
       var points = s.points.map(function (p) {
         var x = p.m[xKey], y = p.m[yKey];
         if (!isNum(x) || !isNum(y)) return null;
         return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count };
       }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
-      return { key: s.impl, implName: s.impl, label: s.impl, color: PALETTE[i % PALETTE.length], points: points };
+      return { key: s.impl, implName: s.impl, label: s.impl, fmt: fmt, color: PALETTE[i % PALETTE.length], points: points };
     }).filter(function (s) { return s.points.length > 0; });
   }
 
@@ -451,7 +490,7 @@
         }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
         if (points.length) {
           series.push({
-            key: fmt + "/" + s.impl, implName: s.impl,
+            key: fmt + "/" + s.impl, implName: s.impl, fmt: fmt,
             label: fmt.toUpperCase() + " · " + s.impl,
             color: FORMAT_COLORS[fmt] || PALETTE[0], dash: DASHES[di % DASHES.length],
             points: points,
@@ -508,7 +547,7 @@
     var legendSeries = null;
     metrics.forEach(function (metricKey) {
       var series = tab.fmt
-        ? seriesForFormat(AGG_ALL[tab.fmt] || [], pr.xKey, metricKey)
+        ? seriesForFormat(AGG_ALL[tab.fmt] || [], pr.xKey, metricKey, tab.fmt)
         : seriesForPareto(AGG_ALL, pr.xKey, metricKey);
       if (!legendSeries && series.length) legendSeries = series;
       var sec = el("div", { class: "q-stack-item" });
@@ -1096,6 +1135,134 @@
   // Generic tabbed image galleries (performance / scaling / effort): the static
   // SVGs are grouped into ARIA tabs by report.py so each is full browser width.
   // Reuses the same roving-tabindex + arrow-key pattern as the quality tabs.
+  // ---- per-point image lightbox -------------------------------------------
+  // Clicking a data point opens the exact images aggregated into it (the run's
+  // assets/, referenced by relative URL — never embedded, so report.html stays
+  // small and a multi-GB tree loads only the on-screen thumbnails, lazily).
+
+  var _lb = null;   // the open lightbox, or null
+
+  function fmtBytes(n) {
+    if (!isNum(n) || n <= 0) return "—";
+    var u = ["B", "KB", "MB", "GB"], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + u[i];
+  }
+  function shortName(s) {
+    s = String(s || "").split("/").pop();
+    return s.length > 16 ? s.slice(0, 13) + "…" : s;
+  }
+  function capHTML(r) {
+    function num(v, d) { return isNum(v) ? v.toFixed(d) : "—"; }
+    var parts = ['<span class="k">' + esc(shortName(r.source_path || r.name)) + "</span>",
+      "bpp " + num(r.bpp, 3), "S2 " + num(r.ssimulacra2, 1)];
+    if (r.psnr != null) parts.push("PSNR " + num(r.psnr, 1));
+    if (r.ssim != null) parts.push("SSIM " + num(r.ssim, 3));
+    if (r.butteraugli != null) parts.push("BA " + num(r.butteraugli, 2));
+    parts.push(fmtBytes(r.filesize));
+    if (r.bit_exact === true) parts.push("bit-exact");
+    else if (r.bit_exact === false) parts.push("not bit-exact");
+    return parts.join(" · ");
+  }
+
+  function trapFocus(ev, root) {
+    var f = [].filter.call(
+      root.querySelectorAll('button, [tabindex]:not([tabindex="-1"])'),
+      function (e) { return e.offsetParent !== null; });
+    if (!f.length) return;
+    var first = f[0], last = f[f.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  }
+
+  function closeLightbox() {
+    if (!_lb) return;
+    document.removeEventListener("keydown", _lb.onKey, true);
+    if (_lb.overlay.parentNode) _lb.overlay.parentNode.removeChild(_lb.overlay);
+    document.body.classList.remove("q-lb-open");
+    if (_lb.prevFocus && _lb.prevFocus.focus) _lb.prevFocus.focus();
+    _lb = null;
+  }
+
+  function openLightbox(fmt, impl, label) {
+    var rows = METRICS.filter(function (m) {
+      return m.format === fmt && m.impl === impl && m.label === label && m.asset_path;
+    });
+    if (!rows.length) return;
+    closeLightbox();
+    var prevFocus = document.activeElement;
+    var showOrig = false;
+
+    var overlay = el("div", { class: "q-lightbox", role: "dialog", "aria-modal": "true",
+      "aria-label": impl + " — " + fmt + " " + label + " images" });
+    var dialog = el("div", { class: "q-lb-dialog" });
+    overlay.appendChild(dialog);
+
+    var head = el("div", { class: "q-lb-head" });
+    head.appendChild(el("h3", { class: "q-lb-title" },
+      impl + " · " + fmt.toUpperCase() + " · " + label +
+      " (" + rows.length + " image" + (rows.length === 1 ? "" : "s") + ")"));
+    var actions = el("div", { class: "q-lb-actions" });
+    var hasSources = rows.some(function (r) { return r.source_asset; });
+    var toggle = null;
+    if (hasSources) {
+      toggle = el("button", { type: "button", class: "q-lb-toggle", "aria-pressed": "false" }, "Show original");
+      toggle.addEventListener("click", function () {
+        showOrig = !showOrig;
+        toggle.textContent = showOrig ? "Show reconstruction" : "Show original";
+        toggle.setAttribute("aria-pressed", showOrig ? "true" : "false");
+        applyMode();
+      });
+      actions.appendChild(toggle);
+    }
+    var closeBtn = el("button", { type: "button", class: "q-lb-close", "aria-label": "Close gallery" }, "✕");
+    closeBtn.addEventListener("click", closeLightbox);
+    actions.appendChild(closeBtn);
+    head.appendChild(actions);
+    dialog.appendChild(head);
+
+    var grid = el("div", { class: "q-lb-grid" });
+    var cells = [];
+    rows.forEach(function (r) {
+      var fig = el("figure", { class: "q-lb-fig" });
+      var img = el("img", { loading: "lazy", decoding: "async", src: r.asset_path,
+        alt: "Reconstruction of " + shortName(r.source_path || r.name) });
+      img.addEventListener("error", function () {
+        if (fig.querySelector(".q-lb-err")) return;
+        img.style.display = "none";
+        fig.insertBefore(el("div", { class: "q-lb-err" },
+          "Preview unavailable — this browser may not support " + fmt.toUpperCase() + "."), fig.firstChild);
+      });
+      fig.appendChild(img);
+      var cap = el("figcaption", { class: "q-lb-cap" });
+      cap.innerHTML = capHTML(r);
+      fig.appendChild(cap);
+      grid.appendChild(fig);
+      cells.push({ img: img, fig: fig, row: r });
+    });
+    dialog.appendChild(grid);
+
+    function applyMode() {
+      cells.forEach(function (c) {
+        var src = (showOrig && c.row.source_asset) ? c.row.source_asset : c.row.asset_path;
+        var err = c.fig.querySelector(".q-lb-err"); if (err) err.parentNode.removeChild(err);
+        c.img.style.display = "";
+        c.img.alt = (showOrig ? "Original of " : "Reconstruction of ") + shortName(c.row.source_path || c.row.name);
+        if (c.img.getAttribute("src") !== src) c.img.setAttribute("src", src);
+      });
+    }
+
+    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) closeLightbox(); });
+    document.body.appendChild(overlay);
+    document.body.classList.add("q-lb-open");
+    _lb = { overlay: overlay, prevFocus: prevFocus, onKey: function (ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }
+      else if (ev.key === "Tab") { trapFocus(ev, dialog); }
+    } };
+    document.addEventListener("keydown", _lb.onKey, true);
+    (toggle || closeBtn).focus();
+  }
+
   function initGalleries() {
     var boxes = document.querySelectorAll("[data-img-tabs]");
     [].forEach.call(boxes, function (box) {
