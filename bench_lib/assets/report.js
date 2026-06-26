@@ -4,17 +4,17 @@
    single source of truth.
 
    Layout:
-     - A "view" preset (<select>) picks the X axis shared by every chart: quality
-       vs size (bpp), vs encode time, or vs decode time. Y is always an IQA metric.
-     - Rate-distortion charts live in per-format TABS (plus a cross-format Pareto
-       tab); each tab stacks one full-width chart per metric.
+     - An X-axis chooser + a log/linear scale toggle (button groups) set the X
+       axis shared by every rate-distortion chart: quality vs size (bpp), vs
+       encode time, or vs decode time. Y is always an IQA metric.
+     - Rate-distortion charts overlay every selected format's encoders, one
+       full-width chart stacked per metric.
      - A filter matrix toggles which metrics and which implementations are shown.
-     - Below the tabs: lossless compression efficiency, decoder fidelity/speed, and
-       a sortable BD-rate table.
-   Accessibility: the tabs are a real ARIA tablist (roving tabindex + arrow keys),
-   the view picker is a native <select> (Alt+[ / Alt+] also step it), the filter
-   matrix uses fieldset/legend groups, charts expose role=img + <title>, and view
-   changes are announced via an aria-live region. */
+     - Alongside: lossless compression efficiency, decoder fidelity/speed, and a
+       sortable BD-rate table.
+   Accessibility: the X-axis chooser is a button group (Alt+[ / Alt+] also step
+   it), the filter matrix uses fieldset/legend groups, charts expose role=img +
+   <title>, and view changes are announced via an aria-live region. */
 (function () {
   "use strict";
 
@@ -32,7 +32,8 @@
   var PARETO = readJSON("quality-pareto") || {};
   var BDRATE = readJSON("quality-bdrate") || {};
   // Precomputed lossless compression-efficiency summary (issue #26):
-  // { impl: {format, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
+  // { impl: {format, axis, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
+  // `axis` is the swept effort knob ("" = single-knob encoder, no effort sweep).
   var LOSSLESS = readJSON("quality-lossless") || {};
   // Precomputed decoder fidelity/speed summary:
   // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, basis, points} }.
@@ -69,13 +70,33 @@
     decode_time_s: { key: "decode_time_s", name: "decode time", title: "Decode time (s)", fmt: fmtTime },
   };
 
+  // Interactive timing is a single-pass wall-clock (one run, no warmup) measured
+  // under the parallel pool — indicative, not statistically rigorous. Any axis that
+  // plots encode/decode time is flagged with a '*' + this footnote; the rigorous,
+  // repeated-trial numbers live in the Performance suite. The lossless size-vs-effort
+  // chart overrides the text when its endpoints are rigorously anchored (issue #26).
+  var TIMING_CAVEAT =
+    "* Encode/decode time is a single-pass wall-clock (one run, no warmup) — " +
+    "indicative, not statistically rigorous. See the Performance suite for " +
+    "isolated, repeated-trial timing.";
+  function timingNoteHTML(text) {
+    return '<p class="q-note q-timing-note">' + (text || TIMING_CAVEAT) + "</p>";
+  }
+
   // state
   var state = {
-    presetIdx: 0,
-    tab: null,                 // set after PRESETS/TABS resolve
-    metricsOn: {},             // metric key -> bool (shown)
-    implsOff: {},              // impl name -> true (hidden globally)
-    showTime: { rd: true, lossless: true, decoder: true },
+    cat: null,                 // active category id (quality | lossless | … | sec:perf)
+    graph: null,               // active graph id within the category
+    graphKind: null,           // active graph kind — drives the controls box
+    metric: "ssimulacra2",     // active rate-distortion metric (single-select nav step)
+    xKey: "bpp",               // X axis: "bpp" | "time_s" | "decode_time_s"
+    xLog: true,                // X scale: log (true) or linear (false)
+    losslessView: "bars",      // lossless graph: "bars" | "effort"
+    decoderView: "table",      // decoder graph: "table" | "chart"
+    implsOff: {},              // impl name -> true (hidden everywhere; its legend swatch off)
+    formatsOff: {},            // lowercase format key -> true (format hidden everywhere)
+    barCollapsed: false,       // filter panel minimised to its header
+    showTime: { rd: true },    // encode-time bubbles on the RD size views
   };
 
   // ---- data helpers --------------------------------------------------------
@@ -355,7 +376,8 @@
     });
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
-    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + "</text>");
+    var timeAxis = xAxis.key === "time_s" || xAxis.key === "decode_time_s";
+    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + (timeAxis ? " *" : "") + "</text>");
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">' + esc(info.y) + "</text>");
 
     var hits = [];
@@ -382,6 +404,7 @@
 
     container.innerHTML = plotHTML +
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
+      (timeAxis ? timingNoteHTML() : "") +
       '<div class="q-tooltip" hidden></div>';
 
     // hover / click / keyboard — all share one nearest-point selection
@@ -461,28 +484,17 @@
 
   // ---- series builders -----------------------------------------------------
 
-  // One series per impl of a format, mapping each point to the (x,y) of the view.
-  // `fmt` is carried on the series so a clicked point can resolve its image group.
-  function seriesForFormat(aggFmt, xKey, yKey, fmt) {
-    return aggFmt.map(function (s, i) {
-      var points = s.points.map(function (p) {
-        var x = p.m[xKey], y = p.m[yKey];
-        if (!isNum(x) || !isNum(y)) return null;
-        return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count };
-      }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
-      return { key: s.impl, implName: s.impl, label: s.impl, fmt: fmt, color: PALETTE[i % PALETTE.length], points: points };
-    }).filter(function (s) { return s.points.length > 0; });
-  }
-
-  // Cross-format Pareto: each format's Pareto-front encoder(s), coloured by
-  // format, dashed per encoder within a format.
-  function seriesForPareto(AGG, xKey, yKey) {
+  // Cross-format rate-distortion: every implementation of every shown format,
+  // mapped to the (x,y) of the active view, coloured by format and dashed per
+  // encoder within a format. `fmt` is carried on each series so a clicked point
+  // can resolve its image group. The Tests filter (state.implsOff) is the
+  // authoritative series selector — renderXYChart drops the hidden ones.
+  function seriesForView(AGG, xKey, yKey) {
     var series = [];
     Object.keys(AGG).sort().forEach(function (fmt) {
-      var keep = PARETO[fmt] || [];
+      if (state.formatsOff[fmt]) return;   // format filtered out in the bar
       var di = 0;
       AGG[fmt].forEach(function (s) {
-        if (keep.length && keep.indexOf(s.impl) < 0) return;
         var points = s.points.map(function (p) {
           var x = p.m[xKey], y = p.m[yKey];
           if (!isNum(x) || !isNum(y)) return null;
@@ -502,222 +514,315 @@
     return series;
   }
 
-  // ---- tabs (ARIA tablist) -------------------------------------------------
+  // ---- rate-distortion view ------------------------------------------------
 
   var AGG_ALL = null;   // aggregateAll(validRows), lazy
-  var TABS = [];        // [{id, label, fmt|null}]
-  var PRESETS = [];
 
-  function preset() { return PRESETS[state.presetIdx]; }
-
-  function legendFor(series) {
-    var wrap = el("div", { class: "q-legend", role: "group", "aria-label": "Series — activate to show or hide" });
-    series.forEach(function (s) {
-      var off = !!state.implsOff[s.implName];
-      var chip = el("button", { class: "q-chip" + (off ? " off" : ""), type: "button", "aria-pressed": off ? "false" : "true" });
-      chip.innerHTML = '<span class="sw" style="background:' + s.color + '"></span>' + esc(s.label);
-      chip.addEventListener("click", function () {
-        if (state.implsOff[s.implName]) delete state.implsOff[s.implName];
-        else state.implsOff[s.implName] = true;
-        renderActivePanel();
-        renderFilters();
-      });
-      wrap.appendChild(chip);
-    });
-    return wrap;
+  // X axes offered by the controls box: bpp always, time axes only when measured.
+  function availableXAxes() {
+    var keys = ["bpp"];
+    if (hasAxisData("time_s")) keys.push("time_s");
+    if (hasAxisData("decode_time_s")) keys.push("decode_time_s");
+    return keys;
+  }
+  // Short label for an X-axis chooser button.
+  function axisLabel(k) {
+    return k === "bpp" ? "Size" : k === "time_s" ? "Encode time"
+      : k === "decode_time_s" ? "Decode time" : X_AXES[k].name;
   }
 
-  function renderActivePanel() {
-    var panelHost = document.getElementById("q-tabpanels");
-    if (!panelHost) return;
-    panelHost.innerHTML = "";
-    var tab = TABS.filter(function (t) { return t.id === state.tab; })[0] || TABS[0];
-    var panel = el("div", { class: "q-tabpanel", role: "tabpanel", id: "panel-" + tab.id, "aria-labelledby": "tab-" + tab.id, tabindex: "0" });
-    panelHost.appendChild(panel);
+  // Series visibility is driven entirely by the Tests filter (state.implsOff):
+  // its checkboxes carry the format colour swatch and double as the legend, so
+  // there are no separate per-chart legend chips. Every renderer reads implsOff
+  // to drop hidden series, and toggling a Test re-renders all charts + tables.
 
-    var pr = preset();
-    var xAxis = X_AXES[pr.xKey];
-    var metrics = availableMetrics().filter(function (k) { return state.metricsOn[k]; });
-    if (!metrics.length) {
-      panel.appendChild(el("p", { class: "q-note" }, "No metrics selected — enable one in the filter panel above."));
-      return;
-    }
-
-    // Build the series once (per metric) and render a stacked full-width chart each.
-    var legendSeries = null;
-    metrics.forEach(function (metricKey) {
-      var series = tab.fmt
-        ? seriesForFormat(AGG_ALL[tab.fmt] || [], pr.xKey, metricKey, tab.fmt)
-        : seriesForPareto(AGG_ALL, pr.xKey, metricKey);
-      if (!legendSeries && series.length) legendSeries = series;
-      var sec = el("div", { class: "q-stack-item" });
-      sec.appendChild(el("div", { class: "q-metric-cap" }, METRIC_INFO[metricKey].name));
-      var chart = el("div", { class: "q-chart" });
-      sec.appendChild(chart);
-      panel.appendChild(sec);
-      renderXYChart(chart, series, {
-        xLog: pr.xLog, xAxis: xAxis, yInfo: METRIC_INFO[metricKey],
-        showTime: state.showTime.rd, title: tab.label,
-      });
-    });
-    if (legendSeries) panel.insertBefore(legendFor(legendSeries), panel.firstChild);
-  }
-
-  function selectTab(id, focusIt) {
-    state.tab = id;
-    document.querySelectorAll("#q-tablist .q-tab").forEach(function (b) {
-      var sel = b.getAttribute("data-id") === id;
-      b.classList.toggle("active", sel);
-      b.setAttribute("aria-selected", sel ? "true" : "false");
-      b.setAttribute("tabindex", sel ? "0" : "-1");
-      if (sel && focusIt) b.focus();
-    });
-    renderActivePanel();
-    var tab = TABS.filter(function (t) { return t.id === id; })[0];
-    announce("Showing " + (tab ? tab.label : id));
-  }
-
-  function onTabKey(ev, idx) {
-    var keys = { ArrowRight: 1, ArrowLeft: -1, Home: "home", End: "end" };
-    if (!(ev.key in keys)) return;
-    ev.preventDefault();
-    var next;
-    if (keys[ev.key] === "home") next = 0;
-    else if (keys[ev.key] === "end") next = TABS.length - 1;
-    else next = (idx + keys[ev.key] + TABS.length) % TABS.length;
-    selectTab(TABS[next].id, true);
-  }
-
-  function renderTabs() {
-    var host = document.getElementById("q-tabs");
+  // Rate-distortion: the active metric (chosen on the nav rail) as one full-width
+  // chart overlaying every shown format's encoders on the chosen X axis.
+  function renderRD() {
+    var host = document.getElementById("q-rd");
     if (!host) return;
     host.innerHTML = "";
-    var tablist = el("div", { class: "q-tablist", id: "q-tablist", role: "tablist", "aria-label": "Rate-distortion by format" });
-    TABS.forEach(function (tab, i) {
-      var sel = state.tab === tab.id;
-      var btn = el("button", {
-        class: "q-tab" + (sel ? " active" : ""), type: "button", role: "tab",
-        id: "tab-" + tab.id, "data-id": tab.id, "aria-selected": sel ? "true" : "false",
-        "aria-controls": "panel-" + tab.id, tabindex: sel ? "0" : "-1",
-      }, tab.label);
-      btn.addEventListener("click", function () { selectTab(tab.id, false); });
-      btn.addEventListener("keydown", function (e) { onTabKey(e, i); });
-      tablist.appendChild(btn);
+    var avail = availableMetrics();
+    var m = avail.indexOf(state.metric) >= 0 ? state.metric : avail[0];
+    if (!m) { host.appendChild(el("p", { class: "q-note" }, "No metric data.")); return; }
+    host.appendChild(el("div", { class: "q-metric-cap" },
+      METRIC_INFO[m].name + " vs " + X_AXES[state.xKey].name));
+    var chart = el("div", { class: "q-chart" });
+    host.appendChild(chart);
+    renderXYChart(chart, seriesForView(AGG_ALL, state.xKey, m), {
+      xLog: state.xLog, xAxis: X_AXES[state.xKey], yInfo: METRIC_INFO[m],
+      showTime: state.showTime.rd,
     });
-    host.appendChild(tablist);
-    host.appendChild(el("div", { id: "q-tabpanels", class: "q-tabpanels" }));
-    renderActivePanel();
   }
 
-  // ---- filter matrix -------------------------------------------------------
+  // ---- centralized floating filter bar -------------------------------------
 
-  function renderFilters() {
-    var host = document.getElementById("q-filters-body");
-    if (!host) return;
-    host.innerHTML = "";
-
-    // Metrics group.
-    var metrics = availableMetrics();
-    if (metrics.length > 1) {
-      var mf = el("fieldset", { class: "q-fieldset" });
-      mf.appendChild(el("legend", null, "Metrics (which charts to stack)"));
-      metrics.forEach(function (k) {
-        var id = "flt-metric-" + k;
-        var lab = el("label", { class: "q-check" });
-        var cb = el("input", { type: "checkbox", id: id });
-        cb.checked = !!state.metricsOn[k];
-        cb.addEventListener("change", function () { state.metricsOn[k] = cb.checked; renderActivePanel(); });
-        lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(" " + METRIC_INFO[k].name));
-        mf.appendChild(lab);
+  // The variants the ACTIVE figure plots — the single source the top-bar lists from,
+  // so it shows strictly what the current graph contains (not a global union across
+  // every view). Derived from the very datasets each renderer plots: AGG_ALL for the
+  // rate-distortion / BD-rate views, LOSSLESS for the lossless views, DECODERS for the
+  // decoder views, and the active section's format tabs for a static gallery. The full
+  // (unfiltered) membership is returned — a variant the user toggled off still belongs
+  // to the figure and stays listed (unchecked) so it can be re-enabled.
+  // Returns { formats:[fmt...], byFormat:{fmt:[impl...]}, hasTests:bool }.
+  function figureVariants() {
+    var kind = state.graphKind;
+    var byFmt = {}, fmtsOnly = {};
+    function addImpl(f, n) { if (!f || !n) return; (byFmt[f] = byFmt[f] || {})[n] = 1; }
+    function addFmt(f) { if (f && f !== "other") fmtsOnly[f] = 1; }
+    if (kind === "rd" || kind === "bdrate") {
+      if (AGG_ALL) Object.keys(AGG_ALL).forEach(function (f) {
+        AGG_ALL[f].forEach(function (s) { addImpl(f, s.impl); });
       });
-      host.appendChild(mf);
+    } else if (kind === "lossless-bars" || kind === "lossless-effort") {
+      Object.keys(LOSSLESS).forEach(function (n) { addImpl(LOSSLESS[n].format, n); });
+    } else if (kind === "decoder-table" || kind === "decoder-chart") {
+      Object.keys(DECODERS).forEach(function (n) { addImpl(DECODERS[n].format, n); });
+    } else if (kind === "gallery") {
+      // Static galleries carry no per-impl tests; their formats are the active
+      // section's tabs/figures (so the bar offers Formats-only filtering).
+      var sec = state.cat ? panelEl(state.cat) : null;
+      if (sec) [].forEach.call(sec.querySelectorAll("[data-format]"), function (n) {
+        addFmt((n.getAttribute("data-format") || "").toLowerCase());
+      });
     }
+    var byList = {}, hasTests = false;
+    Object.keys(byFmt).forEach(function (f) {
+      byList[f] = Object.keys(byFmt[f]).sort(); hasTests = true; addFmt(f);
+    });
+    return { formats: Object.keys(fmtsOnly).sort(), byFormat: byList, hasTests: hasTests };
+  }
 
-    // Implementation groups (by format).
-    Object.keys(AGG_ALL).sort().forEach(function (fmt) {
-      var impls = AGG_ALL[fmt].map(function (s) { return s.impl; });
-      if (!impls.length) return;
-      var ff = el("fieldset", { class: "q-fieldset" });
-      var lg = el("legend", null, fmt.toUpperCase() + " encoders");
-      ff.appendChild(lg);
-      var allBtn = el("button", { type: "button", class: "q-mini" }, "all");
-      var noneBtn = el("button", { type: "button", class: "q-mini" }, "none");
-      allBtn.addEventListener("click", function () { impls.forEach(function (n) { delete state.implsOff[n]; }); renderActivePanel(); renderFilters(); });
-      noneBtn.addEventListener("click", function () { impls.forEach(function (n) { state.implsOff[n] = true; }); renderActivePanel(); renderFilters(); });
-      lg.appendChild(document.createTextNode(" "));
-      lg.appendChild(allBtn); lg.appendChild(noneBtn);
-      impls.forEach(function (n) {
-        var lab = el("label", { class: "q-check" });
-        var cb = el("input", { type: "checkbox" });
-        cb.checked = !state.implsOff[n];
-        cb.addEventListener("change", function () {
-          if (cb.checked) delete state.implsOff[n]; else state.implsOff[n] = true;
-          renderActivePanel();
+  // A filter changed: prune the galleries, then rebuild the rail (categories /
+  // graphs may have dropped) and re-render the active graph in the stage. Hidden
+  // graphs re-render lazily when next shown, so they always reflect the filters.
+  function rerenderAll() {
+    applyGalleryFilter();
+    if (state.cat) showGraph(state.cat, state.graph);
+    else renderNav();
+  }
+
+  // The Tests groups depend on which formats are shown, so the bar rebuilds too.
+  function onFormatChange() { renderFilterBar(); rerenderAll(); }
+
+  // Show/hide static gallery charts (pre-rendered PNGs can't be re-plotted, only
+  // shown/hidden) by their data-format within each suite section.
+  function applyGalleryFilter() {
+    [].forEach.call(document.querySelectorAll("[data-img-tabs]"), function (box) {
+      function hiddenF(n) {
+        var f = (n.getAttribute("data-format") || "").toLowerCase();
+        return f && f !== "other" && state.formatsOff[f];
+      }
+      var tabs = [].slice.call(box.querySelectorAll('[role="tab"][data-format]'));
+      var panels = [].slice.call(box.querySelectorAll('[role="tabpanel"][data-format]'));
+      var firstVis = -1;
+      tabs.forEach(function (t, i) {
+        var hide = hiddenF(t);
+        t.hidden = hide;
+        if (panels[i] && hide) panels[i].hidden = true;
+        if (!hide && firstVis < 0) firstVis = i;
+      });
+      // If the active tab was hidden, activate the first visible one (its own
+      // gallery handler shows the panel).
+      if (tabs.length) {
+        var activeVisible = tabs.some(function (t) {
+          return t.getAttribute("aria-selected") === "true" && !t.hidden;
         });
-        lab.appendChild(cb);
-        lab.appendChild(document.createTextNode(" " + n));
-        ff.appendChild(lab);
-      });
-      host.appendChild(ff);
+        if (!activeVisible && firstVis >= 0) tabs[firstVis].click();
+      }
+      // Flat (single-group) galleries carry data-format on the figures directly.
+      var figs = [].slice.call(box.querySelectorAll("figure[data-format]"));
+      figs.forEach(function (fig) { fig.hidden = hiddenF(fig); });
+      // Section show/hide is owned by the dashboard (one panel at a time); here we
+      // only prune the per-format tabs/figures within it. buildCategories consults
+      // sectionHasVisible() to drop a category whose formats are all filtered out.
     });
   }
 
-  // ---- controls (view preset + show-time + download) -----------------------
+  // Whether a static suite section still has any visible per-format tab/figure
+  // under the current format filter (used to prune empty dashboard categories).
+  function sectionHasVisible(section) {
+    if (!section) return false;
+    var tabs = [].slice.call(section.querySelectorAll('[role="tab"][data-format]'));
+    if (tabs.length) return tabs.some(function (t) { return !t.hidden; });
+    var figs = [].slice.call(section.querySelectorAll("figure[data-format]"));
+    if (figs.length) return figs.some(function (f) { return !f.hidden; });
+    return true;   // no per-format grouping → always present
+  }
 
+
+  // Build the bar for the ACTIVE figure: Formats + its per-format Tests. The lists
+  // come from figureVariants(), so the bar shows strictly the variants the current
+  // graph plots. Toggling stays a global hide (state.formatsOff / state.implsOff reach
+  // every figure where a variant appears) — only the listing is per-figure. Rebuilt on
+  // every figure switch (showGraph) and on any change that reshapes it.
+  function renderFilterBar() {
+    var bar = document.getElementById("q-filterbar");
+    if (!bar) return;
+    var fv = figureVariants();
+    var fmts = fv.formats;
+    if (!fmts.length) { bar.hidden = true; bar.innerHTML = ""; return; }
+    bar.hidden = false;
+    bar.innerHTML = "";
+
+    var head = el("div", { class: "q-fb-row" });
+    var toggle = el("button", {
+      type: "button", class: "q-fb-toggle", "aria-controls": "q-fb-body",
+      "aria-expanded": state.barCollapsed ? "false" : "true",
+    }, (state.barCollapsed ? "▸" : "▾") + " Filters");
+    toggle.addEventListener("click", function () {
+      state.barCollapsed = !state.barCollapsed;
+      renderFilterBar();
+    });
+    head.appendChild(toggle);
+    bar.appendChild(head);
+
+    var body = el("div", { class: "q-fb-body", id: "q-fb-body" });
+    if (state.barCollapsed) body.hidden = true;
+    bar.appendChild(body);
+
+    // A one-line pill group: a label span followed by inline checkboxes.
+    function group(labelText) {
+      var g = el("div", { class: "q-fb-group", role: "group", "aria-label": labelText });
+      g.appendChild(el("span", { class: "q-fb-lab" }, labelText));
+      body.appendChild(g);
+      return g;
+    }
+    function allNone(g, names, off, after) {
+      var lg = g.querySelector(".q-fb-lab");
+      var a = el("button", { type: "button", class: "q-mini" }, "all");
+      var n = el("button", { type: "button", class: "q-mini" }, "none");
+      a.addEventListener("click", function () { names.forEach(function (k) { delete off[k]; }); after(); });
+      n.addEventListener("click", function () { names.forEach(function (k) { off[k] = true; }); after(); });
+      lg.appendChild(document.createTextNode(" ")); lg.appendChild(a); lg.appendChild(n);
+    }
+    // A filter checkbox; an optional colour swatch makes the Tests groups double
+    // as the chart legend (the charts colour every series by its format).
+    function check(ff, label, checked, onToggle, swColor) {
+      var lab = el("label", { class: "q-check" });
+      var cb = el("input", { type: "checkbox" });
+      cb.checked = checked;
+      cb.addEventListener("change", function () { onToggle(cb.checked); });
+      lab.appendChild(cb);
+      if (swColor) lab.appendChild(el("span", { class: "q-fb-sw", style: "background:" + swColor }));
+      lab.appendChild(document.createTextNode(" " + label));
+      ff.appendChild(lab);
+    }
+
+    // Formats present on this figure — toggling is a global hide (also governs the
+    // static galleries), so the whole bar follows from the active figure.
+    var ff = group("Formats");
+    allNone(ff, fmts, state.formatsOff, onFormatChange);
+    fmts.forEach(function (f) {
+      check(ff, f.toUpperCase(), !state.formatsOff[f], function (on) {
+        if (on) delete state.formatsOff[f]; else state.formatsOff[f] = true;
+        onFormatChange();
+      }, FORMAT_COLORS[f] || PALETTE[0]);
+    });
+
+    // Tests (implementations) the active figure plots, per shown format — they drive
+    // the interactive charts and double as their legend (swatch = format colour).
+    var ibf = fv.byFormat;
+    Object.keys(ibf).sort().forEach(function (fmt) {
+      if (state.formatsOff[fmt]) return;   // hidden-format groups self-prune
+      var impls = ibf[fmt];
+      if (!impls.length) return;
+      var tf = group(fmt.toUpperCase() + " tests");
+      allNone(tf, impls, state.implsOff, function () { rerenderAll(); renderFilterBar(); });
+      impls.forEach(function (n) {
+        check(tf, n, !state.implsOff[n], function (on) {
+          if (on) delete state.implsOff[n]; else state.implsOff[n] = true;
+          rerenderAll();
+        }, FORMAT_COLORS[fmt] || PALETTE[0]);
+      });
+    });
+    // Metric is a Quality nav step (single-select on the rail); X axis + scale
+    // live in the controls box. The filter bar is just Formats + Tests.
+  }
+
+  // ---- controls box (axis + scale + show-time + download) ------------------
+
+  // The controls box adapts to the active graph: the X-axis + scale choosers and
+  // the encode-time-bubble toggle only apply to charts that carry those axes.
   function renderControls() {
     var host = document.getElementById("q-controls");
     if (!host) return;
     host.innerHTML = "";
+    var kind = state.graphKind;
 
-    // View preset (native select; Alt+[ / Alt+] also step it — see init()).
-    var vWrap = el("span", { class: "q-ctl" });
-    var vId = "q-view-select";
-    vWrap.appendChild(el("label", { class: "q-label", for: vId }, "View"));
-    var sel = el("select", { id: vId, class: "q-select" });
-    PRESETS.forEach(function (pr, i) {
-      var o = el("option", { value: String(i) }, pr.label);
-      if (i === state.presetIdx) o.setAttribute("selected", "selected");
-      sel.appendChild(o);
-    });
-    sel.addEventListener("change", function () { setPreset(parseInt(sel.value, 10)); });
-    vWrap.appendChild(sel);
-    host.appendChild(vWrap);
+    if (kind === "rd") {
+      // X-axis chooser — quality vs size / encode time / decode time (if measured).
+      var axes = availableXAxes();
+      if (axes.length > 1) {
+        host.appendChild(el("span", { class: "q-label" }, "Quality vs"));
+        var axGroup = el("div", { class: "q-group", role: "group", "aria-label": "X axis" });
+        axes.forEach(function (k) {
+          var onA = state.xKey === k;
+          var b = el("button", { type: "button", class: onA ? "active" : "", "aria-pressed": onA ? "true" : "false" }, axisLabel(k));
+          b.addEventListener("click", function () { setAxis(k); });
+          axGroup.appendChild(b);
+        });
+        host.appendChild(axGroup);
+      }
+      // X-scale toggle — logarithmic vs linear (independent of the axis choice).
+      host.appendChild(el("span", { class: "q-label" }, "Scale"));
+      var scGroup = el("div", { class: "q-group", role: "group", "aria-label": "X scale" });
+      [["Logarithmic", true], ["Linear", false]].forEach(function (opt) {
+        var onS = state.xLog === opt[1];
+        var b = el("button", { type: "button", class: onS ? "active" : "", "aria-pressed": onS ? "true" : "false" }, opt[0]);
+        b.addEventListener("click", function () { setScale(opt[1]); });
+        scGroup.appendChild(b);
+      });
+      host.appendChild(scGroup);
+    }
 
-    // Show-time toggle (encode-time bubbles; only meaningful on the bpp views).
-    var tWrap = el("span", { class: "q-ctl" });
-    var tId = "q-showtime";
-    var tcb = el("input", { type: "checkbox", id: tId });
-    tcb.checked = state.showTime.rd;
-    tcb.addEventListener("change", function () { state.showTime.rd = tcb.checked; renderActivePanel(); });
-    var tlab = el("label", { class: "q-label", for: tId });
-    tlab.appendChild(tcb);
-    tlab.appendChild(document.createTextNode(" Encode-time bubbles"));
-    tWrap.appendChild(tlab);
-    host.appendChild(tWrap);
+    // Encode-time bubbles — meaningful on the size RD chart (bubble size encodes
+    // mean encode time). The lossless size-vs-effort chart puts time on its x-axis
+    // instead, so it has no bubble toggle.
+    var timeKey = kind === "rd" ? "rd" : null;
+    if (timeKey) {
+      var tWrap = el("span", { class: "q-ctl" });
+      var tcb = el("input", { type: "checkbox", id: "q-showtime" });
+      tcb.checked = state.showTime[timeKey];
+      tcb.addEventListener("change", function () {
+        state.showTime[timeKey] = tcb.checked;
+        if (timeKey === "rd") renderRD(); else renderLossless();
+      });
+      var tlab = el("label", { class: "q-label", for: "q-showtime" });
+      tlab.appendChild(tcb);
+      tlab.appendChild(document.createTextNode(" Encode-time bubbles"));
+      tWrap.appendChild(tlab);
+      host.appendChild(tWrap);
+    }
 
-    // Download embedded raw metrics.
-    var dl = el("a", { class: "q-dl", href: "#" }, "⤓ raw metrics (JSON)");
-    dl.addEventListener("click", function (e) {
-      e.preventDefault();
-      var blob = new Blob([JSON.stringify(METRICS)], { type: "application/json" });
-      var url = URL.createObjectURL(blob);
-      var a = el("a", { href: url, download: "metrics.json" });
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-    host.appendChild(dl);
-
-    host.appendChild(el("span", { class: "q-hint" }, "Tip: ← → switch format tabs; Alt+[ / Alt+] cycle views."));
+    // Download embedded raw metrics (available whenever quality data is present).
+    if (METRICS.length) {
+      var dl = el("a", { class: "q-dl", href: "#" }, "⤓ raw metrics (JSON)");
+      dl.addEventListener("click", function (e) {
+        e.preventDefault();
+        var blob = new Blob([JSON.stringify(METRICS)], { type: "application/json" });
+        var url = URL.createObjectURL(blob);
+        var a = el("a", { href: url, download: "metrics.json" });
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+      host.appendChild(dl);
+    }
   }
 
-  function setPreset(i) {
-    if (i < 0 || i >= PRESETS.length) return;
-    state.presetIdx = i;
-    var sel = document.getElementById("q-view-select");
-    if (sel) sel.value = String(i);
-    renderActivePanel();
-    announce("View: " + PRESETS[i].label);
+  function setAxis(k) {
+    if (!X_AXES[k] || availableXAxes().indexOf(k) < 0) return;
+    state.xKey = k;
+    renderControls();
+    renderRD();
+    announce("X axis: quality vs " + X_AXES[k].name);
+  }
+
+  function setScale(log) {
+    state.xLog = !!log;
+    renderControls();
+    renderRD();
+    announce(log ? "Logarithmic X axis" : "Linear X axis");
   }
 
   // ---- aggregation disclosure ----------------------------------------------
@@ -758,7 +863,9 @@
     if (!host) return;
     var rows = [];
     Object.keys(BDRATE).forEach(function (fmt) {
+      if (state.formatsOff[fmt]) return;
       Object.keys(BDRATE[fmt]).forEach(function (impl) {
+        if (state.implsOff[impl]) return;
         rows.push({ fmt: fmt, impl: impl, bd: BDRATE[fmt][impl] });
       });
     });
@@ -803,21 +910,34 @@
   function renderLossless() {
     var host = document.getElementById("q-lossless");
     if (!host) return;
-    var impls = Object.keys(LOSSLESS);
-    if (!impls.length) {
+    if (!Object.keys(LOSSLESS).length) {
       host.innerHTML = '<p class="q-note">No lossless encoders measured.</p>';
       return;
     }
-    host.innerHTML =
-      '<div class="q-metric-cap">Best bits per pixel — lower is better</div>' +
-      '<div id="q-lossless-bars"></div>' +
-      '<div class="q-metric-cap">Size vs compression effort</div>' +
-      '<div id="q-lossless-effort" class="q-chart"></div>';
-    renderLosslessBars(document.getElementById("q-lossless-bars"), impls);
-    renderLosslessEffort(document.getElementById("q-lossless-effort"), impls);
+    // The format filter applies to both views; the bars additionally drop
+    // impl-hidden encoders, while the effort chart keeps them in its interactive
+    // legend (so they can be toggled back in place).
+    var impls = Object.keys(LOSSLESS).filter(function (n) { return !state.formatsOff[LOSSLESS[n].format]; });
+    if (!impls.length) {
+      host.innerHTML = '<p class="q-note">No lossless encoders for the selected formats.</p>';
+      return;
+    }
+    host.innerHTML = "";
+    if (state.losslessView === "effort") {
+      host.appendChild(el("div", { class: "q-metric-cap" }, "Size vs compression effort"));
+      var eff = el("div", { id: "q-lossless-effort", class: "q-chart" });
+      host.appendChild(eff);
+      renderLosslessEffort(eff, impls);
+    } else {
+      host.appendChild(el("div", { class: "q-metric-cap" }, "Best bits per pixel — lower is better"));
+      var bars = el("div", { id: "q-lossless-bars" });
+      host.appendChild(bars);
+      renderLosslessBars(bars, impls.filter(function (n) { return !state.implsOff[n]; }));
+    }
   }
 
   function renderLosslessBars(host, impls) {
+    if (!impls.length) { host.innerHTML = '<p class="q-note">All lossless encoders hidden.</p>'; return; }
     var rows = impls.map(function (impl) {
       var d = LOSSLESS[impl];
       return { impl: impl, fmt: d.format, bpp: d.best_bpp, ratio: d.ratio };
@@ -850,26 +970,61 @@
     var series = impls.map(function (impl) {
       var d = LOSSLESS[impl];
       var n = d.points.length;
-      var points = d.points.map(function (p, i) {
-        return { x: n > 1 ? i / (n - 1) : 1, y: p.bpp, setting: p.value || p.label, t: p.time_s };
+      // A single-knob encoder has no effort axis — one operating point, not a sweep.
+      // Trust the raw-data metadata (empty `axis`); fall back to the point count only
+      // for a legacy blob that predates the field. These render as a distinct labeled
+      // marker instead of a lone dot lost among the curve endpoints.
+      var single = d.axis != null ? d.axis === "" : n < 2;
+      // X is the time each effort cost, so the curve is honestly scaled by cost
+      // (issue #26): rigorously-timed endpoints (and any --perf all points) use the
+      // isolated mean; interior points fall back to the single-pass wall-clock.
+      var points = d.points.map(function (p) {
+        var rig = isNum(p.time_rigorous_s);
+        var x = rig ? p.time_rigorous_s : isNum(p.time_s) ? p.time_s : 0;
+        return {
+          x: x, y: p.bpp, setting: p.value || p.label, t: x,
+          rig: rig, sd: rig ? p.time_stddev_s || 0 : 0, runs: rig ? p.runs || 0 : 0,
+        };
       });
+      // Draw the spline in time order so adjacent points connect left→right; the
+      // effort progression still reads along the curve and lives in the tooltip.
+      points.sort(function (a, b) { return a.x - b.x; });
       var di = dashByFmt[d.format] || 0;
       dashByFmt[d.format] = di + 1;
       return {
         impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
-        dash: DASHES[di % DASHES.length], points: points,
+        dash: DASHES[di % DASHES.length], points: points, single: single,
       };
     });
+    // Series visibility follows the Tests filter (state.implsOff); the swatched
+    // checkboxes there are the legend, so no per-chart legend is drawn here.
+    var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
+    if (!vis.length) {
+      host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus encode time (nothing shown)" viewBox="0 0 ' +
+        VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
+        '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
+      return;
+    }
     var allPts = [];
-    series.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
-    var scale = state.showTime.lossless ? timeScale(allPts) : null;
-    var ys = [];
-    series.forEach(function (s) { s.points.forEach(function (p) { ys.push(p.y); }); });
+    vis.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
+    var xs = allPts.map(function (p) { return p.x; });
+    var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+    var xticks = linTicks(xmin, xmax, 6);
+    var dxmin = Math.min(xmin, xticks[0]), dxmax = Math.max(xmax, xticks[xticks.length - 1]);
+    if (dxmax === dxmin) dxmax = dxmin + 1;
+    var ys = allPts.map(function (p) { return p.y; });
     var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
     var yticks = linTicks(ymin, ymax, 6);
     var dymin = Math.min(ymin, yticks[0]), dymax = Math.max(ymax, yticks[yticks.length - 1]);
     if (dymax === dymin) dymax = dymin + 1;
-    function sx(x) { return X0 + x * (X1 - X0); }
+    // Significance of the visible points drives the axis mark + footnote.
+    var nRig = 0, nTot = 0, minRuns = Infinity;
+    allPts.forEach(function (p) {
+      nTot++;
+      if (p.rig) { nRig++; if (p.runs) minRuns = Math.min(minRuns, p.runs); }
+    });
+    var marked = nRig < nTot;   // a '*' only when some plotted time is single-pass
+    function sx(x) { return X0 + (x - dxmin) / (dxmax - dxmin) * (X1 - X0); }
     function sy(y) { return Y1 - (y - dymin) / (dymax - dymin) * (Y1 - Y0); }
 
     var svg = [], hits = [];
@@ -879,50 +1034,96 @@
       svg.push('<line class="q-grid" x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '"/>');
       svg.push('<text class="q-tick" x="' + (X0 - 8) + '" y="' + (+y + 4) + '" text-anchor="end">' + esc(fmtNum(t)) + "</text>");
     });
-    [[0, "low"], [1, "high"]].forEach(function (tk) {
-      var x = sx(tk[0]).toFixed(1);
+    xticks.forEach(function (tk) {
+      if (tk < dxmin - 1e-9 || tk > dxmax + 1e-9) return;
+      var x = sx(tk).toFixed(1);
       svg.push('<line class="q-grid" x1="' + x + '" y1="' + Y0 + '" x2="' + x + '" y2="' + Y1 + '"/>');
-      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + tk[1] + "</text>");
+      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + esc(fmtTime(tk)) + "</text>");
     });
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) +
-      '" text-anchor="middle">Compression effort (low → high)</text>');
+      '" text-anchor="middle">Encode time (s)' + (marked ? " *" : "") + "</text>");
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) +
       ') rotate(-90)" text-anchor="middle">Bits per pixel (lower is better)</text>');
-    series.forEach(function (s) {
+    // Swept encoders draw a curve + filled points now; single-knob encoders (no effort
+    // axis) are collected and drawn afterwards as labelled diamonds with de-collided
+    // labels, so they don't pile up on the high-effort endpoints.
+    // A horizontal ±σ whisker marks each rigorously-timed (anchored) point.
+    function whisker(p, color) {
+      if (!(p.rig && p.sd > 0)) return;
+      var wx0 = sx(Math.max(dxmin, p.x - p.sd)).toFixed(1);
+      var wx1 = sx(Math.min(dxmax, p.x + p.sd)).toFixed(1);
+      var wy = sy(p.y).toFixed(1);
+      svg.push('<line class="q-whisker" x1="' + wx0 + '" y1="' + wy + '" x2="' + wx1 + '" y2="' + wy +
+        '" stroke="' + color + '" stroke-width="1.5" stroke-linecap="round"/>');
+    }
+    var singles = [];
+    vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
         pts.push({ x: px, y: py });
-        var r = scale ? scale.r(p.t) : PT_R;
-        hits.push({ sx: px, sy: py, r: r, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
+        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t, rig: p.rig, runs: p.runs, sd: p.sd });
+        if (s.single) singles.push({ cx: px, cy: py, r: PT_R, color: s.color, impl: s.impl, p: p });
       });
+      if (s.single) return;
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' +
           (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       }
       s.points.forEach(function (p) {
-        var r = scale ? scale.r(p.t) : PT_R;
+        whisker(p, s.color);
         svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) +
-          '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
+          '" r="' + PT_R.toFixed(1) + '" fill="' + s.color + '"' +
+          (p.rig ? ' stroke="#1a1a1a" stroke-width="1.2"' : "") + "/>");
       });
     });
+    // A single-knob encoder is one operating point: a hollow diamond at the high end +
+    // a direct label, so it's unmistakable and visibly matches its Best-bpp row. Labels
+    // are nudged down to a minimum gap when bpps coincide (a thin leader links each).
+    singles.sort(function (a, b) { return a.cy - b.cy; });
+    var lastLabelY = -1e9, LABEL_GAP = 13;
+    singles.forEach(function (m) {
+      whisker(m.p, m.color);
+      var rr = m.r;
+      svg.push('<path class="q-pt-single" d="M' + m.cx.toFixed(1) + "," + (m.cy - rr).toFixed(1) +
+        "L" + (m.cx + rr).toFixed(1) + "," + m.cy.toFixed(1) + "L" + m.cx.toFixed(1) + "," + (m.cy + rr).toFixed(1) +
+        "L" + (m.cx - rr).toFixed(1) + "," + m.cy.toFixed(1) + 'Z" fill="#fff" stroke="' + m.color + '" stroke-width="2"/>');
+      var ly = Math.max(m.cy + 4, lastLabelY + LABEL_GAP);
+      lastLabelY = ly;
+      var lx = m.cx - rr - 5;
+      if (ly - (m.cy + 4) > 1) {
+        svg.push('<line class="q-grid" x1="' + (m.cx - rr).toFixed(1) + '" y1="' + m.cy.toFixed(1) +
+          '" x2="' + (lx + 2).toFixed(1) + '" y2="' + (ly - 4).toFixed(1) + '"/>');
+      }
+      svg.push('<text class="q-ll-name" x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1) +
+        '" text-anchor="end">' + esc(m.impl) + "</text>");
+    });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
-    var chips = series.map(function (s) {
-      return '<span class="q-chip static"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
-    }).join("");
-    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort" viewBox="0 0 ' + VBW + " " + VBH +
-      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
-      '<div class="q-legend">' + chips + "</div>" +
-      (scale ? sizeLegendHTML(scale, "encode time") : "") +
+
+    var runsTxt = minRuns === Infinity ? "" : minRuns + " ";
+    var note;
+    if (nRig === 0) {
+      note = timingNoteHTML();
+    } else if (nRig === nTot) {
+      note = timingNoteHTML("Encode times are isolated, repeated-trial measurements (" + runsTxt + "runs each).");
+    } else {
+      note = timingNoteHTML("* Whiskered points are rigorously timed (" + runsTxt +
+        "runs, ±σ); interior points are single-pass wall-clocks, joined by a spline — the trusted extremes anchor the curve.");
+    }
+    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus encode time" viewBox="0 0 ' + VBW + " " + VBH +
+      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" + note +
       '<div class="q-tooltip" hidden></div>';
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +
         '<span class="k">setting</span> ' + esc(best.setting) + "<br>" +
         '<span class="k">bpp</span> ' + best.bpp.toFixed(3) +
-        (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "");
+        (isNum(best.t) && best.t > 0
+          ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) +
+            (best.rig ? " (" + best.runs + " runs ±" + fmtTime(best.sd || 0) + ")" : " (single-pass)")
+          : "");
     });
   }
 
@@ -931,9 +1132,15 @@
   function renderDecoders() {
     var host = document.getElementById("q-decoders");
     if (!host) return;
-    var impls = Object.keys(DECODERS);
-    if (!impls.length) {
+    if (!Object.keys(DECODERS).length) {
       host.innerHTML = '<p class="q-note">No decoders measured.</p>';
+      return;
+    }
+    // Format filter applies to both views; the table additionally drops
+    // impl-hidden decoders (the chart honours implsOff per series).
+    var impls = Object.keys(DECODERS).filter(function (k) { return !state.formatsOff[DECODERS[k].format]; });
+    if (!impls.length) {
+      host.innerHTML = '<p class="q-note">No decoders for the selected formats.</p>';
       return;
     }
     impls.sort(function (a, b) {
@@ -941,26 +1148,44 @@
       if (da.format !== db.format) return da.format < db.format ? -1 : 1;
       return da.mean_time_s - db.mean_time_s;
     });
+    if (state.decoderView === "chart") {
+      host.innerHTML = '<div id="q-decoder-chart" class="q-chart"></div>';
+      renderDecoderChart(document.getElementById("q-decoder-chart"), impls);
+      return;
+    }
+    var tableImpls = impls.filter(function (k) { return !state.implsOff[k]; });
     var html = '<table class="q-table"><thead><tr>' +
-      '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode</th>' +
+      '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode *</th>' +
       '<th scope="col">Mean input bpp</th><th scope="col">Fidelity</th><th scope="col">Basis</th></tr></thead><tbody>';
-    impls.forEach(function (impl) {
+    tableImpls.forEach(function (impl) {
       var d = DECODERS[impl];
-      var fid = d.bit_exact
-        ? '<span class="good">∞ (bit-exact)</span>'
-        : '<span class="bad">' + (d.worst_psnr != null ? d.worst_psnr.toFixed(2) + " dB (worst)" : "not exact") + "</span>";
+      // Three fidelity states (so expected lossy non-exactness is not flagged as a
+      // failure): bit-exact -> good; a finite PSNR that is EXPECTED for a
+      // non-normative lossy format (JPEG, lossy JXL) -> neutral "faithful"; a
+      // finite PSNR where bit-exact IS required (lossless path, or AV1/VP8) -> bad.
+      // The class goes on the <td> so .good/.bad/.q-approx actually match.
+      var fidClass, fidText;
+      if (d.bit_exact) {
+        fidClass = "good"; fidText = "∞ (bit-exact)";
+      } else if (d.approx_expected) {
+        fidClass = "q-approx";
+        fidText = d.worst_psnr != null
+          ? "≈ " + d.worst_psnr.toFixed(2) + " dB vs golden (faithful)"
+          : "≈ vs golden (faithful)";
+      } else {
+        fidClass = "bad";
+        fidText = d.worst_psnr != null
+          ? d.worst_psnr.toFixed(2) + " dB (worst)" : "not exact";
+      }
       var basis = d.basis === "source" ? "source (ground truth)" : "golden decoder";
       html += "<tr><td>" + esc(d.format.toUpperCase()) + "</td><td>" + esc(impl) +
         '</td><td class="num">' + fmtTime(d.mean_time_s) +
-        '</td><td class="num">' + d.mean_bpp.toFixed(3) + "</td><td>" + fid +
+        '</td><td class="num">' + d.mean_bpp.toFixed(3) +
+        '</td><td class="' + fidClass + '">' + fidText +
         "</td><td>" + esc(basis) + "</td></tr>";
     });
     html += "</tbody></table>";
-    var chart = state.showTime.decoder ? '<div id="q-decoder-chart" class="q-chart"></div>' : "";
-    host.innerHTML = chart + html;
-    if (state.showTime.decoder) {
-      renderDecoderChart(document.getElementById("q-decoder-chart"), impls);
-    }
+    host.innerHTML = html + timingNoteHTML();
   }
 
   // Speed-vs-bitrate scatter: X = input bpp, Y = one-pass decode time. Bit-exact
@@ -988,12 +1213,22 @@
       return {
         impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
         dash: DASHES[di % DASHES.length], points: points,
+        approxExpected: d.approx_expected,
       };
     }).filter(function (s) { return s.points.length > 0; });
     if (!series.length) { host.innerHTML = ""; return; }
+    // Series visibility follows the Tests filter (state.implsOff); its swatched
+    // checkboxes are the legend, so no per-chart legend is drawn here.
+    var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
+    if (!vis.length) {
+      host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel (nothing shown)" viewBox="0 0 ' +
+        VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
+        '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
+      return;
+    }
 
     var xs = [], ys = [];
-    series.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
+    vis.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
     var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
     var ymax = Math.max.apply(null, ys);
     var xticks = linTicks(xmin, xmax, 6);
@@ -1020,13 +1255,13 @@
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Input bits per pixel (bpp)</text>');
-    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better)</text>');
-    series.forEach(function (s) {
+    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better) *</text>');
+    vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
         pts.push({ x: px, y: py });
-        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst });
+        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst, approxExpected: s.approxExpected });
       });
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
@@ -1041,13 +1276,10 @@
       });
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
-    var chips = series.map(function (s) {
-      return '<span class="q-chip static"><span class="sw" style="background:' + s.color + '"></span>' + esc(s.impl) + "</span>";
-    }).join("");
     host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
-      '<div class="q-legend">' + chips + "</div>" +
       '<p class="q-note">Hollow markers = approximate decode (differs from the reference it is scored against); filled = bit-exact.</p>' +
+      timingNoteHTML() +
       '<div class="q-tooltip" hidden></div>';
 
     attachScatterHover(host, hits, function (best) {
@@ -1056,7 +1288,13 @@
         '<span class="k">input bpp</span> ' + best.bpp.toFixed(3) + "<br>" +
         '<span class="k">decode time</span> ' + fmtTime(best.t) + "<br>" +
         '<span class="k">fidelity</span> ' +
-        (best.approx ? (best.worst != null ? best.worst.toFixed(2) + " dB" : "not bit-exact") : "∞ (bit-exact)");
+        (best.approx
+          ? (best.worst != null
+              ? (best.approxExpected
+                  ? "≈ " + best.worst.toFixed(2) + " dB vs golden (faithful)"
+                  : best.worst.toFixed(2) + " dB (worst)")
+              : "not bit-exact")
+          : "∞ (bit-exact)");
     });
   }
 
@@ -1095,52 +1333,12 @@
     });
   }
 
-  // Per-section "show time" toggle, mounted beside a section heading.
-  function mountSectionToggle(mountId, key, rerender) {
-    var host = document.getElementById(mountId);
-    if (!host) return;
-    host.innerHTML = "";
-    var id = "q-secshow-" + key;
-    var cb = el("input", { type: "checkbox", id: id });
-    cb.checked = state.showTime[key];
-    cb.addEventListener("change", function () { state.showTime[key] = cb.checked; rerender(); });
-    var lab = el("label", { class: "q-label", for: id });
-    lab.appendChild(cb);
-    lab.appendChild(document.createTextNode(" Show time"));
-    host.appendChild(lab);
-  }
-
-  // ---- init ----------------------------------------------------------------
-
-  function buildPresets() {
-    PRESETS = [
-      { id: "bpp-log", label: "Quality vs Size — bpp (log x)", xKey: "bpp", xLog: true },
-      { id: "bpp-lin", label: "Quality vs Size — bpp (linear x)", xKey: "bpp", xLog: false },
-    ];
-    if (hasAxisData("time_s")) {
-      PRESETS.push({ id: "enc", label: "Quality vs Encode time (log x)", xKey: "time_s", xLog: true });
-    }
-    if (hasAxisData("decode_time_s")) {
-      PRESETS.push({ id: "dec", label: "Quality vs Decode time (log x)", xKey: "decode_time_s", xLog: true });
-    }
-  }
-
-  function buildTabs() {
-    TABS = [{ id: "pareto", label: "Cross-format Pareto", fmt: null }];
-    Object.keys(AGG_ALL).sort().forEach(function (fmt) {
-      TABS.push({ id: fmt, label: fmt.toUpperCase(), fmt: fmt });
-    });
-  }
-
-  // Generic tabbed image galleries (performance / scaling / effort): the static
-  // SVGs are grouped into ARIA tabs by report.py so each is full browser width.
-  // Reuses the same roving-tabindex + arrow-key pattern as the quality tabs.
   // ---- per-point image lightbox -------------------------------------------
   // Clicking a data point opens the exact images aggregated into it (the run's
   // assets/, referenced by relative URL — never embedded, so report.html stays
   // small and a multi-GB tree loads only the on-screen thumbnails, lazily).
 
-  var _lb = null;   // the open lightbox, or null
+  var _modal = null;   // the open modal (image lightbox or Information card), or null
 
   function fmtBytes(n) {
     if (!isNum(n) || n <= 0) return "—";
@@ -1175,13 +1373,45 @@
     else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
   }
 
-  function closeLightbox() {
-    if (!_lb) return;
-    document.removeEventListener("keydown", _lb.onKey, true);
-    if (_lb.overlay.parentNode) _lb.overlay.parentNode.removeChild(_lb.overlay);
+  function closeModal() {
+    if (!_modal) return;
+    document.removeEventListener("keydown", _modal.onKey, true);
+    if (_modal.overlay.parentNode) _modal.overlay.parentNode.removeChild(_modal.overlay);
     document.body.classList.remove("q-lb-open");
-    if (_lb.prevFocus && _lb.prevFocus.focus) _lb.prevFocus.focus();
-    _lb = null;
+    if (_modal.prevFocus && _modal.prevFocus.focus) _modal.prevFocus.focus();
+    _modal = null;
+  }
+
+  // Shared modal scaffold (overlay, header, focus trap, Escape, background
+  // freeze, focus restore) for the image lightbox and the Information card.
+  // opts: {title, ariaLabel?, actions?:[el], body?:el, focus?:el}.
+  function openModal(opts) {
+    closeModal();
+    var prevFocus = document.activeElement;
+    var overlay = el("div", { class: "q-lightbox", role: "dialog", "aria-modal": "true",
+      "aria-label": opts.ariaLabel || opts.title || "Dialog" });
+    var dialog = el("div", { class: "q-lb-dialog" });
+    overlay.appendChild(dialog);
+    var head = el("div", { class: "q-lb-head" });
+    head.appendChild(el("h3", { class: "q-lb-title" }, opts.title || ""));
+    var actions = el("div", { class: "q-lb-actions" });
+    (opts.actions || []).forEach(function (a) { actions.appendChild(a); });
+    var closeBtn = el("button", { type: "button", class: "q-lb-close", "aria-label": "Close" }, "✕");
+    closeBtn.addEventListener("click", closeModal);
+    actions.appendChild(closeBtn);
+    head.appendChild(actions);
+    dialog.appendChild(head);
+    if (opts.body) dialog.appendChild(opts.body);
+    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) closeModal(); });
+    document.body.appendChild(overlay);
+    document.body.classList.add("q-lb-open");
+    _modal = { overlay: overlay, prevFocus: prevFocus, onKey: function (ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); closeModal(); }
+      else if (ev.key === "Tab") { trapFocus(ev, dialog); }
+    } };
+    document.addEventListener("keydown", _modal.onKey, true);
+    (opts.focus || closeBtn).focus();
+    return dialog;
   }
 
   function openLightbox(fmt, impl, label) {
@@ -1189,37 +1419,7 @@
       return m.format === fmt && m.impl === impl && m.label === label && m.asset_path;
     });
     if (!rows.length) return;
-    closeLightbox();
-    var prevFocus = document.activeElement;
     var showOrig = false;
-
-    var overlay = el("div", { class: "q-lightbox", role: "dialog", "aria-modal": "true",
-      "aria-label": impl + " — " + fmt + " " + label + " images" });
-    var dialog = el("div", { class: "q-lb-dialog" });
-    overlay.appendChild(dialog);
-
-    var head = el("div", { class: "q-lb-head" });
-    head.appendChild(el("h3", { class: "q-lb-title" },
-      impl + " · " + fmt.toUpperCase() + " · " + label +
-      " (" + rows.length + " image" + (rows.length === 1 ? "" : "s") + ")"));
-    var actions = el("div", { class: "q-lb-actions" });
-    var hasSources = rows.some(function (r) { return r.source_asset; });
-    var toggle = null;
-    if (hasSources) {
-      toggle = el("button", { type: "button", class: "q-lb-toggle", "aria-pressed": "false" }, "Show original");
-      toggle.addEventListener("click", function () {
-        showOrig = !showOrig;
-        toggle.textContent = showOrig ? "Show reconstruction" : "Show original";
-        toggle.setAttribute("aria-pressed", showOrig ? "true" : "false");
-        applyMode();
-      });
-      actions.appendChild(toggle);
-    }
-    var closeBtn = el("button", { type: "button", class: "q-lb-close", "aria-label": "Close gallery" }, "✕");
-    closeBtn.addEventListener("click", closeLightbox);
-    actions.appendChild(closeBtn);
-    head.appendChild(actions);
-    dialog.appendChild(head);
 
     var grid = el("div", { class: "q-lb-grid" });
     var cells = [];
@@ -1240,7 +1440,6 @@
       grid.appendChild(fig);
       cells.push({ img: img, fig: fig, row: r });
     });
-    dialog.appendChild(grid);
 
     function applyMode() {
       cells.forEach(function (c) {
@@ -1252,15 +1451,211 @@
       });
     }
 
-    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) closeLightbox(); });
-    document.body.appendChild(overlay);
-    document.body.classList.add("q-lb-open");
-    _lb = { overlay: overlay, prevFocus: prevFocus, onKey: function (ev) {
-      if (ev.key === "Escape") { ev.preventDefault(); closeLightbox(); }
-      else if (ev.key === "Tab") { trapFocus(ev, dialog); }
-    } };
-    document.addEventListener("keydown", _lb.onKey, true);
-    (toggle || closeBtn).focus();
+    var toggle = null;
+    if (rows.some(function (r) { return r.source_asset; })) {
+      toggle = el("button", { type: "button", class: "q-lb-toggle", "aria-pressed": "false" }, "Show original");
+      toggle.addEventListener("click", function () {
+        showOrig = !showOrig;
+        toggle.textContent = showOrig ? "Show reconstruction" : "Show original";
+        toggle.setAttribute("aria-pressed", showOrig ? "true" : "false");
+        applyMode();
+      });
+    }
+    openModal({
+      title: impl + " · " + fmt.toUpperCase() + " · " + label +
+        " (" + rows.length + " image" + (rows.length === 1 ? "" : "s") + ")",
+      ariaLabel: impl + " — " + fmt + " " + label + " images",
+      actions: toggle ? [toggle] : [], body: grid, focus: toggle,
+    });
+  }
+
+  // The Information hero card: clone the hidden #dash-info body into a modal.
+  function openInfoModal() {
+    var src = document.getElementById("dash-info");
+    if (!src) return;
+    var body = el("div", { class: "q-info-body" });
+    body.innerHTML = src.innerHTML;
+    openModal({ title: "Run information", ariaLabel: "Run information", body: body });
+  }
+
+  // ---- dashboard navigation ------------------------------------------------
+  // A left rail of categories + per-category graphs drives a single-graph stage
+  // (the only scroll region). Graphs render on demand, so each reflects the live
+  // filter state when shown; switching never reloads the page.
+
+  var SECTION_LABELS = { perf: "Performance", scaling: "Scaling", effort: "Effort" };
+
+  // Categories actually present in this bundle, in a fixed order. A static suite
+  // drops out when the format filter hides every chart in it.
+  function buildCategories() {
+    var cats = [];
+    if (document.getElementById("quality-app") && AGG_ALL && Object.keys(AGG_ALL).length)
+      cats.push({ id: "quality", label: "Quality" });
+    if (Object.keys(LOSSLESS).length) cats.push({ id: "lossless", label: "Lossless" });
+    if (Object.keys(DECODERS).length) cats.push({ id: "decoder", label: "Decoder" });
+    ["perf", "scaling", "effort"].forEach(function (s) {
+      var sec = document.querySelector("[data-chart-section='" + s + "']");
+      if (sec && sectionHasVisible(sec))
+        cats.push({ id: "sec:" + s, label: SECTION_LABELS[s] });
+    });
+    return cats;
+  }
+
+  // The graphs (rail steps) within a category. Each carries the stage panel
+  // group it lives in and the kind that drives the controls box + renderer.
+  function buildGraphList(catId) {
+    if (catId === "quality") {
+      var L = availableMetrics().map(function (m) {
+        return { id: "rd-" + m, label: METRIC_INFO[m].name, group: "rd", kind: "rd", metric: m };
+      });
+      if (Object.keys(BDRATE).length)
+        L.push({ id: "bdrate", label: "BD-rate", group: "bdrate", kind: "bdrate" });
+      return L;
+    }
+    if (catId === "lossless") return [
+      { id: "ll-bars", label: "Best bpp", group: "lossless", kind: "lossless-bars", view: "bars" },
+      { id: "ll-effort", label: "Size vs effort", group: "lossless", kind: "lossless-effort", view: "effort" },
+    ];
+    if (catId === "decoder") return [
+      { id: "dec-table", label: "Fidelity & speed", group: "decoder", kind: "decoder-table", view: "table" },
+      { id: "dec-chart", label: "Speed vs bitrate", group: "decoder", kind: "decoder-chart", view: "chart" },
+    ];
+    return galleryGraphs(catId);
+  }
+
+  // Static gallery category -> one rail step per visible format group (or a
+  // single step for a flat, ungrouped gallery).
+  function galleryGraphs(catId) {
+    var s = catId.indexOf("sec:") === 0 ? catId.slice(4) : catId;
+    var sec = document.querySelector("[data-chart-section='" + s + "']");
+    if (!sec) return [];
+    var tabs = [].slice.call(sec.querySelectorAll('[role="tab"][data-format]'))
+      .filter(function (t) { return !t.hidden; });
+    if (!tabs.length)
+      return [{ id: s + "-all", label: SECTION_LABELS[s] || s, group: "sec:" + s, kind: "gallery" }];
+    return tabs.map(function (t, i) {
+      return { id: s + "-" + i, label: t.textContent || ("Group " + (i + 1)),
+        group: "sec:" + s, kind: "gallery", tab: t };
+    });
+  }
+
+  // The stage panel hosting a graph group.
+  function panelEl(group) {
+    if (group.indexOf("sec:") === 0)
+      return document.querySelector("[data-chart-section='" + group.slice(4) + "']");
+    return document.querySelector("#dash-stage [data-graph-group='" + group + "']");
+  }
+
+  function navButton(cls, label, on, onClick) {
+    var attrs = { type: "button", class: cls + (on ? " active" : "") };
+    if (on) attrs["aria-current"] = "true";
+    var b = el("button", attrs, label);
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function renderNav() {
+    var nav = document.getElementById("dash-nav");
+    if (!nav) return;
+    var cats = buildCategories();
+    nav.innerHTML = "";
+    if (!cats.length) { nav.hidden = true; return; }
+    nav.hidden = false;
+    if (!cats.some(function (c) { return c.id === state.cat; })) state.cat = cats[0].id;
+
+    nav.appendChild(el("div", { class: "dash-title" }, "Image Evaluation"));
+
+    var catWrap = el("div", { class: "dash-cats" });
+    cats.forEach(function (c) {
+      catWrap.appendChild(navButton("dash-cat", c.label, c.id === state.cat,
+        function () { selectCategory(c.id); }));
+    });
+    nav.appendChild(catWrap);
+
+    var list = buildGraphList(state.cat);
+    if (!list.some(function (g) { return g.id === state.graph; }))
+      state.graph = list[0] ? list[0].id : null;
+    var gWrap = el("div", { class: "dash-graphs" });
+    list.forEach(function (g) {
+      gWrap.appendChild(navButton("dash-graph", g.label, g.id === state.graph,
+        function () { showGraph(state.cat, g.id); }));
+    });
+    nav.appendChild(gWrap);
+
+    if (list.length > 1) {
+      var pn = el("div", { class: "dash-prevnext" });
+      var prev = el("button", { type: "button", class: "dash-step", "aria-label": "Previous graph" }, "‹ Prev");
+      var next = el("button", { type: "button", class: "dash-step", "aria-label": "Next graph" }, "Next ›");
+      prev.addEventListener("click", function () { stepGraph(-1); });
+      next.addEventListener("click", function () { stepGraph(1); });
+      pn.appendChild(prev); pn.appendChild(next);
+      nav.appendChild(pn);
+    }
+  }
+
+  function selectCategory(catId) {
+    state.cat = catId;
+    var list = buildGraphList(catId);
+    showGraph(catId, list[0] ? list[0].id : null);
+  }
+
+  // Reveal one graph: show its stage panel, configure + render it, refresh the
+  // rail + controls. Falls back to the first category/graph if the requested one
+  // is gone (e.g. filtered out).
+  function showGraph(catId, graphId) {
+    var cats = buildCategories();
+    var cat = cats.filter(function (c) { return c.id === catId; })[0] || cats[0];
+    if (!cat) { renderNav(); return; }
+    var list = buildGraphList(cat.id);
+    var g = list.filter(function (x) { return x.id === graphId; })[0] || list[0];
+    state.cat = cat.id;
+    state.graph = g ? g.id : null;
+    state.graphKind = g ? g.kind : null;
+
+    var stage = document.getElementById("dash-stage");
+    var target = g ? panelEl(g.group) : null;
+    if (stage) [].forEach.call(stage.children, function (p) { p.hidden = p !== target; });
+
+    if (g) {
+      if (g.kind === "rd") { state.metric = g.metric; renderRD(); }
+      else if (g.kind === "bdrate") renderBdRate();
+      else if (g.kind === "lossless-bars" || g.kind === "lossless-effort") { state.losslessView = g.view; renderLossless(); }
+      else if (g.kind === "decoder-table" || g.kind === "decoder-chart") { state.decoderView = g.view; renderDecoders(); }
+      else if (g.kind === "gallery" && g.tab) g.tab.click();
+    }
+
+    renderControls();
+    renderFilterBar();   // the bar lists strictly this figure's variants
+    renderNav();
+    if (stage) stage.scrollTop = 0;
+    if (g) announce("Showing " + cat.label + " — " + g.label);
+  }
+
+  // Prev / Next step within the active category, crossing into the adjacent
+  // category at the ends.
+  function stepGraph(d) {
+    var list = buildGraphList(state.cat);
+    var i = list.map(function (g) { return g.id; }).indexOf(state.graph);
+    var ni = (i < 0 ? 0 : i) + d;
+    if (ni >= 0 && ni < list.length) { showGraph(state.cat, list[ni].id); return; }
+    var cats = buildCategories().map(function (c) { return c.id; });
+    var ci = cats.indexOf(state.cat) + d;
+    if (ci < 0 || ci >= cats.length) return;
+    var l2 = buildGraphList(cats[ci]);
+    var pick = d < 0 && l2.length ? l2[l2.length - 1] : l2[0];
+    showGraph(cats[ci], pick ? pick.id : null);
+  }
+
+  function initDashboard() {
+    var cats = buildCategories();
+    if (cats.length) {
+      var list = buildGraphList(cats[0].id);
+      showGraph(cats[0].id, list[0] ? list[0].id : null);
+    } else {
+      renderNav();
+    }
+    var info = document.getElementById("dash-info-btn");
+    if (info) info.addEventListener("click", openInfoModal);
   }
 
   function initGalleries() {
@@ -1292,29 +1687,28 @@
 
   function init() {
     initGalleries();
-    if (!document.getElementById("quality-app")) return;
-    AGG_ALL = aggregateAll(validRows(METRICS));
-    availableMetrics().forEach(function (k) { state.metricsOn[k] = true; });
-    buildPresets();
-    buildTabs();
-    state.tab = TABS[0] ? TABS[0].id : null;
+    // Build the filter bar up front so the format filter governs the static
+    // galleries even in a perf-only bundle; it is rebuilt with the Tests groups
+    // once the quality data resolves.
+    renderFilterBar();
+    applyGalleryFilter();
+    if (document.getElementById("quality-app")) {
+      AGG_ALL = aggregateAll(validRows(METRICS));
+      renderAggregationNote();
+      renderFilterBar();
+    }
+    // Build the navigation rail and show the first graph (works with or without
+    // a quality app — a perf-only bundle just gets the static categories).
+    initDashboard();
 
-    renderControls();
-    renderAggregationNote();
-    renderFilters();
-    renderTabs();
-    renderLossless();
-    renderDecoders();
-    renderBdRate();
-    mountSectionToggle("q-toggle-lossless", "lossless", renderLossless);
-    mountSectionToggle("q-toggle-decoder", "decoder", renderDecoders);
-
-    // Alt+[ / Alt+] step the view preset from anywhere (the <select> already
-    // cycles with arrow keys when focused; this is the global accelerator).
+    // Alt+[ / Alt+] cycle the X axis from anywhere while a rate-distortion graph
+    // is active (the button group also takes direct clicks).
     document.addEventListener("keydown", function (e) {
-      if (!e.altKey) return;
-      if (e.key === "]") { e.preventDefault(); setPreset((state.presetIdx + 1) % PRESETS.length); }
-      else if (e.key === "[") { e.preventDefault(); setPreset((state.presetIdx - 1 + PRESETS.length) % PRESETS.length); }
+      if (!e.altKey || state.graphKind !== "rd") return;
+      var axes = availableXAxes();
+      var i = axes.indexOf(state.xKey); if (i < 0) i = 0;
+      if (e.key === "]") { e.preventDefault(); setAxis(axes[(i + 1) % axes.length]); }
+      else if (e.key === "[") { e.preventDefault(); setAxis(axes[(i - 1 + axes.length) % axes.length]); }
     });
   }
 

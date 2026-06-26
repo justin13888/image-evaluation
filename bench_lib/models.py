@@ -12,6 +12,7 @@ from typing import (
     Callable,
     Dict,
     Literal,
+    NotRequired,
     Optional,
     Tuple,
     TypedDict,
@@ -20,7 +21,7 @@ from typing import (
 
 import tyro
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # Use this lock to ensure only one thread writes to the console at a time
@@ -749,6 +750,42 @@ REFERENCE_DECODERS: Dict[ImageFormats, str] = {
     ImageFormat.AVIF: "libavif-decode",
     ImageFormat.JXL: "libjxl-decode",
 }
+
+
+# Lossy formats whose decode inverse transform is NON-normative: the spec does
+# not fix an exact integer inverse transform, so two correct, independent
+# decoders legitimately produce sub-LSB-different pixels. A decode that is *not*
+# bit-exact versus the format's golden reference decoder is therefore EXPECTED
+# here, not a defect:
+#   JPEG - the IDCT is only accuracy-bounded (ITU-T T.81 Annex A / IEEE 1180),
+#          never specified bit-for-bit, and chroma upsampling differs by decoder.
+#   JXL  - the VarDCT inverse transform is floating-point, not bit-reproducible
+#          across implementations.
+# AV1/AVIF and VP8/WebP are deliberately ABSENT: their integer inverse transforms
+# are normative, so every conformant decoder must match the reference bit-for-bit
+# and a mismatch there IS a real defect. PNG is lossless (scored vs the source,
+# not a golden decoder), so it never reaches this gate.
+NON_NORMATIVE_LOSSY_DECODE_FORMATS: frozenset = frozenset(
+    {ImageFormat.JPEG, ImageFormat.JXL}
+)
+
+
+def decode_approx_expected(format: str, basis: str) -> bool:
+    """True when a non-bit-exact decode is EXPECTED (faithful, not a defect).
+
+    Holds only for a *lossy* decode (scored vs the format's ``golden`` reference
+    decoder, ``basis == "golden"``) of a format whose inverse transform is
+    non-normative (JPEG, JXL; see ``NON_NORMATIVE_LOSSY_DECODE_FORMATS``). A
+    ``source``-basis decode (the lossless path: PNG always, the WebP/JXL lossless
+    path) must always be bit-exact, as must a ``golden``-basis decode of a
+    normative format (AV1/AVIF, VP8/WebP); for those a finite PSNR is a genuine
+    failure, so this returns ``False``."""
+    if basis != "golden":
+        return False
+    try:
+        return ImageFormat(format) in NON_NORMATIVE_LOSSY_DECODE_FORMATS
+    except ValueError:
+        return False
 
 
 # Threading configurations: single-threaded (per-core efficiency) then all-cores
@@ -1565,7 +1602,30 @@ class RunArgs(BaseArgs):
         Field(description="Implementation-type filter (encode/decode; default both)"),
     ] = BenchmarkMode.BOTH
     perf: _PERF_ARG = "anchor"
+    perf_images: Annotated[
+        int,
+        Field(
+            description="Source images the rigorous timing overlay covers (spread "
+            "across the size range). The quality sweep always covers the full "
+            "--sample; timing is content-light at fixed resolution, so a handful of "
+            "images stays statistically significant (each re-run ~10x) while bounding "
+            "cost — the lever that keeps a full clic2025 run tractable. 0 = all "
+            "sampled images."
+        ),
+    ] = 5
     params: _PARAMS_ARG = "variants"
+    demo: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Demo preset: a fast, deliberately NON-rigorous sweep that "
+            "still fills every report section. Implies --quick plus --scaling and "
+            "--effort, defaults --sample to 2 and --jobs to all logical cores, and "
+            "keeps the default --perf anchor — a single run per point at maximum "
+            "parallelism. For showing off the whole report, not for accurate "
+            "measurements."
+        ),
+    ] = False
     quality_steps: Annotated[
         Optional[int],
         tyro.conf.arg(aliases=["-q"]),
@@ -1670,6 +1730,28 @@ class RunArgs(BaseArgs):
             "(downscaled to ~1 MP)."
         ),
     ] = 4
+
+    @model_validator(mode="after")
+    def _apply_demo(self) -> "RunArgs":
+        """Expand the ``--demo`` preset into the concrete flags the runner reads.
+
+        Demo is a fast, complete-coverage sweep (see the field help): the quick
+        metric pass (2 quality points, 1 decode point, all-cores-only timing,
+        single-run hyperfine) *plus* both opt-in suites so the scaling and effort
+        report sections have data, a small default sample, and all logical cores
+        for the always-parallel metric pass. ``--perf`` stays at its default
+        ``anchor`` so the performance section is populated cheaply. Explicit
+        ``--sample`` / ``--jobs`` still win; ``--scaling`` / ``--effort`` /
+        ``--quick`` only turn on, so forcing them on is consistent."""
+        if self.demo:
+            self.quick = True
+            self.scaling = True
+            self.effort = True
+            if self.sample is None:
+                self.sample = 2
+            if self.jobs is None:
+                self.jobs = os.cpu_count()
+        return self
 
 
 class QualityArgs(RunArgs):
@@ -2018,6 +2100,19 @@ class BenchmarkMetrics(TypedDict):
     # single-pass/relative caveat as time_s. Only set on encode rows; None on decode
     # rows (their time_s already *is* a decode time) and on error.
     decode_time_s: Optional[float]
+    # Rigorous-timing overlay results, merged back onto this row by matching its
+    # `name` against the overlay's single-threaded (t1) hyperfine command name (see
+    # runner._merge_rigorous_timing). Present ONLY on the rows the overlay actually
+    # re-timed in isolation (each impl's anchor point + — for lossless encoders —
+    # the min/max effort endpoints), absent otherwise. Unlike time_s these are
+    # isolated, repeated-trial measurements: time_rigorous_s is the mean over
+    # time_runs runs (time_runs > 1 ⇒ statistically significant; --quick's single
+    # run is not), with time_rigorous_stddev_s the run-to-run spread. The report
+    # uses these to anchor the lossless size-vs-effort endpoints and to decide when
+    # a timing axis is rigorous rather than single-pass.
+    time_rigorous_s: NotRequired[Optional[float]]
+    time_rigorous_stddev_s: NotRequired[Optional[float]]
+    time_runs: NotRequired[Optional[int]]
     # Definitive bit-exactness from a direct byte compare of the produced raster
     # against the reference it is scored against (decode rows: vs source for a
     # losslessly-encoded input, else vs the golden decoder; encode rows: vs source,

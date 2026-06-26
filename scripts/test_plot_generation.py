@@ -362,20 +362,44 @@ def test_report_html():
         "ssim + butteraugli must round-trip into the report"
     )
     assert "Butteraugli" in html, "Butteraugli metric must be wired into the report"
-    # Rate-distortion now lives in per-format tabs (full-width, one stacked chart
-    # per metric) rather than a cramped small-multiples grid.
-    assert "id='q-tabs'" in html or 'id="q-tabs"' in html, (
-        "per-format tabs mount point must be present"
+    # Rate-distortion is one full-width chart per metric, each overlaying every
+    # selected format's encoders (the per-format tabs are gone — format is a
+    # filter dimension, not a tab).
+    assert "id='q-rd'" in html or 'id="q-rd"' in html, (
+        "rate-distortion mount point must be present"
     )
-    assert "q-tablist" in html and "renderTabs" in html, (
-        "the ARIA tablist engine must be inlined"
+    assert "renderRD" in html and "seriesForView" in html, (
+        "the cross-format rate-distortion engine must be inlined"
     )
-    # A "view" preset picker switches the shared X axis (size / encode / decode
-    # time); a filter matrix controls which metrics + implementations are shown.
-    assert "q-view-select" in html and "PRESETS" in html, (
-        "the view preset picker must be wired into the engine"
+    # No-scroll dashboard: a left-rail nav drives a single-graph stage; run config
+    # and environment live behind an Information modal.
+    assert "id='dash-stage'" in html and "id='dash-nav'" in html, (
+        "the dashboard stage + nav rail mounts must be present"
     )
-    assert "q-filters-body" in html, "the filter matrix mount point must be present"
+    assert "renderNav" in html and "showGraph" in html, (
+        "the dashboard navigation engine must be inlined"
+    )
+    assert "id='dash-info-btn'" in html and "openInfoModal" in html, (
+        "the Information modal trigger + engine must be present"
+    )
+    # An X-axis chooser + a log/linear scale toggle (button groups) switch the
+    # shared X axis (size / encode / decode time); a centralized filter bar
+    # controls formats + implementations + metrics across every chart.
+    assert "setAxis" in html and "state.xLog" in html, (
+        "the X-axis + scale controls must be wired into the engine"
+    )
+    assert "Logarithmic" in html and "Linear" in html, (
+        "the log/linear scale toggle must be present"
+    )
+    assert "q-filterbar" in html and "renderFilterBar" in html, (
+        "the centralized floating filter bar mount + engine must be present"
+    )
+    assert "formatsOff" in html and "applyGalleryFilter" in html, (
+        "the format filter must reach both interactive charts and static galleries"
+    )
+    assert "data-chart-section=" in html, (
+        "static suites must be wrapped so the format filter can hide an empty one"
+    )
     assert "decode_time_s" in html, (
         "decode-time axis must be wired into the engine (measured, never joined)"
     )
@@ -403,13 +427,11 @@ def test_report_html():
     )
     assert "arithmetic average" in html, "aggregation note must explain the mean"
     assert "hardHi" in html, "known-range axis scaling must be wired into the engine"
-    # Time dimension (issue #46): per-section toggles mounted beside the lossless
-    # and decoder headings (the rate-distortion time toggle now lives in the view
-    # controls), the bubble-sizing + decoder-scatter engine inlined, and decode
-    # times + fidelity round-tripping into the decoder summary the scatter draws from.
-    for mount in ("q-toggle-lossless", "q-toggle-decoder"):
-        assert f"id='{mount}'" in html, f"missing per-section time toggle mount {mount}"
-    assert "showTime" in html, "per-section show-time state must be in the engine"
+    # Time dimension (issue #46): a contextual "show time" toggle in the controls
+    # box (encode-time bubbles on the rate-distortion + lossless-effort charts),
+    # the bubble-sizing engine inlined, and decode times + fidelity round-tripping
+    # into the decoder summary the speed-vs-bitrate scatter draws from.
+    assert "showTime" in html, "show-time state must be in the engine"
     assert "timeScale" in html and "sizeLegendHTML" in html, (
         "encode-time bubble sizing + size legend must be wired into the engine"
     )
@@ -436,6 +458,37 @@ def test_report_html():
         isinstance(p.get("time_s"), (int, float)) and p["time_s"] > 0
         for p in decoders["zune-jpeg-decode"]["points"]
     ), "decode time must round-trip into the points the scatter is drawn from"
+    # A non-bit-exact lossy decode is EXPECTED (faithful) for a non-normative
+    # format (JPEG, lossy JXL) and a genuine failure for a normative one (WebP),
+    # so the report can present the former neutrally instead of as a red failure.
+    assert decoders["zune-jpeg-decode"]["approx_expected"] is True, (
+        "JPEG lossy decode: non-bit-exactness vs golden is expected (faithful)"
+    )
+    assert decoders["libwebp-decode"]["approx_expected"] is False, (
+        "WebP inverse transform is normative — bit-exact is required"
+    )
+    assert "q-approx" in html and "vs golden (faithful)" in html, (
+        "expected-approximate decoders must render neutrally, not as a failure"
+    )
+    # Each correctness graph (lossless efficiency, decoder fidelity, BD-rate)
+    # carries a concise blue definition note.
+    assert html.count("q-fidelity-note") >= 3, (
+        "each correctness section needs a blue definition note"
+    )
+    assert "Reading this table" in html and "faithful, not broken" in html, (
+        "decoder fidelity note must define bit-exact/basis and why lossy isn't exact"
+    )
+    assert "pixel-for-pixel" in html, "lossless note must define correctness-at-a-size"
+    assert "negative = fewer bits for the same quality" in html, (
+        "BD-rate note must define the sign convention"
+    )
+    # Series visibility folds into the Tests filter: each test checkbox carries a
+    # colour swatch (q-fb-sw) and toggles state.implsOff, so there are no separate
+    # per-chart legends — and toggling a test re-renders every chart and table.
+    assert "q-chip static" not in html, "there must be no static legend chips"
+    assert "q-fb-sw" in html and "implsOff" in html, (
+        "series toggles must live on the swatched Tests filter checkboxes"
+    )
     # Per-point image gallery (this feature): the rows carry their image paths,
     # those round-trip into the embedded metrics, and the lightbox engine that
     # makes points clickable is inlined.

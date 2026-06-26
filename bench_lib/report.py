@@ -43,17 +43,20 @@ def _json_script(elem_id: str, obj: Any) -> str:
     return f'<script id="{elem_id}" type="application/json">{payload}</script>'
 
 
-def _img_tag(img_path: str) -> str:
+def _img_tag(img_path: str, fmt: str = "") -> str:
     """Embed a chart as a base64 <img> data URI (self-contained, no external src).
     SVG charts use ``image/svg+xml``; anything else is treated as PNG. A data-URI
     <img> (rather than inlined markup) isolates each SVG so matplotlib's shared
-    ids/clip-paths can't collide across charts."""
+    ids/clip-paths can't collide across charts. ``fmt`` (the chart's image format,
+    lowercase) is stamped as ``data-format`` so the report's format filter can
+    show/hide this chart."""
     mime = "image/svg+xml" if img_path.endswith(".svg") else "image/png"
     with open(img_path, "rb") as f:
         data = base64.b64encode(f.read()).decode("ascii")
     alt = html.escape(os.path.basename(img_path))
+    fmt_attr = f' data-format="{html.escape(fmt)}"' if fmt else ""
     return (
-        f'<figure><img alt="{alt}" '
+        f'<figure{fmt_attr}><img alt="{alt}" '
         f'src="data:{mime};base64,{data}">'
         f"<figcaption>{alt}</figcaption></figure>"
     )
@@ -84,21 +87,25 @@ def _gallery_html(charts: list[str], group_id: str) -> str:
     for p in charts:
         groups.setdefault(_chart_group(p), []).append(p)
     if len(groups) <= 1:
-        return "\n".join(_img_tag(p) for p in charts)
+        # Single group: no tabs, but still wrap in a [data-img-tabs] block so every
+        # gallery is uniform (same full-bleed centring + format-filter hooks).
+        figs = "\n".join(_img_tag(p, _chart_group(p).lower()) for p in charts)
+        return f'<div class="img-tabs" data-img-tabs>{figs}</div>'
     tabs: list[str] = []
     panels: list[str] = []
     for i, key in enumerate(sorted(groups)):
         sel = i == 0
+        fmt = key.lower()
         tabs.append(
             f'<button class="q-tab{" active" if sel else ""}" type="button" '
             f'role="tab" id="{group_id}-tab-{i}" aria-controls="{group_id}-panel-{i}" '
-            f'aria-selected="{"true" if sel else "false"}" '
+            f'aria-selected="{"true" if sel else "false"}" data-format="{fmt}" '
             f'tabindex="{"0" if sel else "-1"}">{html.escape(key)}</button>'
         )
-        figs = "\n".join(_img_tag(p) for p in groups[key])
+        figs = "\n".join(_img_tag(p, fmt) for p in groups[key])
         panels.append(
             f'<div class="q-tabpanel" role="tabpanel" id="{group_id}-panel-{i}" '
-            f'aria-labelledby="{group_id}-tab-{i}" tabindex="0"'
+            f'aria-labelledby="{group_id}-tab-{i}" data-format="{fmt}" tabindex="0"'
             f"{'' if sel else ' hidden'}>{figs}</div>"
         )
     return (
@@ -280,38 +287,47 @@ def _manifest_summary(bundle_dir: str) -> str:
     return ""
 
 
-def _quality_section(qual_dir: str) -> list[str]:
-    """Build the interactive quality section: embed the raw metrics + derived
-    summaries as JSON, drop in the chart mount points, and inline the chart JS.
-    Returns the HTML fragments (empty if there is nothing to show)."""
+def _quality_section(qual_dir: str) -> Optional[dict]:
+    """Build the interactive quality area. Returns a dict with three HTML pieces:
+    ``data`` (the embedded JSON the charts recompute from, wrapped in the
+    ``#quality-app`` marker), ``intro`` (the how-to-read prose + IQA disclaimer,
+    surfaced in the Information modal) and ``panels`` (the per-graph stage panels
+    the dashboard shows one at a time). ``None`` when there is nothing to show."""
     metrics = _load_json(os.path.join(qual_dir, "metrics.json"))
-    parts = ["<h2>Quality &mdash; rate-distortion &amp; decoder fidelity</h2>"]
     if not metrics:
-        parts.append("<p><em>No quality metrics.</em></p>")
-        return parts
+        return None
 
     qmanifest = _load_json(os.path.join(qual_dir, "manifest.json"))
-    parts.append(
-        "<p class='muted'>Interactive — rendered in your browser from the raw "
-        "measurements embedded below. The <em>View</em> picker sets the X axis "
-        "shared by every rate-distortion chart: quality vs size (bpp), vs encode "
-        "time, or vs decode time (← → switch the per-format tabs; Alt+[ / Alt+] "
-        "cycle views). Each format's tab stacks one full-width chart per metric "
-        "(SSIMULACRA2, PSNR, SSIM, Butteraugli), and the <em>Cross-format Pareto</em> "
-        "tab overlays each format's best encoders. Use the <em>Filters</em> panel to "
-        "choose which metrics and implementations are shown; hover a point for "
-        "details, and <strong>click a point (or focus a chart and press Enter) to "
-        "view the exact images aggregated into it</strong>. Lossless encoders "
-        "(PNG, lossless JXL/WebP) have no rate-distortion "
-        "tradeoff, so they appear in their own compression-efficiency section rather "
-        "than on the curves. Decode time is a real per-output measurement (the "
-        "reference decode of each encoded result); encode time is shown on the size "
-        "views as the point's <em>bubble size</em> (bigger = slower). Both are "
-        "single-pass wall-clocks measured under the parallel pool — a <em>relative</em> "
-        "sense of how an operating point's cost scales, not the performance suite's "
+    # Embedded data (source of truth). Charts recompute from #quality-metrics; the
+    # BD-rate and Pareto summaries are precomputed here (numpy / dominance) and
+    # embedded so the browser need not reimplement them. The #quality-app marker
+    # is what report.js probes to decide whether to build the quality categories.
+    data = ["<div id='quality-app'>", _json_script("quality-metrics", metrics)]
+    if qmanifest:
+        data.append(_json_script("quality-manifest", qmanifest))
+    data.append(_json_script("quality-bdrate", compute_bd_rate_table(metrics)))
+    data.append(_json_script("quality-pareto", pareto_front_encoders(metrics)))
+    data.append(_json_script("quality-lossless", lossless_efficiency(metrics)))
+    data.append(_json_script("quality-decoders", decoder_fidelity(metrics)))
+    data.append("</div>")
+
+    intro = (
+        "<p>Interactive — rendered in your browser from the raw measurements "
+        "embedded in this file. The controls box sets the X axis shared by every "
+        "rate-distortion chart — quality vs size (bpp), vs encode time, or vs "
+        "decode time — and toggles a logarithmic or linear scale (Alt+[ / Alt+] "
+        "cycle the X axis). Each rate-distortion chart overlays every selected "
+        "format's encoders. Use the filter bar to choose formats and "
+        "implementations across every chart; hover a point for details, and "
+        "<strong>click a point (or focus a chart and press Enter) to view the "
+        "exact images aggregated into it</strong>. Lossless encoders (PNG, "
+        "lossless JXL/WebP) have no rate-distortion tradeoff, so they live in the "
+        "Lossless category rather than on the curves. Decode time is a real "
+        "per-output measurement; encode time is shown on the size views as the "
+        "point's <em>bubble size</em> (bigger = slower). Both are single-pass "
+        "wall-clocks measured under the parallel pool — a <em>relative</em> sense "
+        "of how an operating point's cost scales, not the performance suite's "
         "isolated timing.</p>"
-    )
-    parts.append(
         "<div class='q-disclaimer'><strong>IQA metrics are approximations, not "
         "ground truth.</strong> SSIMULACRA2, PSNR, SSIM and Butteraugli are "
         "automated estimators of perceived quality, each with its own assumptions "
@@ -321,77 +337,95 @@ def _quality_section(qual_dir: str) -> list[str]:
         "that correlates poorly with perception; SSIM captures structural "
         "similarity (higher is better); Butteraugli is a perceptual difference "
         "where <em>lower</em> is better (0 = identical). Aggregate scores (BD-rate, "
-        "Pareto fronts) are "
-        "sensitive to the metric, dataset, and operating points chosen, and a few "
-        "points of SSIMULACRA2 may not be perceptible. Treat these results as a "
-        "reproducible guide for narrowing options &mdash; <em>not</em> a "
-        "substitute for a controlled human subjective study (e.g. MOS) when "
-        "determining the genuinely best-looking option.</div>"
+        "Pareto fronts) are sensitive to the metric, dataset, and operating points "
+        "chosen, and a few points of SSIMULACRA2 may not be perceptible. Treat "
+        "these results as a reproducible guide for narrowing options &mdash; "
+        "<em>not</em> a substitute for a controlled human subjective study (e.g. "
+        "MOS) when determining the genuinely best-looking option.</div>"
+        "<p class='muted'>A timing axis that plots single-pass wall-clocks is "
+        "flagged with a <em>*</em>; the Lossless size-vs-effort chart is the "
+        "exception — its lowest/highest-effort endpoints are re-timed rigorously "
+        "(isolated, repeated runs, with &plusmn;&sigma; whiskers) so its extremes "
+        "are trustworthy even though interior points stay single-pass.</p>"
     )
-    # Embedded data (source of truth). Charts recompute from #quality-metrics; the
-    # BD-rate and Pareto summaries are precomputed here (numpy / dominance) and
-    # embedded so the browser need not reimplement them.
-    parts.append(_json_script("quality-metrics", metrics))
-    if qmanifest:
-        parts.append(_json_script("quality-manifest", qmanifest))
-    parts.append(_json_script("quality-bdrate", compute_bd_rate_table(metrics)))
-    parts.append(_json_script("quality-pareto", pareto_front_encoders(metrics)))
-    parts.append(_json_script("quality-lossless", lossless_efficiency(metrics)))
-    parts.append(_json_script("quality-decoders", decoder_fidelity(metrics)))
 
-    parts.append(
-        "<div id='quality-app'>"
-        "<div id='q-controls' class='q-controls' role='group' "
-        "aria-label='Chart view controls'></div>"
-        "<div id='q-status' class='q-visually-hidden' role='status' "
-        "aria-live='polite'></div>"
+    # One stage panel per graph group; the rail labels them, so the panels carry
+    # only the reading-guide note + the chart/table mount. Hidden until shown.
+    panels = [
+        "<div class='q-panel' data-graph-group='rd' hidden>"
         "<div id='q-aggregation' class='q-agg'></div>"
-        "<details id='q-filters' class='q-filters'>"
-        "<summary>Filters — metrics &amp; implementations shown</summary>"
-        "<div id='q-filters-body' class='q-filters-body'></div>"
-        "</details>"
-        "<h3>Rate-distortion — by format</h3>"
-        "<p class='q-note'>Per-format tabs (plus a cross-format Pareto overview); "
-        "each tab stacks one full-width chart per metric, all on the X axis chosen "
-        "by the <em>View</em> picker. Every encoder's quality sweep is aggregated to "
-        "a mean curve over the images (see the aggregation note above); each "
-        "metric's y-axis is fixed to its known range, so formats are directly "
-        "comparable. Up and to the left/up is better.</p>"
-        "<div id='q-tabs'></div>"
-        "<h3>Lossless compression efficiency"
-        "<span class='q-section-toggle' id='q-toggle-lossless'></span></h3>"
+        "<div id='q-rd'></div></div>",
+        "<div class='q-panel' data-graph-group='lossless' hidden>"
         "<p class='q-note'>Lossless encoders produce a pixel-identical image, so "
         "they differ only in file size — lower bits-per-pixel (bpp) is better. The "
         "leaderboard ranks each encoder by its smallest achievable bpp; the "
-        "size-vs-effort chart traces how bpp falls as compression effort rises "
-        "(single-knob encoders show one point), with bubble size encoding mean "
-        "encode time (the size-vs-speed tradeoff that is lossless's whole story).</p>"
-        "<div id='q-lossless'></div>"
-        "<h3>Decoder fidelity &amp; speed"
-        "<span class='q-section-toggle' id='q-toggle-decoder'></span></h3>"
+        "size-vs-effort chart plots bpp against the <em>encode time</em> each effort "
+        "setting costs, so more effort moves right (slower) and usually down "
+        "(smaller). The lowest- and highest-effort endpoints are timed rigorously "
+        "(repeated, isolated runs, shown with &plusmn;&sigma; whiskers) so the "
+        "curve's extremes are trustworthy; interior points are single-pass and "
+        "joined by a spline. Single-knob encoders appear as one labelled diamond.</p>"
+        "<div class='q-fidelity-note'><b>What these mean.</b> Lossless encoders "
+        "all reproduce the source <b>pixel-for-pixel</b>, so correctness is a "
+        "given and they compete only on size: <b>bpp</b> is the encoded bits per "
+        "pixel and the <b>ratio</b> is against the 24&nbsp;bpp RGB source &mdash; "
+        "lower bpp / higher ratio is better.</div>"
+        "<div id='q-lossless'></div></div>",
+        "<div class='q-panel' data-graph-group='decoder' hidden>"
         "<p class='q-note'>Decoders carry no rate-distortion tradeoff, so they are "
         "judged on speed and on fidelity against the reference they are scored "
         "against: the <em>source</em> ground truth for a losslessly-encoded input "
         "(PNG always; the WebP/JXL lossless path) or the format's <em>golden</em> "
         "(reference) decoder for a lossy input. Fidelity is computed by a definitive "
         "byte-level compare: ∞ = bit-exact; a finite worst-case PSNR flags an "
-        "approximate decode path. Decode time is the relative one-pass cost across "
-        "the input-bitrate sweep; the <em>Show time</em> toggle adds a "
-        "speed-vs-bitrate scatter above the table.</p>"
-        "<div id='q-decoders'></div>"
-        "<h3>BD-rate (SSIMULACRA2, vs reference encoder)</h3>"
+        "approximate decode path. The <em>Speed vs bitrate</em> graph plots decode "
+        "time against input bitrate.</p>"
+        "<div class='q-fidelity-note'><b>Reading this table.</b> "
+        "<b>Bit-exact</b> (&infin;) = the decoder reproduces its <b>basis</b> "
+        "byte-for-byte; the basis is the original <b>source</b> for a "
+        "losslessly-encoded input or the format's <b>golden</b> reference decoder "
+        "for a lossy one. JPEG and lossy-JXL inverse transforms are not "
+        "bit-reproducible across independent decoders, so a high <b>PSNR vs "
+        "golden</b> (&asymp;&nbsp;50+&nbsp;dB) means <b>faithful, not broken</b>; "
+        "AV1/AVIF and VP8/WebP use normative integer transforms, so for those "
+        "bit-exact is required.</div>"
+        "<div id='q-decoders'></div></div>",
+        "<div class='q-panel' data-graph-group='bdrate' hidden>"
         "<p class='q-note'>Negative = fewer bits for equal quality (better). "
         "Computed per image then averaged; <code>N/A</code> = non-overlapping "
         "quality ranges. Click a header to sort.</p>"
-        "<div id='q-bdrate'></div>"
-        "</div>"
-    )
-    return parts
+        "<div class='q-fidelity-note'><b>What this means.</b> BD-rate is the "
+        "average <b>size difference at equal quality</b> (SSIMULACRA2) versus the "
+        "format's <b>reference encoder</b>: <b>negative = fewer bits for the same "
+        "quality (better)</b>, positive = larger. A relative rate measure, not an "
+        "absolute size.</div>"
+        "<div id='q-bdrate'></div></div>",
+    ]
+    return {"data": data, "intro": intro, "panels": panels}
+
+
+def _info_card(bundle_dir: str, generated_at: Optional[str], intro_html: str) -> str:
+    """The Information hero-card body (cloned into a modal by report.js): when the
+    run happened, the dataset/run configuration, the environment, and the
+    how-to-read prose. Kept out of the always-on layout so the dashboard stays a
+    no-scroll, one-graph-at-a-time surface."""
+    parts: list[str] = []
+    if generated_at:
+        parts.append(f"<p class='muted'>Generated: {html.escape(generated_at)}</p>")
+    parts.extend(_config_section(bundle_dir))
+    env = _manifest_summary(bundle_dir)
+    if env:
+        parts.append("<h2>Environment</h2>")
+        parts.append(env)
+    if intro_html:
+        parts.append("<h2>About these results</h2>")
+        parts.append(intro_html)
+    return "".join(parts)
 
 
 _CSS = """
 body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem auto;
-       max-width: 1100px; padding: 0 1rem; color: #1a1a1a; }
+       max-width: 1100px; padding: 0 1rem 6rem; color: #1a1a1a; }
 h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
 h2 { margin-top: 2.5rem; border-bottom: 1px solid #ccc; }
 figure { margin: 1rem 0; }
@@ -405,47 +439,35 @@ th { background: #f3f3f3; }
 
 
 def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) -> str:
-    """Write ``<bundle_dir>/report.html`` bundling the performance charts and the
-    interactive quality view (whichever subfolders exist). Returns the path."""
+    """Write ``<bundle_dir>/report.html`` as a self-contained no-scroll dashboard:
+    a sticky top control bar (filter panel + axis/scale controls + Information
+    button), a left navigation rail, and a single-graph stage. Returns the path."""
     perf_dir = os.path.join(bundle_dir, "performance")
     qual_dir = os.path.join(bundle_dir, "quality")
 
-    parts = [
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>",
-        "<title>Benchmark Report</title>",
-        f"<style>{_CSS}\n{_asset('report.css')}</style></head><body>",
-        "<h1>Image Evaluation — Report</h1>",
-    ]
-    if generated_at:
-        parts.append(f"<p class='muted'>Generated: {html.escape(generated_at)}</p>")
+    qual = _quality_section(qual_dir) if os.path.isdir(qual_dir) else None
 
-    parts.extend(_config_section(bundle_dir))
-
-    manifest_html = _manifest_summary(bundle_dir)
-    if manifest_html:
-        parts.append("<h2>Environment</h2>")
-        parts.append(manifest_html)
-
-    # Quality is primary (rate-distortion + decoder fidelity); the rigorous timing
-    # overlay is the optional secondary view, shown below it.
-    if os.path.isdir(qual_dir):
-        parts.extend(_quality_section(qual_dir))
+    # Stage panels: the quality graph panels first, then each static suite as a
+    # hidden <section> the dashboard reveals one category at a time.
+    stage: list[str] = list(qual["panels"]) if qual else []
 
     if os.path.isdir(perf_dir):
-        parts.append("<h2>Performance &mdash; rigorous timing overlay</h2>")
-        parts.append(
+        stage.append(
+            "<section class='chart-section' data-chart-section='perf' hidden>"
+            "<h2>Performance &mdash; rigorous timing overlay</h2>"
             "<p class='muted'>Optional, secondary view. Isolated hyperfine timing "
             "(warmup + repeats, compute-only) at the selected operating points, "
-            "across single-threaded and all-cores modes. Quality above is primary: "
-            "raw speed is only meaningful alongside the quality it trades for.</p>"
+            "across single-threaded and all-cores modes. Quality is primary: raw "
+            "speed is only meaningful alongside the quality it trades for.</p>"
+            + _embed_charts(perf_dir, "perf")
+            + "</section>"
         )
-        parts.append(_embed_charts(perf_dir, "perf"))
 
     scal_dir = os.path.join(bundle_dir, "scaling")
     if os.path.isdir(scal_dir):
-        parts.append("<h2>Scaling &mdash; time vs pixel count</h2>")
-        parts.append(
+        stage.append(
+            "<section class='chart-section' data-chart-section='scaling' hidden>"
+            "<h2>Scaling &mdash; time vs pixel count</h2>"
             "<p class='muted'>Each codec timed single-threaded at its performance "
             "preset on a downscale-only resolution ladder (same content, only pixels "
             "vary). Axes are log-log; the dashed line is a fit of "
@@ -454,13 +476,15 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "count) &mdash; the per-codec exponent and R² are in the legend and "
             "<code>scaling/summary.md</code>. Single-threaded to isolate the "
             "pixel-count exponent from parallel-scaling effects.</p>"
+            + _embed_charts(scal_dir, "scaling")
+            + "</section>"
         )
-        parts.append(_embed_charts(scal_dir, "scaling"))
 
     eff_dir = os.path.join(bundle_dir, "effort")
     if os.path.isdir(eff_dir):
-        parts.append("<h2>Effort / speed &mdash; time vs quality vs size</h2>")
-        parts.append(
+        stage.append(
+            "<section class='chart-section' data-chart-section='effort' hidden>"
+            "<h2>Effort / speed &mdash; time vs quality vs size</h2>"
             "<p class='muted'>The lever the rate-distortion sweep pins: each lossy "
             "codec's effort/speed knob (AVIF <code>speed</code>, JXL "
             "<code>effort</code>, WebP <code>method</code>) swept at a fixed quality "
@@ -469,17 +493,53 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "to a point) is the whole story. Encode time is a single-pass wall-clock "
             "(relative), not the performance suite's isolated timing. Numbers are in "
             "<code>effort/summary.md</code>.</p>"
+            + _embed_charts(eff_dir, "effort")
+            + "</section>"
         )
-        parts.append(_embed_charts(eff_dir, "effort"))
 
+    parts = [
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>",
+        "<title>Benchmark Report</title>",
+        f"<style>{_CSS}\n{_asset('report.css')}</style></head><body class='dash'>",
+        # Sticky top control bar: a compact title, the centralized filter panel
+        # (left, scales horizontally), the axis/scale controls box, and the
+        # Information button — all filled in / wired by report.js.
+        "<div class='q-topbar'>"
+        "<h1 class='dash-h1'>Image Evaluation — Report</h1>"
+        "<div id='q-filterbar' class='q-filterbar' role='region' "
+        "aria-label='Chart filters' hidden></div>"
+        "<div id='q-controls' class='q-controls' role='group' "
+        "aria-label='Chart axis and scale controls'></div>"
+        "<button id='dash-info-btn' class='dash-info-btn' type='button' "
+        "aria-haspopup='dialog'>&#9432; Info</button>"
+        "</div>",
+        # Live region for navigation announcements (visually hidden; never
+        # display:none, so screen readers still hear it).
+        "<div id='q-status' class='q-visually-hidden' role='status' "
+        "aria-live='polite'></div>",
+        # The dashboard: a left navigation rail (built by report.js) and the
+        # single-graph stage (the only scrollable region).
+        "<div id='dash-main'>"
+        "<nav id='dash-nav' aria-label='Graph navigation'></nav>"
+        "<main id='dash-stage' tabindex='-1'>" + "".join(stage) + "</main>"
+        "</div>",
+    ]
+
+    # Hidden source: the embedded quality data (carrying the #quality-app marker
+    # report.js probes) and the Information hero-card body (cloned into a modal).
+    parts.append("<div id='dash-source' hidden>")
+    if qual:
+        parts.extend(qual["data"])
     parts.append(
-        "<p class='muted'>Raw data is embedded above "
-        "(<code>#quality-metrics</code>) and also on disk alongside this file: "
-        "<code>performance/raw.json</code>, <code>quality/metrics.json</code>, "
-        "and per-suite <code>summary.md</code>.</p>"
+        "<div id='dash-info'>"
+        + _info_card(bundle_dir, generated_at, qual["intro"] if qual else "")
+        + "</div>"
     )
-    # One inlined chart engine for the whole document: it draws the interactive
-    # quality view and wires every tabbed image gallery (perf/scaling/effort).
+    parts.append("</div>")
+
+    # One inlined engine for the whole document: the dashboard navigation, the
+    # interactive charts, the tabbed image galleries, and the modals.
     parts.append(f"<script>{_asset('report.js')}</script>")
     parts.append("</body></html>")
 

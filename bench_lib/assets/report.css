@@ -49,15 +49,10 @@
 .q-size-item svg { overflow: visible; }
 .q-size-bub { fill: #c9c9c9; stroke: #888; stroke-width: 1; }
 
-.q-legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; margin: .5rem .2rem .6rem; }
-.q-chip {
-  display: inline-flex; align-items: center; gap: .35rem; cursor: pointer;
-  font-size: .82rem; color: #222; user-select: none; padding: .15rem .3rem;
-  border: 1px solid transparent; background: none; font-family: inherit; border-radius: 4px;
-}
-.q-chip .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
-.q-chip.off { opacity: .4; text-decoration: line-through; }
-.q-chip.static { cursor: default; }
+/* Filter-checkbox colour swatch — the Tests groups double as the chart legend
+   (every chart colours its series by format), so each test's swatch is its
+   series colour. */
+.q-fb-sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; display: inline-block; }
 
 .q-tooltip {
   position: absolute; pointer-events: none; z-index: 5; max-width: 260px;
@@ -74,6 +69,10 @@ table.q-table th .arrow { color: #999; font-size: .8em; }
 table.q-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.q-table td.good { color: #157f3b; }
 table.q-table td.bad { color: #b3261e; }
+/* Expected, faithful lossy decode (JPEG / lossy JXL): a non-bit-exact result vs
+   the golden reference is by design (non-normative inverse transform), so it
+   reads neutrally — a fact, not a failure — never the red `.bad`. */
+table.q-table td.q-approx { color: #3a6ea5; }
 /* Lossless compression-efficiency view (issue #26): a bpp leaderboard + a
    size-vs-effort chart. The effort chart reuses .q-chart; the bars need their
    own plot framing since they are not a .q-chart. */
@@ -86,10 +85,11 @@ table.q-table td.bad { color: #b3261e; }
 .q-ll-val { fill: #444; font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .q-note { color: #666; font-size: .85rem; margin: .2rem 0 .8rem; }
-.q-agg { border-left: 4px solid #2563eb; background: #f0f6ff; color: #1e3a5f;
+.q-agg, .q-fidelity-note {
+         border-left: 4px solid #2563eb; background: #f0f6ff; color: #1e3a5f;
          padding: .55rem .9rem; margin: .2rem 0 1.4rem; font-size: .85rem;
          border-radius: 0 4px 4px 0; line-height: 1.45; }
-.q-agg b { color: #15366b; }
+.q-agg b, .q-fidelity-note b { color: #15366b; }
 .q-agg:empty { display: none; }
 .q-disclaimer { border-left: 4px solid #d9a300; background: #fffaf0; color: #5c4a00;
                 padding: .6rem .9rem; margin: .8rem 0 1.2rem; font-size: .85rem;
@@ -102,27 +102,57 @@ table.q-table td.bad { color: #b3261e; }
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
-/* View controls: the preset <select>, the time toggle, the raw-data link. */
+/* Inline view controls: the show-time toggle wrapper and the raw-data link. */
 .q-ctl { display: inline-flex; align-items: center; gap: .4rem; }
-.q-select {
-  font: inherit; font-size: .85rem; padding: .25rem 1.6rem .25rem .5rem;
-  border: 1px solid #bbb; border-radius: 6px; background: #fff; color: #1a1a1a; cursor: pointer;
-}
-.q-hint { color: #888; font-size: .78rem; }
+.q-hint { color: #888; font-size: .78rem; white-space: nowrap; }
 
-/* Filter matrix (a <details> with fieldset/legend groups). */
-.q-filters { margin: 0 0 1.2rem; font-size: .85rem; }
-.q-filters > summary { cursor: pointer; color: #2563eb; font-size: .85rem; padding: .2rem 0; }
-.q-filters > summary:hover { text-decoration: underline; }
-.q-filters-body {
-  display: flex; flex-wrap: wrap; gap: .6rem 1.1rem; margin: .6rem 0 .2rem;
+/* Sticky top control bar: the filter panel (left, scales horizontally) and the
+   axis/scale controls box (right) ride above the page so the same controls stay
+   in reach regardless of which graph you're looking at. */
+.q-topbar {
+  position: sticky; top: 0; z-index: 900;
+  display: flex; align-items: flex-start; gap: .6rem; flex-wrap: nowrap;
+  padding: .4rem .6rem; margin-bottom: 1.2rem;
+  background: rgba(255, 255, 255, .96);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border-bottom: 1px solid #e0e0e0;
 }
-.q-fieldset {
-  border: 1px solid #ddd; border-radius: 6px; padding: .3rem .6rem .5rem;
-  margin: 0; min-width: 150px;
+.q-topbar .q-controls {
+  flex: 0 0 auto; margin: 0; gap: .4rem .55rem; flex-wrap: nowrap;
 }
-.q-fieldset legend { font-size: .78rem; color: #555; font-weight: 600; padding: 0 .3rem; }
-.q-check { display: flex; align-items: center; gap: .35rem; font-size: .82rem; padding: .1rem 0; }
+.q-lb-open .q-topbar { display: none; }   /* never compete with the lightbox */
+
+/* Filter panel — an in-flow flex row. The body wraps its pill groups onto 2–3
+   rows (then scrolls vertically) so every toggle stays reachable in tight widths. */
+.q-filterbar {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: .5rem;
+  box-sizing: border-box; font-size: .85rem;
+  background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: .3rem .5rem;
+}
+.q-filterbar[hidden] { display: none; }
+.q-fb-row { display: flex; align-items: center; gap: .5rem; flex: 0 0 auto; }
+.q-fb-toggle {
+  font: inherit; font-size: .8rem; border: 1px solid #bbb; background: #fff;
+  color: #1a1a1a; border-radius: 999px; padding: .2rem .7rem; cursor: pointer; white-space: nowrap;
+}
+.q-fb-toggle:hover { background: #f2f2f2; }
+.q-fb-body {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem;
+  max-height: 5.5rem; overflow-y: auto; padding: .15rem;
+  scrollbar-width: thin; -webkit-overflow-scrolling: touch;
+}
+.q-fb-body[hidden] { display: none; }
+
+/* Pill groups — a label plus inline checkboxes. Each group stays intact on one
+   line (nowrap); whole groups wrap onto the next row as the width runs out. */
+.q-fb-group {
+  display: inline-flex; align-items: center; flex: 0 0 auto; gap: .3rem;
+  white-space: nowrap; border: 1px solid #e3e3e3; border-radius: 8px; padding: .12rem .45rem;
+}
+.q-fb-lab { font-size: .72rem; font-weight: 600; color: #555; }
+.q-check { display: inline-flex; align-items: center; gap: .25rem; font-size: .8rem; white-space: nowrap; }
 .q-mini {
   font: inherit; font-size: .72rem; border: 1px solid #ccc; background: #f6f6f6;
   border-radius: 4px; padding: 0 .35rem; margin-left: .25rem; cursor: pointer; color: #444;
@@ -149,8 +179,7 @@ table.q-table td.bad { color: #b3261e; }
 .q-stack-item .q-metric-cap { font-size: .95rem; margin: 0 0 .25rem; }
 
 /* Visible keyboard focus for every interactive control. */
-.q-tab:focus-visible, .q-chip:focus-visible, .q-select:focus-visible,
-.q-mini:focus-visible, .q-filters > summary:focus-visible,
+.q-tab:focus-visible, .q-mini:focus-visible, .q-fb-toggle:focus-visible,
 .q-tabpanel:focus-visible, table.q-table th:focus-visible,
 .q-check input:focus-visible, .q-dl:focus-visible {
   outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 3px;
@@ -208,14 +237,93 @@ table.q-table td.bad { color: #b3261e; }
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
 
+/* Centre every chart by itself. The static (matplotlib) charts are fixed-size
+   PNG/SVG inside a full-width gallery, so without this they sit left-aligned;
+   centre the figure, its image, and its caption. The interactive SVG charts are
+   already width:100%, but margin:auto guards any chart narrower than its box
+   (e.g. the lossless bars at min-width:600px). Scoped to [data-img-tabs] so the
+   lightbox figures (.q-lb-fig) are untouched. */
+[data-img-tabs] figure     { margin: 1rem auto; text-align: center; }
+[data-img-tabs] figure img { display: block; margin: 0 auto; }
+[data-img-tabs] figcaption { text-align: center; }
+.q-chart svg, #q-lossless-bars svg { margin-left: auto; margin-right: auto; }
+
 /* Full-bleed the chart areas past the readable text column (body is capped at
    ~1100px) so a single full-width chart per tab really uses the browser width.
    Only kicks in once the viewport is wider than the text column; the negative
    margin centres the wider block without causing horizontal scroll. The readable
    prose/notes stay in the narrow column. */
 @media (min-width: 1180px) {
-  #q-tabs, [data-img-tabs], #q-lossless, #q-decoders {
+  #q-rd, [data-img-tabs], #q-lossless, #q-decoders {
     width: min(96vw, 1700px);
     margin-left: calc(-1 * (min(96vw, 1700px) - 100%) / 2);
   }
 }
+
+/* ===== No-scroll dashboard ================================================ */
+/* The whole report is a fixed-height app: a sticky control bar, a left nav rail,
+   and a single-graph stage that is the only scrolling region. */
+body.dash {
+  margin: 0; max-width: none; padding: 0; height: 100vh; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+body.dash .q-topbar { margin-bottom: 0; }
+.dash-h1 {
+  flex: 0 0 auto; margin: 0; padding: 0 .4rem 0 0; border: 0;
+  font-size: 1rem; font-weight: 700; white-space: nowrap;
+}
+.dash-info-btn {
+  flex: 0 0 auto; font: inherit; font-size: .82rem; cursor: pointer; white-space: nowrap;
+  border: 1px solid #cfcfcf; background: #fff; color: #1a1a1a;
+  border-radius: 999px; padding: .25rem .7rem;
+}
+.dash-info-btn:hover { background: #f2f2f2; }
+
+#dash-main {
+  flex: 1 1 auto; min-height: 0;
+  display: grid; grid-template-columns: minmax(190px, 240px) 1fr;
+}
+#dash-nav {
+  overflow-y: auto; border-right: 1px solid #e6e6e6; background: #fafafa;
+  padding: .7rem .6rem; display: flex; flex-direction: column; gap: .5rem;
+}
+.dash-title {
+  font-size: .72rem; font-weight: 700; color: #999;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.dash-cats, .dash-graphs { display: flex; flex-direction: column; gap: .15rem; }
+.dash-graphs { border-top: 1px solid #e6e6e6; padding-top: .5rem; }
+.dash-cat, .dash-graph {
+  font: inherit; text-align: left; border: 1px solid transparent; background: none;
+  color: #444; padding: .35rem .55rem; border-radius: 6px; cursor: pointer;
+}
+.dash-cat { font-weight: 600; font-size: .9rem; }
+.dash-graph { font-size: .85rem; padding-left: .85rem; }
+.dash-cat:hover, .dash-graph:hover { background: #ececec; color: #1a1a1a; }
+.dash-cat.active, .dash-graph.active { background: #1a1a1a; color: #fff; }
+.dash-prevnext { display: flex; gap: .4rem; margin-top: auto; padding-top: .6rem; }
+.dash-step {
+  flex: 1 1 0; font: inherit; font-size: .8rem; cursor: pointer;
+  border: 1px solid #cfcfcf; background: #fff; color: #1a1a1a;
+  border-radius: 6px; padding: .3rem .2rem;
+}
+.dash-step:hover { background: #f2f2f2; }
+
+#dash-stage { overflow: auto; min-width: 0; padding: 1rem 1.2rem 2rem; }
+#dash-stage > [hidden] { display: none; }
+
+/* The rail drives the galleries, so hide their in-stage tab row; and the stage
+   is already wide, so drop the centered-column full-bleed break-out. */
+body.dash [data-img-tabs] > .q-tablist { display: none; }
+body.dash #q-rd, body.dash #q-lossless, body.dash #q-decoders, body.dash [data-img-tabs] {
+  width: auto; max-width: none; margin-left: auto; margin-right: auto;
+}
+
+.dash-cat:focus-visible, .dash-graph:focus-visible, .dash-step:focus-visible,
+.dash-info-btn:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+
+/* Information modal body (the run-info hero card cloned from #dash-info). */
+.q-info-body { padding: 1rem 1.3rem 1.4rem; overflow: auto; }
+.q-info-body h2 { margin-top: 1.4rem; }
+.q-info-body h2:first-child { margin-top: .2rem; }
+.q-info-body table { margin: .5rem 0 1rem; }

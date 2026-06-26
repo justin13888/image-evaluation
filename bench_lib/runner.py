@@ -72,6 +72,7 @@ from bench_lib.scaling import (
     SCALING_LADDER_MP,
     build_scaling_tasks,
     generate_ladder,
+    select_representative_sources,
     select_scaling_sources,
     write_scaling_outputs,
 )
@@ -1409,13 +1410,36 @@ def _anchor_label(impl_name: str, tasks: BenchList) -> str:
     return min(numeric, key=lambda lv: abs(lv[1] - target_f))[0]
 
 
+def _lossless_endpoint_labels(impl_name: str, impl_tasks: BenchList) -> set[str]:
+    """The min- and max-effort labels actually emitted for a swept lossless encoder.
+
+    The lossless size-vs-effort report curve is anchored at these two extremes
+    (issue #26): timing them rigorously lets the report trust the curve's endpoints
+    even when the interior points are single-pass. Ordered by the schema's declared
+    low→high sweep and restricted to the labels still present after any
+    ``--quality-steps`` subsampling. Empty for lossy or single-knob encoders (no
+    effort axis)."""
+    schema = schema_for(impl_name)
+    if not (schema.lossless and schema.quality_axis):
+        return set()
+    emitted = {t.label for t in impl_tasks}
+    ordered = [
+        lbl
+        for v in schema.quality_sweep
+        if (lbl := quality_label(schema.quality_axis, v)) in emitted
+    ]
+    return {ordered[0], ordered[-1]} if ordered else set()
+
+
 def _select_timing_tasks(tasks: BenchList, perf: PerfMode) -> BenchList:
     """Subset of sweep tasks to time rigorously under hyperfine.
 
-    ``all`` → every operating point; ``anchor`` → per implementation, only the
-    point nearest its perf preset (all images at that point), reproducing the old
-    performance suite's single-preset coverage. Null baselines (a single point)
-    are always included."""
+    ``all`` → every operating point. ``anchor`` → per implementation, the point
+    nearest its perf preset (all images at that point), reproducing the old
+    performance suite's single-preset coverage, PLUS each lossless encoder's min/max
+    effort endpoints so the report's size-vs-effort curve has statistically
+    significant extremes (issue #26). Null baselines (a single point) are always
+    included."""
     if perf == "all":
         return list(tasks)
     by_impl: Dict[str, BenchList] = {}
@@ -1423,8 +1447,9 @@ def _select_timing_tasks(tasks: BenchList, perf: PerfMode) -> BenchList:
         by_impl.setdefault(t.impl.name, []).append(t)
     chosen: BenchList = []
     for name, impl_tasks in by_impl.items():
-        anchor = _anchor_label(name, impl_tasks)
-        chosen.extend(t for t in impl_tasks if t.label == anchor)
+        labels = {_anchor_label(name, impl_tasks)}
+        labels |= _lossless_endpoint_labels(name, impl_tasks)
+        chosen.extend(t for t in impl_tasks if t.label in labels)
     return chosen
 
 
@@ -1610,11 +1635,23 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
 
     Always compute-only (``--discard``): discarding output removes filesystem-write
     variance as a confound (issue #9). ``--perf anchor`` times each impl's preset
-    point; ``--perf all`` times every operating point. Each selected task runs at
-    both threading modes (--quick collapses to all-cores). Writes raw.json, a
-    manifest, and the per-pass timing summary into `result_dir`."""
+    point plus each lossless encoder's min/max effort endpoints (issue #26);
+    ``--perf all`` times every operating point. Each selected task runs at both
+    threading modes (--quick collapses to all-cores). Writes raw.json, a manifest,
+    and the per-pass timing summary into `result_dir`."""
     thread_modes = [0] if args.quick else list(THREAD_MODES)
     selected = _select_timing_tasks(tasks, args.perf)
+
+    # Bound the overlay to a representative image subset (keeps a full clic2025 run
+    # tractable). Timing is content-light at fixed resolution and is a secondary
+    # axis, so a few images stay statistically significant while cutting cost; the
+    # quality sweep still covers every image. ``--perf-images 0`` → all images.
+    if args.perf_images and args.perf_images > 0:
+        distinct = list(dict.fromkeys(t.source_path for t in selected))
+        keep = set(select_representative_sources(distinct, args.perf_images))
+        if keep:
+            selected = [t for t in selected if t.source_path in keep]
+    perf_image_count = len({t.source_path for t in selected})
 
     # Clone each selected task per thread mode, baking in the real iteration/warmup
     # counts and the discard policy so name() and cmd() reflect the timed run.
@@ -1646,6 +1683,8 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
             "formats": args.formats,
             "mode": args.mode,
             "perf": args.perf,
+            "perf_images": args.perf_images,
+            "perf_image_count": perf_image_count,
             "thread_modes": thread_modes,
             "discard_output": True,
             "iterations": args.iterations,
@@ -1679,6 +1718,40 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
         ]
         mem_names = [task.name() for task in timing]
         measure_memory(result_dir, mem_commands, mem_names)
+
+
+def _merge_rigorous_timing(perf_dir: str, qual_dir: str) -> None:
+    """Fold the overlay's isolated single-threaded timings back into the quality
+    metrics (issue #26 anchoring).
+
+    The overlay re-times a selected subset under hyperfine; each timed task's
+    threads=1 command name equals the metric pass's row ``name`` (both are
+    ``task.name()`` at t1 — the all-cores clone carries a different thread tag), so
+    we join on ``name``. Matched rows gain ``time_rigorous_s`` /
+    ``time_rigorous_stddev_s`` / ``time_runs`` (isolated, repeated-trial); the rest
+    keep only single-pass ``time_s``. No-op when either file is missing."""
+    raw_path = os.path.join(perf_dir, "raw.json")
+    metrics_path = os.path.join(qual_dir, "metrics.json")
+    if not (os.path.exists(raw_path) and os.path.exists(metrics_path)):
+        return
+    with open(raw_path) as f:
+        results = json.load(f).get("results", [])
+    by_name = {r["command"]: r for r in results if r.get("command") and r.get("times")}
+    with open(metrics_path) as f:
+        metrics = json.load(f)
+    merged = 0
+    for m in metrics:
+        r = by_name.get(m.get("name"))
+        if r is None:
+            continue
+        m["time_rigorous_s"] = r.get("mean")
+        m["time_rigorous_stddev_s"] = r.get("stddev")
+        m["time_runs"] = len(r.get("times") or [])
+        merged += 1
+    if merged:
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"\n✓ Anchored {merged} metric row(s) with rigorous timing")
 
 
 def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
@@ -1727,9 +1800,14 @@ def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
         json.dump(manifest, f, indent=2)
     print(f"\n✓ {len(tasks)} scaling benchmark(s) across {len(rungs)} ladder rung(s)\n")
 
-    raw = _run_hyperfine_tasks(
-        tasks, scal_dir, list(SCALING_HYPERFINE_FLAGS), args.debug
+    # Quick/demo: a single timed run per rung (skip statistical significance) to
+    # match the rest of the quick path — the log-log slope is only indicative here.
+    scaling_flags = (
+        ["--warmup", "0", "--min-runs", "1", "--max-runs", "1"]
+        if args.quick
+        else list(SCALING_HYPERFINE_FLAGS)
     )
+    raw = _run_hyperfine_tasks(tasks, scal_dir, scaling_flags, args.debug)
     write_scaling_outputs(scal_dir, raw, pixels_by_basename)
     return True
 
@@ -1815,6 +1893,7 @@ def run_sweep(args: RunArgs) -> None:
         perf_dir = os.path.join(bundle, "performance")
         os.makedirs(perf_dir, exist_ok=True)
         _run_timing_overlay(args, tasks, perf_dir)
+        _merge_rigorous_timing(perf_dir, qual_dir)
         suites.append("performance")
 
     # 3. Scaling suite (optional): encode/decode time vs pixel count on a

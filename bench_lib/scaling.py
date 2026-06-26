@@ -76,6 +76,25 @@ def select_scaling_sources(files: List[str], n: int) -> List[str]:
     return [f for f, _ in sized[: max(0, n)]]
 
 
+def select_representative_sources(files: List[str], n: int) -> List[str]:
+    """``n`` source images spread evenly across the pixel-count distribution.
+
+    Unlike :func:`select_scaling_sources` (largest-first), this samples across the
+    whole size range — smallest, largest, and evenly-spaced rungs between — so a
+    timing subset is representative of the dataset's cost spread rather than biased
+    toward the slowest (largest) images. ``n <= 0`` or ``n >= len`` returns every
+    image; ties break on path for determinism."""
+    sized = sorted(((f, image_pixels(f)) for f in files), key=lambda fp: (fp[1], fp[0]))
+    ordered = [f for f, px in sized if px > 0]
+    if n <= 0 or n >= len(ordered):
+        return ordered
+    if n == 1:
+        return [ordered[len(ordered) // 2]]
+    # Even picks across the sorted range, inclusive of both ends.
+    idx = sorted({round(i * (len(ordered) - 1) / (n - 1)) for i in range(n)})
+    return [ordered[i] for i in idx]
+
+
 # One ladder rung: the downscaled PPM plus its actual pixel count (the x-axis).
 Rung = Dict[str, object]  # {"ppm": str, "pixels": int, "target_mp": float}
 
