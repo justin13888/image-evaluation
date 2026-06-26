@@ -542,31 +542,40 @@
 
   // ---- centralized floating filter bar -------------------------------------
 
-  // Every implementation grouped by format, unioning the lossy-encoder, lossless
-  // and decoder datasets so toggling a "test" is consistent everywhere it appears.
-  function implsByFormat() {
-    var map = {};
-    function add(f, n) { if (!f) return; (map[f] = map[f] || {})[n] = 1; }
-    if (AGG_ALL) Object.keys(AGG_ALL).forEach(function (f) {
-      AGG_ALL[f].forEach(function (s) { add(f, s.impl); });
+  // The variants the ACTIVE figure plots — the single source the top-bar lists from,
+  // so it shows strictly what the current graph contains (not a global union across
+  // every view). Derived from the very datasets each renderer plots: AGG_ALL for the
+  // rate-distortion / BD-rate views, LOSSLESS for the lossless views, DECODERS for the
+  // decoder views, and the active section's format tabs for a static gallery. The full
+  // (unfiltered) membership is returned — a variant the user toggled off still belongs
+  // to the figure and stays listed (unchecked) so it can be re-enabled.
+  // Returns { formats:[fmt...], byFormat:{fmt:[impl...]}, hasTests:bool }.
+  function figureVariants() {
+    var kind = state.graphKind;
+    var byFmt = {}, fmtsOnly = {};
+    function addImpl(f, n) { if (!f || !n) return; (byFmt[f] = byFmt[f] || {})[n] = 1; }
+    function addFmt(f) { if (f && f !== "other") fmtsOnly[f] = 1; }
+    if (kind === "rd" || kind === "bdrate") {
+      if (AGG_ALL) Object.keys(AGG_ALL).forEach(function (f) {
+        AGG_ALL[f].forEach(function (s) { addImpl(f, s.impl); });
+      });
+    } else if (kind === "lossless-bars" || kind === "lossless-effort") {
+      Object.keys(LOSSLESS).forEach(function (n) { addImpl(LOSSLESS[n].format, n); });
+    } else if (kind === "decoder-table" || kind === "decoder-chart") {
+      Object.keys(DECODERS).forEach(function (n) { addImpl(DECODERS[n].format, n); });
+    } else if (kind === "gallery") {
+      // Static galleries carry no per-impl tests; their formats are the active
+      // section's tabs/figures (so the bar offers Formats-only filtering).
+      var sec = state.cat ? panelEl(state.cat) : null;
+      if (sec) [].forEach.call(sec.querySelectorAll("[data-format]"), function (n) {
+        addFmt((n.getAttribute("data-format") || "").toLowerCase());
+      });
+    }
+    var byList = {}, hasTests = false;
+    Object.keys(byFmt).forEach(function (f) {
+      byList[f] = Object.keys(byFmt[f]).sort(); hasTests = true; addFmt(f);
     });
-    Object.keys(LOSSLESS).forEach(function (n) { add(LOSSLESS[n].format, n); });
-    Object.keys(DECODERS).forEach(function (n) { add(DECODERS[n].format, n); });
-    var out = {};
-    Object.keys(map).forEach(function (f) { out[f] = Object.keys(map[f]).sort(); });
-    return out;
-  }
-
-  // Formats present in the quality data and/or the static galleries (minus the
-  // non-format "other" gallery group).
-  function allFormats() {
-    var s = {};
-    Object.keys(implsByFormat()).forEach(function (f) { s[f] = 1; });
-    [].forEach.call(document.querySelectorAll("[data-img-tabs] [data-format]"), function (n) {
-      var f = (n.getAttribute("data-format") || "").toLowerCase();
-      if (f && f !== "other") s[f] = 1;
-    });
-    return Object.keys(s).sort();
+    return { formats: Object.keys(fmtsOnly).sort(), byFormat: byList, hasTests: hasTests };
   }
 
   // A filter changed: prune the galleries, then rebuild the rail (categories /
@@ -627,15 +636,17 @@
   }
 
 
-  // Build the bar: Formats + per-format Tests + Metrics + View. Format toggles
-  // reach every chart (interactive + static galleries); Tests/Metrics/View drive
-  // the interactive quality charts. Rebuilt on any change that reshapes it.
+  // Build the bar for the ACTIVE figure: Formats + its per-format Tests. The lists
+  // come from figureVariants(), so the bar shows strictly the variants the current
+  // graph plots. Toggling stays a global hide (state.formatsOff / state.implsOff reach
+  // every figure where a variant appears) — only the listing is per-figure. Rebuilt on
+  // every figure switch (showGraph) and on any change that reshapes it.
   function renderFilterBar() {
     var bar = document.getElementById("q-filterbar");
     if (!bar) return;
-    var fmts = allFormats();
-    var hasQuality = !!document.getElementById("quality-app") && !!AGG_ALL;
-    if (!fmts.length && !hasQuality) { bar.hidden = true; return; }
+    var fv = figureVariants();
+    var fmts = fv.formats;
+    if (!fmts.length) { bar.hidden = true; bar.innerHTML = ""; return; }
     bar.hidden = false;
     bar.innerHTML = "";
 
@@ -683,21 +694,20 @@
       ff.appendChild(lab);
     }
 
-    // Formats — apply everywhere (interactive charts + static galleries).
-    if (fmts.length) {
-      var ff = group("Formats");
-      allNone(ff, fmts, state.formatsOff, onFormatChange);
-      fmts.forEach(function (f) {
-        check(ff, f.toUpperCase(), !state.formatsOff[f], function (on) {
-          if (on) delete state.formatsOff[f]; else state.formatsOff[f] = true;
-          onFormatChange();
-        }, FORMAT_COLORS[f] || PALETTE[0]);
-      });
-    }
+    // Formats present on this figure — toggling is a global hide (also governs the
+    // static galleries), so the whole bar follows from the active figure.
+    var ff = group("Formats");
+    allNone(ff, fmts, state.formatsOff, onFormatChange);
+    fmts.forEach(function (f) {
+      check(ff, f.toUpperCase(), !state.formatsOff[f], function (on) {
+        if (on) delete state.formatsOff[f]; else state.formatsOff[f] = true;
+        onFormatChange();
+      }, FORMAT_COLORS[f] || PALETTE[0]);
+    });
 
-    // Tests (implementations) for each shown format — drive the interactive
-    // charts and double as their legend (swatch = the series' format colour).
-    var ibf = implsByFormat();
+    // Tests (implementations) the active figure plots, per shown format — they drive
+    // the interactive charts and double as their legend (swatch = format colour).
+    var ibf = fv.byFormat;
     Object.keys(ibf).sort().forEach(function (fmt) {
       if (state.formatsOff[fmt]) return;   // hidden-format groups self-prune
       var impls = ibf[fmt];
@@ -1553,6 +1563,7 @@
     }
 
     renderControls();
+    renderFilterBar();   // the bar lists strictly this figure's variants
     renderNav();
     if (stage) stage.scrollTop = 0;
     if (g) announce("Showing " + cat.label + " — " + g.label);
