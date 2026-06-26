@@ -63,6 +63,16 @@ impl BenchmarkImplementation for Rav1eBench {
         enc_config.quantizer = ctx.quantizer;
         enc_config.speed_settings = SpeedSettings::from_preset(ctx.speed);
 
+        // Tag the AV1 bitstream to match the manual full-range BT.709 RGB->YUV
+        // conversion below. rav1e defaults to Limited range + unspecified matrix
+        // coefficients, which would make decoders mis-reconstruct the colors.
+        enc_config.pixel_range = PixelRange::Full;
+        enc_config.color_description = Some(ColorDescription {
+            color_primaries: ColorPrimaries::BT709,
+            transfer_characteristics: TransferCharacteristics::SRGB,
+            matrix_coefficients: MatrixCoefficients::BT709,
+        });
+
         let cfg = Config::new().with_encoder_config(enc_config);
 
         let mut enc_ctx = cfg
@@ -156,16 +166,24 @@ impl BenchmarkImplementation for Rav1eBench {
             }
         }
 
-        // TODO: Verify avif_serialize produces valid AVIF files.
-        // The raw AV1 bitstream from rav1e needs proper ISOBMFF container wrapping.
-        // Test output files with `avifenc --info` or similar tools.
-        let output = avif_serialize::serialize_to_vec(
-            &encoded_data,
-            None,
-            ctx.width as u32,
-            ctx.height as u32,
-            8,
-        );
+        // Wrap the raw AV1 bitstream into an AVIF (ISOBMFF) container. The colr
+        // box must match the bitstream's color description (full-range BT.709)
+        // and the actual chroma subsampling, otherwise the reference decoder
+        // reconstructs the wrong pixels. `serialize_to_vec` would emit no colr
+        // box at all and mislabel chroma as 4:4:4, so build the muxer explicitly.
+        // Note: these constants are avif_serialize's own enums (variants `Bt709`,
+        // `Srgb`), distinct from the rav1e enums in scope above.
+        let mut aviffy = avif_serialize::Aviffy::new();
+        aviffy
+            .set_matrix_coefficients(avif_serialize::constants::MatrixCoefficients::Bt709)
+            .set_color_primaries(avif_serialize::constants::ColorPrimaries::Bt709)
+            .set_transfer_characteristics(avif_serialize::constants::TransferCharacteristics::Srgb)
+            .set_full_color_range(true)
+            .set_chroma_subsampling(match ctx.chroma_sampling {
+                ChromaSampling::Cs420 => (true, true),
+                _ => (false, false),
+            });
+        let output = aviffy.to_vec(&encoded_data, None, ctx.width as u32, ctx.height as u32, 8);
 
         Ok(output)
     }
