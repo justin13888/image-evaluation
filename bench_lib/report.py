@@ -342,6 +342,11 @@ def _quality_section(qual_dir: str) -> Optional[dict]:
         "these results as a reproducible guide for narrowing options &mdash; "
         "<em>not</em> a substitute for a controlled human subjective study (e.g. "
         "MOS) when determining the genuinely best-looking option.</div>"
+        "<p class='muted'>A timing axis that plots single-pass wall-clocks is "
+        "flagged with a <em>*</em>; the Lossless size-vs-effort chart is the "
+        "exception — its lowest/highest-effort endpoints are re-timed rigorously "
+        "(isolated, repeated runs, with &plusmn;&sigma; whiskers) so its extremes "
+        "are trustworthy even though interior points stay single-pass.</p>"
     )
 
     # One stage panel per graph group; the rail labels them, so the panels carry
@@ -354,9 +359,12 @@ def _quality_section(qual_dir: str) -> Optional[dict]:
         "<p class='q-note'>Lossless encoders produce a pixel-identical image, so "
         "they differ only in file size — lower bits-per-pixel (bpp) is better. The "
         "leaderboard ranks each encoder by its smallest achievable bpp; the "
-        "size-vs-effort chart traces how bpp falls as compression effort rises "
-        "(single-knob encoders, having no effort axis, appear as one labelled "
-        "diamond), with bubble size encoding mean encode time.</p>"
+        "size-vs-effort chart plots bpp against the <em>encode time</em> each effort "
+        "setting costs, so more effort moves right (slower) and usually down "
+        "(smaller). The lowest- and highest-effort endpoints are timed rigorously "
+        "(repeated, isolated runs, shown with &plusmn;&sigma; whiskers) so the "
+        "curve's extremes are trustworthy; interior points are single-pass and "
+        "joined by a spline. Single-knob encoders appear as one labelled diamond.</p>"
         "<div class='q-fidelity-note'><b>What these mean.</b> Lossless encoders "
         "all reproduce the source <b>pixel-for-pixel</b>, so correctness is a "
         "given and they compete only on size: <b>bpp</b> is the encoded bits per "

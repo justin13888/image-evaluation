@@ -70,6 +70,19 @@
     decode_time_s: { key: "decode_time_s", name: "decode time", title: "Decode time (s)", fmt: fmtTime },
   };
 
+  // Interactive timing is a single-pass wall-clock (one run, no warmup) measured
+  // under the parallel pool — indicative, not statistically rigorous. Any axis that
+  // plots encode/decode time is flagged with a '*' + this footnote; the rigorous,
+  // repeated-trial numbers live in the Performance suite. The lossless size-vs-effort
+  // chart overrides the text when its endpoints are rigorously anchored (issue #26).
+  var TIMING_CAVEAT =
+    "* Encode/decode time is a single-pass wall-clock (one run, no warmup) — " +
+    "indicative, not statistically rigorous. See the Performance suite for " +
+    "isolated, repeated-trial timing.";
+  function timingNoteHTML(text) {
+    return '<p class="q-note q-timing-note">' + (text || TIMING_CAVEAT) + "</p>";
+  }
+
   // state
   var state = {
     cat: null,                 // active category id (quality | lossless | … | sec:perf)
@@ -83,7 +96,7 @@
     implsOff: {},              // impl name -> true (hidden everywhere; its legend swatch off)
     formatsOff: {},            // lowercase format key -> true (format hidden everywhere)
     barCollapsed: false,       // filter panel minimised to its header
-    showTime: { rd: true, lossless: true },
+    showTime: { rd: true },    // encode-time bubbles on the RD size views
   };
 
   // ---- data helpers --------------------------------------------------------
@@ -761,9 +774,10 @@
       host.appendChild(scGroup);
     }
 
-    // Encode-time bubbles — meaningful on the size RD chart and the lossless
-    // size-vs-effort chart (both encode bubble size from mean encode time).
-    var timeKey = kind === "rd" ? "rd" : kind === "lossless-effort" ? "lossless" : null;
+    // Encode-time bubbles — meaningful on the size RD chart (bubble size encodes
+    // mean encode time). The lossless size-vs-effort chart puts time on its x-axis
+    // instead, so it has no bubble toggle.
+    var timeKey = kind === "rd" ? "rd" : null;
     if (timeKey) {
       var tWrap = el("span", { class: "q-ctl" });
       var tcb = el("input", { type: "checkbox", id: "q-showtime" });
@@ -959,9 +973,20 @@
       // for a legacy blob that predates the field. These render as a distinct labeled
       // marker instead of a lone dot lost among the curve endpoints.
       var single = d.axis != null ? d.axis === "" : n < 2;
-      var points = d.points.map(function (p, i) {
-        return { x: n > 1 ? i / (n - 1) : 1, y: p.bpp, setting: p.value || p.label, t: p.time_s };
+      // X is the time each effort cost, so the curve is honestly scaled by cost
+      // (issue #26): rigorously-timed endpoints (and any --perf all points) use the
+      // isolated mean; interior points fall back to the single-pass wall-clock.
+      var points = d.points.map(function (p) {
+        var rig = isNum(p.time_rigorous_s);
+        var x = rig ? p.time_rigorous_s : isNum(p.time_s) ? p.time_s : 0;
+        return {
+          x: x, y: p.bpp, setting: p.value || p.label, t: x,
+          rig: rig, sd: rig ? p.time_stddev_s || 0 : 0, runs: rig ? p.runs || 0 : 0,
+        };
       });
+      // Draw the spline in time order so adjacent points connect left→right; the
+      // effort progression still reads along the curve and lives in the tooltip.
+      points.sort(function (a, b) { return a.x - b.x; });
       var di = dashByFmt[d.format] || 0;
       dashByFmt[d.format] = di + 1;
       return {
@@ -973,21 +998,31 @@
     // checkboxes there are the legend, so no per-chart legend is drawn here.
     var vis = series.filter(function (s) { return !state.implsOff[s.impl]; });
     if (!vis.length) {
-      host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort (nothing shown)" viewBox="0 0 ' +
+      host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus encode time (nothing shown)" viewBox="0 0 ' +
         VBW + " " + VBH + '"><text x="' + VBW / 2 + '" y="' + VBH / 2 +
         '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
       return;
     }
     var allPts = [];
     vis.forEach(function (s) { s.points.forEach(function (p) { allPts.push(p); }); });
-    var scale = state.showTime.lossless ? timeScale(allPts) : null;
-    var ys = [];
-    vis.forEach(function (s) { s.points.forEach(function (p) { ys.push(p.y); }); });
+    var xs = allPts.map(function (p) { return p.x; });
+    var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+    var xticks = linTicks(xmin, xmax, 6);
+    var dxmin = Math.min(xmin, xticks[0]), dxmax = Math.max(xmax, xticks[xticks.length - 1]);
+    if (dxmax === dxmin) dxmax = dxmin + 1;
+    var ys = allPts.map(function (p) { return p.y; });
     var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
     var yticks = linTicks(ymin, ymax, 6);
     var dymin = Math.min(ymin, yticks[0]), dymax = Math.max(ymax, yticks[yticks.length - 1]);
     if (dymax === dymin) dymax = dymin + 1;
-    function sx(x) { return X0 + x * (X1 - X0); }
+    // Significance of the visible points drives the axis mark + footnote.
+    var nRig = 0, nTot = 0, minRuns = Infinity;
+    allPts.forEach(function (p) {
+      nTot++;
+      if (p.rig) { nRig++; if (p.runs) minRuns = Math.min(minRuns, p.runs); }
+    });
+    var marked = nRig < nTot;   // a '*' only when some plotted time is single-pass
+    function sx(x) { return X0 + (x - dxmin) / (dxmax - dxmin) * (X1 - X0); }
     function sy(y) { return Y1 - (y - dymin) / (dymax - dymin) * (Y1 - Y0); }
 
     var svg = [], hits = [];
@@ -997,29 +1032,38 @@
       svg.push('<line class="q-grid" x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '"/>');
       svg.push('<text class="q-tick" x="' + (X0 - 8) + '" y="' + (+y + 4) + '" text-anchor="end">' + esc(fmtNum(t)) + "</text>");
     });
-    [[0, "low"], [1, "high"]].forEach(function (tk) {
-      var x = sx(tk[0]).toFixed(1);
+    xticks.forEach(function (tk) {
+      if (tk < dxmin - 1e-9 || tk > dxmax + 1e-9) return;
+      var x = sx(tk).toFixed(1);
       svg.push('<line class="q-grid" x1="' + x + '" y1="' + Y0 + '" x2="' + x + '" y2="' + Y1 + '"/>');
-      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + tk[1] + "</text>");
+      svg.push('<text class="q-tick" x="' + x + '" y="' + (Y1 + 18) + '" text-anchor="middle">' + esc(fmtTime(tk)) + "</text>");
     });
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) +
-      '" text-anchor="middle">Compression effort (low → high)</text>');
+      '" text-anchor="middle">Encode time (s)' + (marked ? " *" : "") + "</text>");
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) +
       ') rotate(-90)" text-anchor="middle">Bits per pixel (lower is better)</text>');
     // Swept encoders draw a curve + filled points now; single-knob encoders (no effort
     // axis) are collected and drawn afterwards as labelled diamonds with de-collided
     // labels, so they don't pile up on the high-effort endpoints.
+    // A horizontal ±σ whisker marks each rigorously-timed (anchored) point.
+    function whisker(p, color) {
+      if (!(p.rig && p.sd > 0)) return;
+      var wx0 = sx(Math.max(dxmin, p.x - p.sd)).toFixed(1);
+      var wx1 = sx(Math.min(dxmax, p.x + p.sd)).toFixed(1);
+      var wy = sy(p.y).toFixed(1);
+      svg.push('<line class="q-whisker" x1="' + wx0 + '" y1="' + wy + '" x2="' + wx1 + '" y2="' + wy +
+        '" stroke="' + color + '" stroke-width="1.5" stroke-linecap="round"/>');
+    }
     var singles = [];
     vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
         pts.push({ x: px, y: py });
-        var r = scale ? scale.r(p.t) : PT_R;
-        hits.push({ sx: px, sy: py, r: r, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
-        if (s.single) singles.push({ cx: px, cy: py, r: Math.max(r, PT_R), color: s.color, impl: s.impl });
+        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t, rig: p.rig, runs: p.runs, sd: p.sd });
+        if (s.single) singles.push({ cx: px, cy: py, r: PT_R, color: s.color, impl: s.impl, p: p });
       });
       if (s.single) return;
       if (s.points.length > 1) {
@@ -1027,9 +1071,10 @@
           (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       }
       s.points.forEach(function (p) {
-        var r = scale ? scale.r(p.t) : PT_R;
+        whisker(p, s.color);
         svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) +
-          '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
+          '" r="' + PT_R.toFixed(1) + '" fill="' + s.color + '"' +
+          (p.rig ? ' stroke="#1a1a1a" stroke-width="1.2"' : "") + "/>");
       });
     });
     // A single-knob encoder is one operating point: a hollow diamond at the high end +
@@ -1038,6 +1083,7 @@
     singles.sort(function (a, b) { return a.cy - b.cy; });
     var lastLabelY = -1e9, LABEL_GAP = 13;
     singles.forEach(function (m) {
+      whisker(m.p, m.color);
       var rr = m.r;
       svg.push('<path class="q-pt-single" d="M' + m.cx.toFixed(1) + "," + (m.cy - rr).toFixed(1) +
         "L" + (m.cx + rr).toFixed(1) + "," + m.cy.toFixed(1) + "L" + m.cx.toFixed(1) + "," + (m.cy + rr).toFixed(1) +
@@ -1053,16 +1099,29 @@
         '" text-anchor="end">' + esc(m.impl) + "</text>");
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
-    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort" viewBox="0 0 ' + VBW + " " + VBH +
-      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
-      (scale ? sizeLegendHTML(scale, "encode time") : "") +
+
+    var runsTxt = minRuns === Infinity ? "" : minRuns + " ";
+    var note;
+    if (nRig === 0) {
+      note = timingNoteHTML();
+    } else if (nRig === nTot) {
+      note = timingNoteHTML("Encode times are isolated, repeated-trial measurements (" + runsTxt + "runs each).");
+    } else {
+      note = timingNoteHTML("* Whiskered points are rigorously timed (" + runsTxt +
+        "runs, ±σ); interior points are single-pass wall-clocks, joined by a spline — the trusted extremes anchor the curve.");
+    }
+    host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus encode time" viewBox="0 0 ' + VBW + " " + VBH +
+      '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" + note +
       '<div class="q-tooltip" hidden></div>';
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +
         '<span class="k">setting</span> ' + esc(best.setting) + "<br>" +
         '<span class="k">bpp</span> ' + best.bpp.toFixed(3) +
-        (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "");
+        (isNum(best.t) && best.t > 0
+          ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) +
+            (best.rig ? " (" + best.runs + " runs ±" + fmtTime(best.sd || 0) + ")" : " (single-pass)")
+          : "");
     });
   }
 

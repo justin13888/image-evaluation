@@ -140,9 +140,10 @@ def lossless_efficiency(
     source. ``points`` is ordered low-effort -> high-effort using the schema's
     declared sweep, so the size-vs-effort curve reads left-to-right.
 
-    Returns ``{impl: {format, best_bpp, best_label, ratio, points}}`` where each
-    point is ``{label, value, bpp}``. Encoders with no valid lossless row are
-    omitted."""
+    Returns ``{impl: {format, axis, best_bpp, best_label, ratio, points}}`` where
+    each point is ``{label, value, bpp, time_s, time_rigorous_s, time_stddev_s,
+    runs}`` — the rigorous fields set only on the endpoints the timing overlay
+    re-measured. Encoders with no valid lossless row are omitted."""
     rows = [
         m
         for m in metrics
@@ -157,11 +158,34 @@ def lossless_efficiency(
         agg: Dict[str, Dict[str, Any]] = {}
         for m in impl_rows:
             a = agg.setdefault(
-                m["label"], {"value": m["quality_value"], "sum": 0.0, "n": 0, "t": 0.0}
+                m["label"],
+                {
+                    "value": m["quality_value"],
+                    "sum": 0.0,
+                    "n": 0,
+                    "t": 0.0,
+                    "rt_sum": 0.0,
+                    "rt_sq": 0.0,
+                    "rt_var": 0.0,
+                    "rt_n": 0,
+                    "runs": 0,
+                },
             )
             a["sum"] += m["bpp"]
             a["t"] += m.get("time_s") or 0.0
             a["n"] += 1
+            # Fold the rigorous-timing overlay's isolated endpoint measurements
+            # (issue #26): only rows the overlay actually re-timed carry these, and
+            # only repeated runs (>1) count as statistically significant.
+            rt = m.get("time_rigorous_s")
+            runs = m.get("time_runs") or 0
+            if rt is not None and runs > 1:
+                sd = m.get("time_rigorous_stddev_s") or 0.0
+                a["rt_sum"] += rt
+                a["rt_sq"] += rt * rt
+                a["rt_var"] += sd * sd
+                a["rt_n"] += 1
+                a["runs"] = runs if a["runs"] == 0 else min(a["runs"], runs)
         # Canonical low->high effort order from the schema's sweep; any labels not
         # in the sweep (e.g. the single "lossless" point) keep insertion order.
         schema = schema_for(impl)
@@ -173,15 +197,37 @@ def lossless_efficiency(
         labels = [lbl for lbl in ordered if lbl in agg] + [
             lbl for lbl in agg if lbl not in ordered
         ]
-        points = [
-            {
-                "label": lbl,
-                "value": agg[lbl]["value"],
-                "bpp": agg[lbl]["sum"] / agg[lbl]["n"],
-                "time_s": agg[lbl]["t"] / agg[lbl]["n"],
-            }
-            for lbl in labels
-        ]
+
+        def _rig(a):
+            """Mean / pooled-σ / run-count of the rigorous endpoint timing across
+            images for one effort step (None when no image was rigorously timed)."""
+            k = a["rt_n"]
+            if k == 0:
+                return None, None, 0
+            mean = a["rt_sum"] / k
+            within = a["rt_var"] / k
+            between = max(a["rt_sq"] / k - mean * mean, 0.0)
+            return mean, (within + between) ** 0.5, a["runs"]
+
+        points = []
+        for lbl in labels:
+            a = agg[lbl]
+            rmean, rstd, rruns = _rig(a)
+            points.append(
+                {
+                    "label": lbl,
+                    "value": a["value"],
+                    "bpp": a["sum"] / a["n"],
+                    "time_s": a["t"] / a["n"],
+                    # Isolated, repeated-trial endpoint timing (issue #26): None on
+                    # interior/single-pass points. The report plots x by these where
+                    # present, falling back to time_s, and uses runs > 1 to mark a
+                    # point as statistically anchored.
+                    "time_rigorous_s": rmean,
+                    "time_stddev_s": rstd,
+                    "runs": rruns,
+                }
+            )
         best = min(points, key=lambda p: p["bpp"])
         result[impl] = {
             "format": impl_rows[0]["format"],
