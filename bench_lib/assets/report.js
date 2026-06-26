@@ -32,7 +32,8 @@
   var PARETO = readJSON("quality-pareto") || {};
   var BDRATE = readJSON("quality-bdrate") || {};
   // Precomputed lossless compression-efficiency summary (issue #26):
-  // { impl: {format, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
+  // { impl: {format, axis, best_bpp, best_label, ratio, points:[{label,value,bpp}]} }.
+  // `axis` is the swept effort knob ("" = single-knob encoder, no effort sweep).
   var LOSSLESS = readJSON("quality-lossless") || {};
   // Precomputed decoder fidelity/speed summary:
   // { impl: {format, mean_time_s, mean_bpp, count, bit_exact, worst_psnr, basis, points} }.
@@ -943,6 +944,11 @@
     var series = impls.map(function (impl) {
       var d = LOSSLESS[impl];
       var n = d.points.length;
+      // A single-knob encoder has no effort axis — one operating point, not a sweep.
+      // Trust the raw-data metadata (empty `axis`); fall back to the point count only
+      // for a legacy blob that predates the field. These render as a distinct labeled
+      // marker instead of a lone dot lost among the curve endpoints.
+      var single = d.axis != null ? d.axis === "" : n < 2;
       var points = d.points.map(function (p, i) {
         return { x: n > 1 ? i / (n - 1) : 1, y: p.bpp, setting: p.value || p.label, t: p.time_s };
       });
@@ -950,7 +956,7 @@
       dashByFmt[d.format] = di + 1;
       return {
         impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
-        dash: DASHES[di % DASHES.length], points: points,
+        dash: DASHES[di % DASHES.length], points: points, single: single,
       };
     });
     // Series visibility follows the Tests filter (state.implsOff); the swatched
@@ -992,6 +998,10 @@
       '" text-anchor="middle">Compression effort (low → high)</text>');
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) +
       ') rotate(-90)" text-anchor="middle">Bits per pixel (lower is better)</text>');
+    // Swept encoders draw a curve + filled points now; single-knob encoders (no effort
+    // axis) are collected and drawn afterwards as labelled diamonds with de-collided
+    // labels, so they don't pile up on the high-effort endpoints.
+    var singles = [];
     vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
@@ -999,7 +1009,9 @@
         pts.push({ x: px, y: py });
         var r = scale ? scale.r(p.t) : PT_R;
         hits.push({ sx: px, sy: py, r: r, color: s.color, impl: s.impl, setting: p.setting, bpp: p.y, t: p.t });
+        if (s.single) singles.push({ cx: px, cy: py, r: Math.max(r, PT_R), color: s.color, impl: s.impl });
       });
+      if (s.single) return;
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' +
           (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
@@ -1009,6 +1021,26 @@
         svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) +
           '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
       });
+    });
+    // A single-knob encoder is one operating point: a hollow diamond at the high end +
+    // a direct label, so it's unmistakable and visibly matches its Best-bpp row. Labels
+    // are nudged down to a minimum gap when bpps coincide (a thin leader links each).
+    singles.sort(function (a, b) { return a.cy - b.cy; });
+    var lastLabelY = -1e9, LABEL_GAP = 13;
+    singles.forEach(function (m) {
+      var rr = m.r;
+      svg.push('<path class="q-pt-single" d="M' + m.cx.toFixed(1) + "," + (m.cy - rr).toFixed(1) +
+        "L" + (m.cx + rr).toFixed(1) + "," + m.cy.toFixed(1) + "L" + m.cx.toFixed(1) + "," + (m.cy + rr).toFixed(1) +
+        "L" + (m.cx - rr).toFixed(1) + "," + m.cy.toFixed(1) + 'Z" fill="#fff" stroke="' + m.color + '" stroke-width="2"/>');
+      var ly = Math.max(m.cy + 4, lastLabelY + LABEL_GAP);
+      lastLabelY = ly;
+      var lx = m.cx - rr - 5;
+      if (ly - (m.cy + 4) > 1) {
+        svg.push('<line class="q-grid" x1="' + (m.cx - rr).toFixed(1) + '" y1="' + m.cy.toFixed(1) +
+          '" x2="' + (lx + 2).toFixed(1) + '" y2="' + (ly - 4).toFixed(1) + '"/>');
+      }
+      svg.push('<text class="q-ll-name" x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1) +
+        '" text-anchor="end">' + esc(m.impl) + "</text>");
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
     host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Bits per pixel versus compression effort" viewBox="0 0 ' + VBW + " " + VBH +
