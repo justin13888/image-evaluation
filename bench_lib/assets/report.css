@@ -111,7 +111,7 @@ table.q-table td.q-approx { color: #3a6ea5; }
    in reach regardless of which graph you're looking at. */
 .q-topbar {
   position: sticky; top: 0; z-index: 900;
-  display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap;
+  display: flex; align-items: flex-start; gap: .6rem; flex-wrap: nowrap;
   padding: .4rem .6rem; margin-bottom: 1.2rem;
   background: rgba(255, 255, 255, .96);
   -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
@@ -122,8 +122,8 @@ table.q-table td.q-approx { color: #3a6ea5; }
 }
 .q-lb-open .q-topbar { display: none; }   /* never compete with the lightbox */
 
-/* Filter panel — an in-flow flex row that scales HORIZONTALLY: groups stay on
-   one line and the body scrolls sideways rather than wrapping and growing tall. */
+/* Filter panel — an in-flow flex row. The body wraps its pill groups onto 2–3
+   rows (then scrolls vertically) so every toggle stays reachable in tight widths. */
 .q-filterbar {
   flex: 1 1 auto; min-width: 0;
   display: flex; align-items: center; gap: .5rem;
@@ -139,14 +139,14 @@ table.q-table td.q-approx { color: #3a6ea5; }
 .q-fb-toggle:hover { background: #f2f2f2; }
 .q-fb-body {
   flex: 1 1 auto; min-width: 0;
-  display: flex; flex-wrap: nowrap; align-items: center; gap: .35rem .6rem;
-  overflow-x: auto; overflow-y: hidden; padding: .15rem;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem;
+  max-height: 5.5rem; overflow-y: auto; padding: .15rem;
   scrollbar-width: thin; -webkit-overflow-scrolling: touch;
 }
 .q-fb-body[hidden] { display: none; }
 
-/* One-line pill groups — a label plus inline checkboxes; the row scrolls
-   horizontally, it never wraps to a second line. */
+/* Pill groups — a label plus inline checkboxes. Each group stays intact on one
+   line (nowrap); whole groups wrap onto the next row as the width runs out. */
 .q-fb-group {
   display: inline-flex; align-items: center; flex: 0 0 auto; gap: .3rem;
   white-space: nowrap; border: 1px solid #e3e3e3; border-radius: 8px; padding: .12rem .45rem;
