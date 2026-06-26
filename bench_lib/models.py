@@ -12,6 +12,7 @@ from typing import (
     Callable,
     Dict,
     Literal,
+    NotRequired,
     Optional,
     Tuple,
     TypedDict,
@@ -2088,6 +2089,19 @@ class BenchmarkMetrics(TypedDict):
     # single-pass/relative caveat as time_s. Only set on encode rows; None on decode
     # rows (their time_s already *is* a decode time) and on error.
     decode_time_s: Optional[float]
+    # Rigorous-timing overlay results, merged back onto this row by matching its
+    # `name` against the overlay's single-threaded (t1) hyperfine command name (see
+    # runner._merge_rigorous_timing). Present ONLY on the rows the overlay actually
+    # re-timed in isolation (each impl's anchor point + — for lossless encoders —
+    # the min/max effort endpoints), absent otherwise. Unlike time_s these are
+    # isolated, repeated-trial measurements: time_rigorous_s is the mean over
+    # time_runs runs (time_runs > 1 ⇒ statistically significant; --quick's single
+    # run is not), with time_rigorous_stddev_s the run-to-run spread. The report
+    # uses these to anchor the lossless size-vs-effort endpoints and to decide when
+    # a timing axis is rigorous rather than single-pass.
+    time_rigorous_s: NotRequired[Optional[float]]
+    time_rigorous_stddev_s: NotRequired[Optional[float]]
+    time_runs: NotRequired[Optional[int]]
     # Definitive bit-exactness from a direct byte compare of the produced raster
     # against the reference it is scored against (decode rows: vs source for a
     # losslessly-encoded input, else vs the golden decoder; encode rows: vs source,
