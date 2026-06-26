@@ -376,7 +376,8 @@
     });
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
-    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + "</text>");
+    var timeAxis = xAxis.key === "time_s" || xAxis.key === "decode_time_s";
+    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + (timeAxis ? " *" : "") + "</text>");
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">' + esc(info.y) + "</text>");
 
     var hits = [];
@@ -403,6 +404,7 @@
 
     container.innerHTML = plotHTML +
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
+      (timeAxis ? timingNoteHTML() : "") +
       '<div class="q-tooltip" hidden></div>';
 
     // hover / click / keyboard — all share one nearest-point selection
@@ -1153,7 +1155,7 @@
     }
     var tableImpls = impls.filter(function (k) { return !state.implsOff[k]; });
     var html = '<table class="q-table"><thead><tr>' +
-      '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode</th>' +
+      '<th scope="col">Format</th><th scope="col">Decoder</th><th scope="col">Mean decode *</th>' +
       '<th scope="col">Mean input bpp</th><th scope="col">Fidelity</th><th scope="col">Basis</th></tr></thead><tbody>';
     tableImpls.forEach(function (impl) {
       var d = DECODERS[impl];
@@ -1183,7 +1185,7 @@
         "</td><td>" + esc(basis) + "</td></tr>";
     });
     html += "</tbody></table>";
-    host.innerHTML = html;
+    host.innerHTML = html + timingNoteHTML();
   }
 
   // Speed-vs-bitrate scatter: X = input bpp, Y = one-pass decode time. Bit-exact
@@ -1253,7 +1255,7 @@
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Input bits per pixel (bpp)</text>');
-    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better)</text>');
+    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better) *</text>');
     vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
@@ -1277,6 +1279,7 @@
     host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
       '<p class="q-note">Hollow markers = approximate decode (differs from the reference it is scored against); filled = bit-exact.</p>' +
+      timingNoteHTML() +
       '<div class="q-tooltip" hidden></div>';
 
     attachScatterHover(host, hits, function (best) {
