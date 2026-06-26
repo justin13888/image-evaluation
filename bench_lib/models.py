@@ -1602,6 +1602,17 @@ class RunArgs(BaseArgs):
         Field(description="Implementation-type filter (encode/decode; default both)"),
     ] = BenchmarkMode.BOTH
     perf: _PERF_ARG = "anchor"
+    perf_images: Annotated[
+        int,
+        Field(
+            description="Source images the rigorous timing overlay covers (spread "
+            "across the size range). The quality sweep always covers the full "
+            "--sample; timing is content-light at fixed resolution, so a handful of "
+            "images stays statistically significant (each re-run ~10x) while bounding "
+            "cost — the lever that keeps a full clic2025 run tractable. 0 = all "
+            "sampled images."
+        ),
+    ] = 5
     params: _PARAMS_ARG = "variants"
     demo: Annotated[
         bool,

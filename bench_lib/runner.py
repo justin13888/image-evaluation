@@ -72,6 +72,7 @@ from bench_lib.scaling import (
     SCALING_LADDER_MP,
     build_scaling_tasks,
     generate_ladder,
+    select_representative_sources,
     select_scaling_sources,
     write_scaling_outputs,
 )
@@ -1641,6 +1642,17 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
     thread_modes = [0] if args.quick else list(THREAD_MODES)
     selected = _select_timing_tasks(tasks, args.perf)
 
+    # Bound the overlay to a representative image subset (keeps a full clic2025 run
+    # tractable). Timing is content-light at fixed resolution and is a secondary
+    # axis, so a few images stay statistically significant while cutting cost; the
+    # quality sweep still covers every image. ``--perf-images 0`` → all images.
+    if args.perf_images and args.perf_images > 0:
+        distinct = list(dict.fromkeys(t.source_path for t in selected))
+        keep = set(select_representative_sources(distinct, args.perf_images))
+        if keep:
+            selected = [t for t in selected if t.source_path in keep]
+    perf_image_count = len({t.source_path for t in selected})
+
     # Clone each selected task per thread mode, baking in the real iteration/warmup
     # counts and the discard policy so name() and cmd() reflect the timed run.
     timing: BenchList = []
@@ -1671,6 +1683,8 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
             "formats": args.formats,
             "mode": args.mode,
             "perf": args.perf,
+            "perf_images": args.perf_images,
+            "perf_image_count": perf_image_count,
             "thread_modes": thread_modes,
             "discard_output": True,
             "iterations": args.iterations,
