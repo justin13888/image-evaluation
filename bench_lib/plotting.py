@@ -185,6 +185,10 @@ def lossless_efficiency(
         best = min(points, key=lambda p: p["bpp"])
         result[impl] = {
             "format": impl_rows[0]["format"],
+            # The swept effort knob (e.g. "method"/"effort"/"compression"); empty for
+            # a single-knob encoder with no effort axis. The report uses this — not a
+            # point-count guess — to tell a swept curve from a lone operating point.
+            "axis": schema.quality_axis or "",
             "best_bpp": best["bpp"],
             "best_label": best["label"],
             "ratio": _SOURCE_BPP / best["bpp"] if best["bpp"] > 0 else None,
