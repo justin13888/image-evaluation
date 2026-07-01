@@ -18,15 +18,117 @@
 (function () {
   "use strict";
 
-  var PALETTE = [
-    "#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3", "#937860",
-    "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD", "#E377C2", "#17BECF",
-  ];
-  var FORMAT_COLORS = {
-    jpeg: "#DD8452", webp: "#4C72B0", avif: "#55A868",
-    jxl: "#C44E52", png: "#8172B3",
+  // ---- colour system -------------------------------------------------------
+  // Every implementation gets its own deterministic colour, so series never
+  // collapse into one shade per format (they used to, differing only by dash).
+  // A format is a hue *family*: the five base hues are spaced ~72° apart around
+  // the OKLCH wheel for maximum between-format separation. Implementations within
+  // a family slide along a bounded hue arc paired with a lightness ramp. OKLCH is
+  // perceptually uniform, so an even numeric spread reads as an even *perceived*
+  // spread; the lightness component keeps series apart under colour-vision
+  // deficiency / greyscale — the sole non-hue cue now that the lines are solid.
+
+  // Base {L,C,H} per format — hues at ~72° spacing, kept near each format's prior
+  // identity where the grid allowed (jxl≈red, avif≈green, webp≈blue, png≈purple;
+  // jpeg shifts toward gold). Unknown / ppm / null fall back to neutral grey.
+  var FORMAT_OKLCH = {
+    jxl:  { L: 0.62, C: 0.11, H: 13 },
+    jpeg: { L: 0.62, C: 0.11, H: 85 },
+    avif: { L: 0.62, C: 0.11, H: 157 },
+    webp: { L: 0.62, C: 0.11, H: 229 },
+    png:  { L: 0.62, C: 0.11, H: 301 },
   };
-  var DASHES = ["", "7 4", "2 4", "9 4 2 4", "1 4"];
+  var FORMAT_OKLCH_FALLBACK = { L: 0.62, C: 0.0, H: 0 };
+  var TONE_ARC = 40;      // total hue arc (deg) spanned by a format's impls
+  var TONE_LSPAN = 0.22;  // total lightness spread across a format's impls
+
+  // OKLab → linear sRGB (Björn Ottosson's matrices).
+  function oklabToLinearRGB(L, a, b) {
+    var l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+    var m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+    var s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+    var l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+    return [
+      4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+      -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+      -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    ];
+  }
+  function inGamut(rgb) {
+    return rgb.every(function (c) { return c >= -1e-4 && c <= 1 + 1e-4; });
+  }
+  function srgbHex(c) {
+    c = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+    var v = Math.max(0, Math.min(255, Math.round(c * 255)));
+    return (v < 16 ? "0" : "") + v.toString(16);
+  }
+  // OKLCH → sRGB hex, gamut-mapped by reducing chroma at constant L,H so an
+  // out-of-gamut request desaturates rather than skewing hue or lightness.
+  function oklchToHex(L, C, H) {
+    var hr = H * Math.PI / 180, ca = Math.cos(hr), sa = Math.sin(hr);
+    function rgbAt(c) { return oklabToLinearRGB(L, c * ca, c * sa); }
+    var rgb = rgbAt(C);
+    if (!inGamut(rgb)) {
+      var lo = 0, hi = C;
+      for (var i = 0; i < 18; i++) {
+        var mid = (lo + hi) / 2;
+        if (inGamut(rgbAt(mid))) lo = mid; else hi = mid;
+      }
+      rgb = rgbAt(lo);
+    }
+    return "#" + srgbHex(rgb[0]) + srgbHex(rgb[1]) + srgbHex(rgb[2]);
+  }
+
+  // An implementation's colour key: drop the -encode/-decode action suffix so a
+  // library reads as one tone across the encode and decoder charts, while tuned
+  // "@variant" runs keep their own tone.
+  function toneKey(impl) { return String(impl).replace(/-(encode|decode)(?=@|$)/, ""); }
+
+  // Per-format sorted roster of tone keys, built once from every embedded dataset
+  // (not the visible subset) so a series keeps the same colour across charts and
+  // however the filters are toggled. { fmt: [key, …] }.
+  var TONE_ROSTER = null;
+  function toneRoster() {
+    if (TONE_ROSTER) return TONE_ROSTER;
+    var byFmt = {};
+    function add(fmt, impl) {
+      if (!fmt || !impl) return;
+      fmt = String(fmt).toLowerCase();
+      (byFmt[fmt] = byFmt[fmt] || {})[toneKey(impl)] = 1;
+    }
+    METRICS.forEach(function (m) { if (m) add(m.format, m.impl); });
+    Object.keys(LOSSLESS).forEach(function (n) { add(LOSSLESS[n] && LOSSLESS[n].format, n); });
+    Object.keys(DECODERS).forEach(function (n) { add(DECODERS[n] && DECODERS[n].format, n); });
+    TONE_ROSTER = {};
+    Object.keys(byFmt).forEach(function (f) { TONE_ROSTER[f] = Object.keys(byFmt[f]).sort(); });
+    return TONE_ROSTER;
+  }
+
+  // The family (format) anchor colour — the arc centre at base lightness.
+  var FMT_COLOR_MEMO = {};
+  function formatColor(fmt) {
+    fmt = String(fmt).toLowerCase();
+    if (FMT_COLOR_MEMO[fmt]) return FMT_COLOR_MEMO[fmt];
+    var b = FORMAT_OKLCH[fmt] || FORMAT_OKLCH_FALLBACK;
+    return (FMT_COLOR_MEMO[fmt] = oklchToHex(b.L, b.C, b.H));
+  }
+
+  // A single implementation's tone within its family. Even spacing across the
+  // roster (t = i/(n-1)) maximises the minimum pairwise separation along the
+  // hue-arc + lightness-ramp locus.
+  var TONE_MEMO = {};
+  function implTone(fmt, impl) {
+    fmt = String(fmt).toLowerCase();
+    var key = toneKey(impl), memoKey = fmt + "|" + key;
+    if (TONE_MEMO[memoKey]) return TONE_MEMO[memoKey];
+    var b = FORMAT_OKLCH[fmt] || FORMAT_OKLCH_FALLBACK;
+    var roster = toneRoster()[fmt] || [key];
+    var i = roster.indexOf(key); if (i < 0) i = 0;
+    var n = roster.length;
+    var t = n > 1 ? i / (n - 1) : 0.5;
+    var hex = oklchToHex(b.L + (t - 0.5) * TONE_LSPAN, b.C, b.H + (t - 0.5) * TONE_ARC);
+    return (TONE_MEMO[memoKey] = hex);
+  }
 
   var METRICS = readJSON("quality-metrics") || [];
   var PARETO = readJSON("quality-pareto") || {};
@@ -328,7 +430,7 @@
 
   // ---- generalized X/Y chart ----------------------------------------------
 
-  // series: [{key,label,color,dash?,points:[{x,y,std,t,step,q,count}]}]
+  // series: [{key,label,color,points:[{x,y,std,t,step,q,count}]}]
   // opts: {xLog, xAxis (X_AXES entry), yInfo (METRIC_INFO entry), showTime, title}
   function renderXYChart(container, series, opts) {
     var info = opts.yInfo, xAxis = opts.xAxis, log = !!opts.xLog;
@@ -434,7 +536,7 @@
         var r = scale ? scale.r(p.t) : PT_R;
         hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, impl: s.implName, format: s.fmt, x: xOf(p), y: p.y, q: p.q, step: p.step, count: p.count, std: p.std, t: p.t, rig: encTime ? (p.rig || null) : null });
       });
-      svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+      svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"/>');
       s.points.forEach(function (p) {
         var r = scale ? scale.r(p.t) : PT_R;
         whisker(p, s.color);
@@ -552,15 +654,14 @@
   // ---- series builders -----------------------------------------------------
 
   // Cross-format rate-distortion: every implementation of every shown format,
-  // mapped to the (x,y) of the active view, coloured by format and dashed per
-  // encoder within a format. `fmt` is carried on each series so a clicked point
+  // mapped to the (x,y) of the active view, coloured by a per-implementation tone
+  // within its format's hue family (solid lines). `fmt` is carried on each series so a clicked point
   // can resolve its image group. The Tests filter (state.implsOff) is the
   // authoritative series selector — renderXYChart drops the hidden ones.
   function seriesForView(AGG, xKey, yKey) {
     var series = [];
     Object.keys(AGG).sort().forEach(function (fmt) {
       if (state.formatsOff[fmt]) return;   // format filtered out in the bar
-      var di = 0;
       AGG[fmt].forEach(function (s) {
         var points = s.points.map(function (p) {
           var x = p.m[xKey], y = p.m[yKey];
@@ -571,10 +672,9 @@
           series.push({
             key: fmt + "/" + s.impl, implName: s.impl, fmt: fmt,
             label: fmt.toUpperCase() + " · " + s.impl,
-            color: FORMAT_COLORS[fmt] || PALETTE[0], dash: DASHES[di % DASHES.length],
+            color: implTone(fmt, s.impl),
             points: points,
           });
-          di++;
         }
       });
     });
@@ -669,8 +769,9 @@
     else renderNav();
   }
 
-  // The Tests groups depend on which formats are shown, so the bar rebuilds too.
-  function onFormatChange() { renderFilterBar(); rerenderAll(); }
+  // The Tests groups depend on which formats are shown; rerenderAll re-renders the
+  // active graph, whose showGraph() rebuilds the bar (once) — no separate call.
+  function onFormatChange() { rerenderAll(); }
 
   // Show/hide static gallery charts (pre-rendered PNGs can't be re-plotted, only
   // shown/hidden) by their data-format within each suite section.
@@ -730,12 +831,21 @@
     var fmts = fv.formats;
     if (!fmts.length) { bar.hidden = true; bar.innerHTML = ""; return; }
     bar.hidden = false;
+
+    // Rebuilding the bar on every toggle would otherwise reset the body's scroll
+    // offset and drop keyboard focus (both accessibility regressions). Snapshot
+    // the scroll position (both axes) and the focused control's stable key, then
+    // restore them after the fresh DOM is in place.
+    var prevBody = document.getElementById("q-fb-body");
+    var prevScroll = prevBody ? { l: prevBody.scrollLeft, t: prevBody.scrollTop } : null;
+    var act = document.activeElement;
+    var prevFocusKey = (act && bar.contains(act)) ? act.getAttribute("data-fbkey") : null;
     bar.innerHTML = "";
 
     var head = el("div", { class: "q-fb-row" });
     var toggle = el("button", {
       type: "button", class: "q-fb-toggle", "aria-controls": "q-fb-body",
-      "aria-expanded": state.barCollapsed ? "false" : "true",
+      "aria-expanded": state.barCollapsed ? "false" : "true", "data-fbkey": "toggle",
     }, (state.barCollapsed ? "▸" : "▾") + " Filters");
     toggle.addEventListener("click", function () {
       state.barCollapsed = !state.barCollapsed;
@@ -755,19 +865,20 @@
       body.appendChild(g);
       return g;
     }
-    function allNone(g, names, off, after) {
+    function allNone(g, names, off, after, groupId) {
       var lg = g.querySelector(".q-fb-lab");
-      var a = el("button", { type: "button", class: "q-mini" }, "all");
-      var n = el("button", { type: "button", class: "q-mini" }, "none");
+      var a = el("button", { type: "button", class: "q-mini", "data-fbkey": "all:" + groupId }, "all");
+      var n = el("button", { type: "button", class: "q-mini", "data-fbkey": "none:" + groupId }, "none");
       a.addEventListener("click", function () { names.forEach(function (k) { delete off[k]; }); after(); });
       n.addEventListener("click", function () { names.forEach(function (k) { off[k] = true; }); after(); });
       lg.appendChild(document.createTextNode(" ")); lg.appendChild(a); lg.appendChild(n);
     }
     // A filter checkbox; an optional colour swatch makes the Tests groups double
-    // as the chart legend (the charts colour every series by its format).
-    function check(ff, label, checked, onToggle, swColor) {
+    // as the chart legend (the charts colour every series by its per-impl tone).
+    // `key` is the stable id used to restore focus across a rebuild.
+    function check(ff, label, checked, onToggle, swColor, key) {
       var lab = el("label", { class: "q-check" });
-      var cb = el("input", { type: "checkbox" });
+      var cb = el("input", { type: "checkbox", "data-fbkey": key });
       cb.checked = checked;
       cb.addEventListener("change", function () { onToggle(cb.checked); });
       lab.appendChild(cb);
@@ -777,34 +888,45 @@
     }
 
     // Formats present on this figure — toggling is a global hide (also governs the
-    // static galleries), so the whole bar follows from the active figure.
+    // static galleries), so the whole bar follows from the active figure. The
+    // Formats swatch stays the family (format) colour; the Tests swatches below
+    // carry each implementation's own tone.
     var ff = group("Formats");
-    allNone(ff, fmts, state.formatsOff, onFormatChange);
+    allNone(ff, fmts, state.formatsOff, onFormatChange, "fmt");
     fmts.forEach(function (f) {
       check(ff, f.toUpperCase(), !state.formatsOff[f], function (on) {
         if (on) delete state.formatsOff[f]; else state.formatsOff[f] = true;
         onFormatChange();
-      }, FORMAT_COLORS[f] || PALETTE[0]);
+      }, formatColor(f), "fmt:" + f);
     });
 
     // Tests (implementations) the active figure plots, per shown format — they drive
-    // the interactive charts and double as their legend (swatch = format colour).
+    // the interactive charts and double as their legend (swatch = the series tone).
     var ibf = fv.byFormat;
     Object.keys(ibf).sort().forEach(function (fmt) {
       if (state.formatsOff[fmt]) return;   // hidden-format groups self-prune
       var impls = ibf[fmt];
       if (!impls.length) return;
       var tf = group(fmt.toUpperCase() + " tests");
-      allNone(tf, impls, state.implsOff, function () { rerenderAll(); renderFilterBar(); });
+      allNone(tf, impls, state.implsOff, rerenderAll, "impl:" + fmt);
       impls.forEach(function (n) {
         check(tf, n, !state.implsOff[n], function (on) {
           if (on) delete state.implsOff[n]; else state.implsOff[n] = true;
           rerenderAll();
-        }, FORMAT_COLORS[fmt] || PALETTE[0]);
+        }, implTone(fmt, n), "impl:" + n);
       });
     });
     // Metric is a Quality nav step (single-select on the rail); X axis + scale
     // live in the controls box. The filter bar is just Formats + Tests.
+
+    // Restore the pre-rebuild scroll offset and keyboard focus (see snapshot above).
+    // focus() uses preventScroll so refocusing an off-screen control can't undo the
+    // scroll we just restored.
+    if (prevScroll) { body.scrollLeft = prevScroll.l; body.scrollTop = prevScroll.t; }
+    if (prevFocusKey) {
+      var refocus = bar.querySelector('[data-fbkey="' + prevFocusKey + '"]');
+      if (refocus) { try { refocus.focus({ preventScroll: true }); } catch (e) { refocus.focus(); } }
+    }
   }
 
   // ---- controls box (axis + scale + show-time + download) ------------------
@@ -1019,7 +1141,7 @@
     rows.forEach(function (r, i) {
       var cy = padT + i * rowH + rowH / 2;
       var bw = maxBpp > 0 ? (r.bpp / maxBpp) * (x1 - x0) : 0;
-      var color = FORMAT_COLORS[r.fmt] || PALETTE[0];
+      var color = implTone(r.fmt, r.impl);
       var ratio = r.ratio ? " · " + r.ratio.toFixed(2) + "×" : "";
       svg.push('<text class="q-ll-name" x="' + (labelW - 8) + '" y="' + (cy + 4) +
         '" text-anchor="end">' + esc(r.impl) + "</text>");
@@ -1033,7 +1155,6 @@
   }
 
   function renderLosslessEffort(host, impls) {
-    var dashByFmt = {};
     var series = impls.map(function (impl) {
       var d = LOSSLESS[impl];
       var n = d.points.length;
@@ -1056,11 +1177,9 @@
       // Draw the spline in time order so adjacent points connect left→right; the
       // effort progression still reads along the curve and lives in the tooltip.
       points.sort(function (a, b) { return a.x - b.x; });
-      var di = dashByFmt[d.format] || 0;
-      dashByFmt[d.format] = di + 1;
       return {
-        impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
-        dash: DASHES[di % DASHES.length], points: points, single: single,
+        impl: impl, color: implTone(d.format, impl),
+        points: points, single: single,
       };
     });
     // Series visibility follows the Tests filter (state.implsOff); the swatched
@@ -1136,8 +1255,7 @@
       });
       if (s.single) return;
       if (s.points.length > 1) {
-        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' +
-          (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"/>');
       }
       s.points.forEach(function (p) {
         whisker(p, s.color);
@@ -1260,7 +1378,6 @@
   // are hollow rings.
   function renderDecoderChart(host, impls) {
     if (!host) return;
-    var dashByFmt = {};
     var series = impls.map(function (impl) {
       var d = DECODERS[impl];
       var byLabel = {};
@@ -1288,11 +1405,9 @@
         // single-pass mean decode time.
         return { x: a.bpp / a.n, y: rig ? rig.t : a.t / a.n, label: a.label, approx: a.approx, worst: a.worst, rig: rig, count: a.n };
       }).sort(function (a, b) { return a.x - b.x; });
-      var di = dashByFmt[d.format] || 0;
-      dashByFmt[d.format] = di + 1;
       return {
-        impl: impl, color: FORMAT_COLORS[d.format] || PALETTE[0],
-        dash: DASHES[di % DASHES.length], points: points,
+        impl: impl, color: implTone(d.format, impl),
+        points: points,
         approxExpected: d.approx_expected,
       };
     }).filter(function (s) { return s.points.length > 0; });
@@ -1361,7 +1476,7 @@
         hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst, approxExpected: s.approxExpected, rig: p.rig || null, count: p.count });
       });
       if (s.points.length > 1) {
-        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
+        svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"/>');
       }
       s.points.forEach(function (p) {
         var cx = sx(p.x).toFixed(1), cy = sy(p.y).toFixed(1);
