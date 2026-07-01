@@ -306,6 +306,18 @@ def decoder_fidelity(
                     "psnr": m.get("psnr"),
                     "bit_exact": m.get("bit_exact"),
                     "label": m["label"],
+                    # Rigorous (isolated, single-core, repeated-trial) decode time on
+                    # the rows the overlay re-timed (anchor label, perf-images subset);
+                    # only repeated runs > 1 count. None elsewhere. The report pools
+                    # these per label to anchor and whisker the speed-vs-bitrate chart.
+                    "time_rigorous_s": (
+                        m["time_rigorous_s"]
+                        if isinstance(m.get("time_rigorous_s"), (int, float))
+                        and (m.get("time_runs") or 0) > 1
+                        else None
+                    ),
+                    "time_stddev_s": m.get("time_rigorous_stddev_s"),
+                    "runs": m.get("time_runs") or 0,
                 }
                 for m in impl_rows
             ),

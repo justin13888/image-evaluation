@@ -1683,9 +1683,14 @@ class RunArgs(BaseArgs):
     ] = True
     pin_cores: Annotated[
         bool,
-        tyro.conf.FlagCreatePairsOff,
-        Field(description="Pin rigorous timing benchmarks to specific CPU cores"),
-    ] = False
+        Field(
+            description="Pin benchmarks to specific CPU cores for reproducible timing "
+            "(default on, Linux/taskset). The parallel pool runs on physical cores 1..N-1 "
+            "(core 0 reserved for the OS/IO), each quality-pass task pinned to one core; the "
+            "rigorous single-threaded timing is fixed to one dedicated core. --no-pin-cores "
+            "disables it (and --demo relaxes it for throughput)."
+        ),
+    ] = True
     measure_memory: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
@@ -1742,11 +1747,20 @@ class RunArgs(BaseArgs):
         for the always-parallel metric pass. ``--perf`` stays at its default
         ``anchor`` so the performance section is populated cheaply. Explicit
         ``--sample`` / ``--jobs`` still win; ``--scaling`` / ``--effort`` /
-        ``--quick`` only turn on, so forcing them on is consistent."""
+        ``--quick`` only turn on, so forcing them on is consistent.
+
+        Demo deliberately *relaxes the timing-accuracy optimizations* — it
+        disables CPU pinning and runs the pool across all logical cores — to
+        maximize throughput for a fast functional check, not a rigorous
+        measurement. Every relaxation below is confined to this ``if self.demo:``
+        branch, so it never alters the non-demo defaults (physical N-1 pool,
+        pinned harnesses)."""
         if self.demo:
             self.quick = True
             self.scaling = True
             self.effort = True
+            # Accuracy off, throughput on: no core pinning, all logical cores.
+            self.pin_cores = False
             if self.sample is None:
                 self.sample = 2
             if self.jobs is None:
@@ -1894,6 +1908,12 @@ class BenchmarkTask(BaseModel):
     discard_output: bool
     measure_memory: bool
     pin_cores: bool
+    # CPU affinity for this task's harness, as a taskset cpu-list (e.g. "7" or
+    # "1-7"). Set by the runner when pin_cores is on: the rigorous single-threaded
+    # timing clone gets one dedicated core; the all-cores (fastest) timing clone
+    # gets None (every logical core). None → no taskset wrapper. The quality pass
+    # passes its per-worker core to cmd() directly rather than via this field.
+    pin_cpu: Optional[str] = None
     # Decode-only: True when the encoded input was produced by the format's
     # dedicated lossless reference encoder (LOSSLESS_REFERENCE_ENCODERS, issue #21),
     # so the added lossless decode path is distinguishable from the lossy one in the
@@ -1971,6 +1991,7 @@ class BenchmarkTask(BaseModel):
         iterations: Optional[int] = None,
         warmup: Optional[int] = None,
         discard: Optional[bool] = None,
+        pin_cpu: Optional[str] = None,
     ) -> str:
         """
         Generate command based on output path.
@@ -1978,7 +1999,10 @@ class BenchmarkTask(BaseModel):
         Optional `iterations` and `warmup` override the task's stored values,
         useful for one-shot metric collection runs. `discard` overrides the
         task's discard policy — metric collection passes `discard=False` so the
-        binary actually writes an output file to measure/score.
+        binary actually writes an output file to measure/score. `pin_cpu`
+        overrides the task's stored `pin_cpu` affinity (a taskset cpu-list): the
+        quality pass passes its per-worker core here so each harness runs on its
+        assigned core (the stored field carries the timing overlay's fixed core).
         """
 
         binary = self.impl.bin
@@ -2007,9 +2031,15 @@ class BenchmarkTask(BaseModel):
         if use_discard:
             cmd_parts.append("--discard")
 
-        # Wrap with taskset for core pinning (pin to cores 0-3 for consistency)
-        if self.pin_cores:
-            cmd_parts = ["taskset", "-c", "0-3"] + cmd_parts
+        # Wrap with taskset to pin this harness to its assigned core(s) for
+        # reproducible timing (issue: rigorous-timing affinity). The effective
+        # affinity is the explicit `pin_cpu` override (quality pass: the worker's
+        # core) else the task's stored `pin_cpu` (timing overlay: the fixed
+        # dedicated core; None for the all-cores fastest mode). The runner only
+        # sets these when pin_cores is on and taskset is available.
+        affinity = pin_cpu if pin_cpu is not None else self.pin_cpu
+        if affinity is not None:
+            cmd_parts = ["taskset", "-c", affinity] + cmd_parts
 
         command = shlex.join(cmd_parts)
 

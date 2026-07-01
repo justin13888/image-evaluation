@@ -456,8 +456,11 @@ def generate_report_html(bundle_dir: str, generated_at: Optional[str] = None) ->
             "<section class='chart-section' data-chart-section='perf' hidden>"
             "<h2>Performance &mdash; rigorous timing overlay</h2>"
             "<p class='muted'>Optional, secondary view. Isolated hyperfine timing "
-            "(warmup + repeats, compute-only) at the selected operating points, "
-            "across single-threaded and all-cores modes. Quality is primary: raw "
+            "(warmup + repeats, compute-only) at the selected operating points. The "
+            "single-threaded mode is the most accurate number &mdash; pinned to one "
+            "dedicated CPU core (core 0 reserved for the OS) for reproducibility &mdash; "
+            "and is what anchors the whiskered points on the charts above; the all-cores "
+            "mode uses every logical core for peak throughput. Quality is primary: raw "
             "speed is only meaningful alongside the quality it trades for.</p>"
             + _embed_charts(perf_dir, "perf")
             + "</section>"

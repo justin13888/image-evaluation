@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import queue
 import random
 import re
 import shlex
@@ -84,6 +85,7 @@ from bench_lib.system_info import (
     get_library_versions,
     get_physical_cores,
     get_system_info,
+    physical_core_cpu_ids,
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1142,6 +1144,7 @@ def generate_metrics(
     keep_temp: bool = False,
     bundle_dir: Optional[str] = None,
     capture: bool = False,
+    pin_cpus: Optional[list[int]] = None,
 ) -> list[BenchmarkMetrics]:
     """Generate file size and visual quality metrics, encoding tasks in parallel.
 
@@ -1170,6 +1173,16 @@ def generate_metrics(
         print(f"Staging temp outputs in: {temp_dir} (freed per task as scored)")
     print(f"Encoding with {max_workers} parallel worker(s), 1 thread each\n")
 
+    # When pinning is on, hand each worker thread its own core (round-robin if
+    # --jobs exceeds the pool) so every harness runs on a fixed, dedicated core.
+    pool_kwargs: Dict[str, object] = {}
+    if pin_cpus:
+        assign: "queue.Queue[int]" = queue.Queue()
+        for i in range(max_workers):
+            assign.put(pin_cpus[i % len(pin_cpus)])
+        pool_kwargs = {"initializer": _pin_worker, "initargs": (assign,)}
+        print(f"Pinning workers to cores {pin_cpus[:max_workers]} (core 0 reserved)\n")
+
     # Pin every child process to a single thread: covers rayon-/OMP-based codecs
     # and iqa-cli. The encode/decode also pass --threads 1 for codecs (e.g.
     # libavif) whose internal pool keys off the flag rather than these env vars.
@@ -1192,7 +1205,7 @@ def generate_metrics(
     metrics: list[BenchmarkMetrics] = []
     total = len(ordered)
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers, **pool_kwargs) as executor:
             futures = [
                 executor.submit(
                     _measure_one,
@@ -1368,12 +1381,77 @@ def _dataset_manifest(args: RunArgs) -> dict:
 
 
 def _resolve_jobs(jobs: Optional[int], task_count: int) -> int:
-    """Parallel scoring workers: physical cores by default (one single-threaded
-    task per core saturates the CPU without oversubscribing), capped at the task
-    count and overridable via --jobs. A non-positive --jobs falls back to the
-    physical-core default."""
-    requested = jobs if (jobs and jobs > 0) else get_physical_cores()
+    """Parallel scoring workers: physical cores − 1 by default (one single-threaded
+    task per worked core, leaving one core free for the OS/IO so measurements
+    aren't perturbed), capped at the task count and overridable via --jobs. A
+    non-positive --jobs falls back to that default."""
+    requested = jobs if (jobs and jobs > 0) else max(1, get_physical_cores() - 1)
     return max(1, min(requested, max(1, task_count)))
+
+
+_AFFINITY_WARNED = False
+
+
+def _affinity_plan(pin_cores: bool) -> Optional[Dict[str, object]]:
+    """The CPU-affinity plan when pinning is enabled and the platform supports it.
+
+    Returns ``{"pool": [core...], "timing_core": int, "reserved": int}`` or None.
+    ``pool`` is the physical cores minus core 0 (reserved for the OS/IO), one
+    logical CPU id per physical core; the parallel pool pins one worker per pool
+    core, and the rigorous single-threaded timing is fixed to ``timing_core`` (the
+    pool's top core, farthest from CPU0's interrupt load). None when pinning is
+    off, the platform lacks ``sched_setaffinity``/``taskset``, or there are too
+    few cores to reserve one (a single warning is printed once per process)."""
+    global _AFFINITY_WARNED
+    if not pin_cores:
+        return None
+    supported = (
+        platform.system() == "Linux"
+        and hasattr(os, "sched_setaffinity")
+        and shutil.which("taskset") is not None
+    )
+    if not supported:
+        if not _AFFINITY_WARNED:
+            print(
+                "Note: CPU pinning requested but unavailable here (needs Linux + "
+                "taskset); running unpinned — timing is less reproducible."
+            )
+            _AFFINITY_WARNED = True
+        return None
+    ids = physical_core_cpu_ids()
+    if len(ids) < 2:
+        return None  # need one core to reserve plus at least one to work on
+    pool = ids[1:]  # reserve core 0 for the OS/IO
+    return {"pool": pool, "timing_core": pool[-1], "reserved": ids[0]}
+
+
+# Each metric-pass worker thread pins itself (and thus every child harness it
+# forks — encoder, reference decode, iqa-cli) to one dedicated core, so parallel
+# tasks never migrate or share a core. The child inherits the forking thread's
+# affinity on Linux, so no per-command taskset is needed for the quality pass.
+def _pin_worker(assign: "queue.Queue[int]") -> None:
+    try:
+        cpu = assign.get_nowait()
+    except Exception:
+        return
+    try:
+        os.sched_setaffinity(0, {cpu})
+    except (AttributeError, OSError):
+        pass
+
+
+def _affinity_manifest(plan: Optional[Dict[str, object]]) -> Dict[str, object]:
+    """Reproducibility fields recording the CPU-pinning policy for a suite's
+    manifest (None when unpinned). ``physical``/``logical`` are always recorded so
+    a reader can see the machine the N-1 pool was sized against."""
+    return {
+        "pin_cores": plan is not None,
+        "assigned_cores": plan["pool"] if plan else None,
+        "reserved_core": plan["reserved"] if plan else None,
+        "timing_core": plan["timing_core"] if plan else None,
+        "physical_cores": get_physical_cores(),
+        "logical_cores": os.cpu_count(),
+    }
 
 
 def _anchor_label(impl_name: str, tasks: BenchList) -> str:
@@ -1483,6 +1561,8 @@ def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[s
             sweeps[task.impl.name].append(value)
 
     max_workers = _resolve_jobs(args.jobs, len(metric_tasks))
+    plan = _affinity_plan(args.pin_cores)
+    pin_cpus = plan["pool"] if plan else None
 
     manifest = {
         **_base_manifest(),
@@ -1495,6 +1575,7 @@ def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[s
             "quality_sweeps": sweeps,
             "quick": args.quick,
             "jobs": max_workers,
+            **_affinity_manifest(plan),
         },
     }
     with open(f"{result_dir}/manifest.json", "w") as f:
@@ -1511,6 +1592,7 @@ def _run_metric_pass(args: RunArgs, tasks: BenchList, result_dir: str) -> list[s
         args.keep_temp,
         bundle_dir=os.path.dirname(result_dir),
         capture=args.report_images,
+        pin_cpus=pin_cpus,
     )
     metrics_path = f"{result_dir}/metrics.json"
     with open(metrics_path, "w") as f:
@@ -1653,11 +1735,22 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
             selected = [t for t in selected if t.source_path in keep]
     perf_image_count = len({t.source_path for t in selected})
 
+    # Affinity: the single-threaded (t1) clone is the *most accurate* number — pin
+    # it to one dedicated core so the merged rigorous timing is reproducible. The
+    # all-cores (t0) clone is the *fastest* number — leave it unpinned so it uses
+    # every logical core (true peak throughput). Hyperfine runs serially, so no two
+    # timed commands ever share the dedicated core.
+    plan = _affinity_plan(args.pin_cores)
+    timing_core = plan["timing_core"] if plan else None
+
     # Clone each selected task per thread mode, baking in the real iteration/warmup
     # counts and the discard policy so name() and cmd() reflect the timed run.
     timing: BenchList = []
     for task in selected:
         for threads in thread_modes:
+            pin = (
+                str(timing_core) if (threads == 1 and timing_core is not None) else None
+            )
             timing.append(
                 task.model_copy(
                     update={
@@ -1667,6 +1760,7 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
                         "discard_output": True,
                         "measure_memory": args.measure_memory,
                         "pin_cores": args.pin_cores,
+                        "pin_cpu": pin,
                     }
                 )
             )
@@ -1689,8 +1783,8 @@ def _run_timing_overlay(args: RunArgs, tasks: BenchList, result_dir: str) -> Non
             "discard_output": True,
             "iterations": args.iterations,
             "warmup": args.warmup,
-            "pin_cores": args.pin_cores,
             "quick": args.quick,
+            **_affinity_manifest(plan),
         },
     }
     with open(f"{result_dir}/manifest.json", "w") as f:
@@ -1782,6 +1876,14 @@ def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
         print("\nNo scaling tasks to run (binaries missing?); skipping.")
         return False
 
+    # Single-threaded, hyperfine-timed → a performance-critical measurement: pin
+    # every rung to the one dedicated core, like the rigorous overlay's t1 mode.
+    plan = _affinity_plan(args.pin_cores)
+    if plan:
+        tasks = [
+            t.model_copy(update={"pin_cpu": str(plan["timing_core"])}) for t in tasks
+        ]
+
     scal_dir = os.path.join(bundle_dir, "scaling")
     os.makedirs(scal_dir, exist_ok=True)
     manifest = {
@@ -1794,6 +1896,7 @@ def _run_scaling_suite(args: RunArgs, bundle_dir: str) -> bool:
             "ladder_mp": ladder,
             "rungs": len(rungs),
             "threads": 1,
+            **_affinity_manifest(plan),
         },
     }
     with open(f"{scal_dir}/manifest.json", "w") as f:
@@ -1836,6 +1939,7 @@ def _run_effort_suite(args: RunArgs, bundle_dir: str) -> bool:
 
     eff_dir = os.path.join(bundle_dir, "effort")
     os.makedirs(eff_dir, exist_ok=True)
+    plan = _affinity_plan(args.pin_cores)
     manifest = {
         **_base_manifest(),
         "benchmark_config": {
@@ -1844,6 +1948,7 @@ def _run_effort_suite(args: RunArgs, bundle_dir: str) -> bool:
             "formats": args.formats,
             "effort_images": len(image_ppms),
             "effort_mp": 1.0,
+            **_affinity_manifest(plan),
         },
     }
     with open(f"{eff_dir}/manifest.json", "w") as f:
@@ -1851,7 +1956,13 @@ def _run_effort_suite(args: RunArgs, bundle_dir: str) -> bool:
     print(f"\n✓ {len(tasks)} effort benchmark(s)\n")
 
     max_workers = _resolve_jobs(args.jobs, len(tasks))
-    metrics = generate_metrics(tasks, eff_dir, max_workers, args.keep_temp)
+    metrics = generate_metrics(
+        tasks,
+        eff_dir,
+        max_workers,
+        args.keep_temp,
+        pin_cpus=(plan["pool"] if plan else None),
+    )
     with open(f"{eff_dir}/metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
     write_effort_outputs(eff_dir, metrics)

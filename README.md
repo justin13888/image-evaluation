@@ -140,6 +140,9 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 # Comprehensive clic2025 run sized for ~8h on ~8 cores: fewer quality points and a
 # trimmed decoder sweep keep the matrix feasible, while --scaling and --effort add
 # the resolution-scaling and effort/speed characterizations in the same bundle
+# TODO: refresh this estimate — it predates the --perf-images bound. A default
+# `./bench run -d clic2025` is now ~1h (quality matrix ~20-30 min + a bounded
+# rigorous-timing overlay ~25-45 min); the overlay, not the matrix, is the lever.
 ./bench run --dataset clic2025 --quality-steps 6 --decode-steps 3 --scaling --effort
 
 # Resolution-scaling characterization on its own (time vs pixels, fitted exponent)
@@ -378,12 +381,12 @@ This establishes the I/O and measurement floor, allowing you to isolate codec ov
 
 ### Threading Model
 
-The **rigorous-timing overlay** (`--perf`) automatically sweeps **both** threading configurations (they appear side-by-side in the timing charts):
+The **rigorous-timing overlay** (`--perf`) measures the two extremes — the most accurate and the fastest — and they appear side-by-side in the timing charts:
 
-1. **Single-threaded (`--threads 1`):** Measures per-core efficiency and is useful for comparing instruction-level optimization.
-2. **Parallel (`--threads 0`):** Uses all available cores. Measures real-world throughput for batch processing.
+1. **Single-threaded (`--threads 1`) — most accurate:** measures per-core efficiency, and is **fixed to one dedicated CPU core** (`taskset`) so the repeated-trial number is reproducible. This is the timing merged back onto the rate-distortion / decoder charts (whiskered, "N runs ±σ" on hover).
+2. **Parallel (`--threads 0`) — fastest:** uses **every logical core**, unpinned, to measure true peak throughput for batch processing.
 
-The always-on **metric pass** does not sweep threads — output bytes are thread-invariant, so each task runs single-threaded under the parallel worker pool (one task per physical core). With `--pin-cores`, the timing overlay's binaries are pinned to specific cores using `taskset` (Linux) or equivalent to reduce scheduling variance.
+**CPU pinning (default on, Linux).** All performance-critical measurements are fixed to one CPU core at a time. The always-on **metric pass** does not sweep threads — output bytes are thread-invariant — and runs one single-threaded task per core across a pool of **physical cores − 1** (core 0 is reserved for the OS/IO so it can't perturb a measurement), with **each task pinned to its own dedicated core** (`sched_setaffinity`; child harness, reference decode, and `iqa-cli` all inherit it). The single-threaded timing overlay is pinned to one fixed core as above; the all-cores mode is deliberately left unpinned. `--no-pin-cores` disables pinning (and falls back automatically where `taskset`/affinity is unavailable, e.g. containers/macOS). `--demo` turns pinning **off** and uses all logical cores to maximize throughput for a fast functional check — a demo relaxation that never changes the non-demo defaults. The manifest records `assigned_cores` / `reserved_core` / `timing_core` for reproducibility.
 
 ### Statistical Reporting
 
@@ -465,8 +468,13 @@ Every benchmark run generates a `manifest.json` containing:
     "discard_output": true,
     "iterations": 10,
     "warmup": 2,
-    "pin_cores": false,
-    "quick": false
+    "quick": false,
+    "pin_cores": true,
+    "assigned_cores": [1, 2, 3, 4, 5, 6, 7],
+    "reserved_core": 0,
+    "timing_core": 7,
+    "physical_cores": 8,
+    "logical_cores": 16
   }
 }
 ```

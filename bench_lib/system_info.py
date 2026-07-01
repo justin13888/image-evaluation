@@ -122,6 +122,69 @@ def get_physical_cores() -> int:
     return fallback
 
 
+def physical_core_cpu_ids() -> list[int]:
+    """One logical-CPU id per physical core, ordered ascending.
+
+    The basis for CPU pinning (issue: rigorous-timing affinity): each returned id
+    is a distinct physical core's representative logical CPU (the lowest-numbered
+    SMT sibling), so a ``taskset -c <id>`` confines work to one physical core
+    without an SMT sibling stealing the pipeline. On Linux this picks the min
+    ``processor`` per ``(physical id, core id)`` pair from /proc/cpuinfo (lscpu
+    fallback); elsewhere it falls back to ``range(get_physical_cores())``.
+
+    Used to size and place the parallel pool — cores ``[1:]`` (core 0 reserved for
+    the OS/IO) — and to pick the single dedicated core (the last id) the rigorous
+    single-threaded timing is pinned to.
+    """
+    if platform.system() == "Linux":
+        # Min processor id per (physical id, core id); the lowest sibling.
+        try:
+            reps: Dict[tuple[str, str], int] = {}
+            processor = phys_id = core_id = None
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("processor"):
+                        processor = int(line.split(":", 1)[1].strip())
+                    elif line.startswith("physical id"):
+                        phys_id = line.split(":", 1)[1].strip()
+                    elif line.startswith("core id"):
+                        core_id = line.split(":", 1)[1].strip()
+                    elif not line.strip():
+                        if (
+                            processor is not None
+                            and phys_id is not None
+                            and core_id is not None
+                        ):
+                            key = (phys_id, core_id)
+                            reps[key] = (
+                                processor
+                                if key not in reps
+                                else min(reps[key], processor)
+                            )
+                        processor = phys_id = core_id = None
+            if reps:
+                return sorted(reps.values())
+        except Exception:
+            pass
+        # Fallback: lscpu CPU,Core,Socket — min CPU per (Core, Socket).
+        try:
+            out = subprocess.check_output(["lscpu", "-p=CPU,Core,Socket"]).decode()
+            reps2: Dict[tuple[str, str], int] = {}
+            for line in out.splitlines():
+                if not line or line.startswith("#"):
+                    continue
+                cpu_s, core_s, sock_s = line.split(",")[:3]
+                key = (core_s, sock_s)
+                cpu = int(cpu_s)
+                reps2[key] = cpu if key not in reps2 else min(reps2[key], cpu)
+            if reps2:
+                return sorted(reps2.values())
+        except Exception:
+            pass
+
+    return list(range(get_physical_cores()))
+
+
 def get_compiler_versions() -> Dict[str, str]:
     """Get versions of all compilers used."""
     versions = {}

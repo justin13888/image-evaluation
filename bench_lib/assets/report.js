@@ -78,7 +78,7 @@
   var TIMING_CAVEAT =
     "* Encode/decode time is a single-pass wall-clock (one run, no warmup) — " +
     "indicative, not statistically rigorous. See the Performance suite for " +
-    "isolated, repeated-trial timing.";
+    "isolated, repeated-trial timing pinned to a single dedicated CPU core.";
   function timingNoteHTML(text) {
     return '<p class="q-note q-timing-note">' + (text || TIMING_CAVEAT) + "</p>";
   }
@@ -125,7 +125,7 @@
     rows.forEach(function (m) {
       var impls = (byFmt[m.format] = byFmt[m.format] || {});
       var steps = (impls[m.impl] = impls[m.impl] || {});
-      var s = (steps[m.label] = steps[m.label] || { label: m.label, q: m.quality_value, n: 0, acc: {} });
+      var s = (steps[m.label] = steps[m.label] || { label: m.label, q: m.quality_value, n: 0, acc: {}, rig: { sum: 0, sq: 0, vsum: 0, n: 0, runs: 0 } });
       s.n += 1;
       AXIS_KEYS.forEach(function (k) {
         var v = m[k];
@@ -133,6 +133,16 @@
         var a = s.acc[k] || (s.acc[k] = { sum: 0, sq: 0, n: 0 });
         a.sum += v; a.sq += v * v; a.n += 1;
       });
+      // Fold the rigorous-timing overlay's isolated single-threaded measurement
+      // back in (only the timed anchor rows carry it, and only repeated runs > 1
+      // count as significant — matching plotting.lossless_efficiency). Pools the
+      // per-image rigorous means: between-image spread (sq) + within-image σ (vsum).
+      var rt = m.time_rigorous_s, runs = m.time_runs || 0;
+      if (isNum(rt) && runs > 1) {
+        var rg = s.rig, rsd = m.time_rigorous_stddev_s || 0;
+        rg.sum += rt; rg.sq += rt * rt; rg.vsum += rsd * rsd; rg.n += 1;
+        rg.runs = rg.runs === 0 ? runs : Math.min(rg.runs, runs);
+      }
     });
     var out = {};
     Object.keys(byFmt).forEach(function (fmt) {
@@ -145,7 +155,16 @@
             mean[ax] = mu;
             sd[ax] = a.n > 1 ? Math.sqrt(Math.max(0, a.sq / a.n - mu * mu)) : 0;
           });
-          return { label: s.label, q: s.q, count: s.n, m: mean, sd: sd };
+          // Rigorous encode-time summary across the timed images (null when none
+          // were rigorously timed at this step): isolated mean + pooled σ + runs.
+          var rg = s.rig, rig = null;
+          if (rg.n > 0) {
+            var rmu = rg.sum / rg.n;
+            var within = rg.vsum / rg.n;
+            var between = Math.max(rg.sq / rg.n - rmu * rmu, 0);
+            rig = { t: rmu, sd: Math.sqrt(within + between), runs: rg.runs, n: rg.n };
+          }
+          return { label: s.label, q: s.q, count: s.n, m: mean, sd: sd, rig: rig };
         });
         return { impl: impl, points: points };
       });
@@ -317,12 +336,25 @@
     var vis = series.filter(function (s) { return !state.implsOff[s.implName]; });
     container._hits = [];
 
+    // The encode-time axis can carry rigorously-timed points (the timed anchor
+    // step, isolated on a dedicated core): plot those at their repeated-trial mean
+    // and mark them, falling back to the single-pass wall-clock everywhere else.
+    var encTime = xAxis.key === "time_s";
+    function xOf(p) { return (encTime && p.rig && isNum(p.rig.t)) ? p.rig.t : p.x; }
+    var nRig = 0, nTot = 0, minRuns = Infinity;
+    if (encTime) {
+      vis.forEach(function (s) { s.points.forEach(function (p) {
+        nTot++;
+        if (p.rig && isNum(p.rig.t)) { nRig++; if (p.rig.runs) minRuns = Math.min(minRuns, p.rig.runs); }
+      }); });
+    }
+
     var visPts = [];
     vis.forEach(function (s) { s.points.forEach(function (p) { visPts.push(p); }); });
     var scale = showTime ? timeScale(visPts) : null;
 
     var xs = [], ys = [];
-    vis.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
+    vis.forEach(function (s) { s.points.forEach(function (p) { xs.push(xOf(p)); ys.push(p.y); }); });
     var ariaLabel = info.name + " versus " + xAxis.name + (opts.title ? " — " + opts.title : "");
     var plotHTML;
     if (!xs.length) {
@@ -377,22 +409,36 @@
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     var timeAxis = xAxis.key === "time_s" || xAxis.key === "decode_time_s";
-    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + (timeAxis ? " *" : "") + "</text>");
+    // A '*' only where some plotted time is single-pass: the decode-time axis is
+    // always single-pass; the encode-time axis drops it once every point is rigorous.
+    var timeMarked = timeAxis && (!encTime || nRig < nTot);
+    svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">' + esc(xAxis.title) + (log ? " — log" : "") + (timeMarked ? " *" : "") + "</text>");
     svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">' + esc(info.y) + "</text>");
 
+    // A horizontal ±σ whisker marks each rigorously-timed encode-time point.
+    function whisker(p, color) {
+      if (!(encTime && p.rig && p.rig.sd > 0)) return;
+      var rx = p.rig.t;
+      var wx0 = sx(Math.max(dxmin, rx - p.rig.sd)).toFixed(1);
+      var wx1 = sx(Math.min(dxmax, rx + p.rig.sd)).toFixed(1);
+      var wy = sy(p.y).toFixed(1);
+      svg.push('<line class="q-whisker" x1="' + wx0 + '" y1="' + wy + '" x2="' + wx1 + '" y2="' + wy +
+        '" stroke="' + color + '" stroke-width="1.5" stroke-linecap="round"/>');
+    }
     var hits = [];
     vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
-        var px = sx(p.x), py = sy(p.y);
+        var px = sx(xOf(p)), py = sy(p.y);
         pts.push({ x: px, y: py });
         var r = scale ? scale.r(p.t) : PT_R;
-        hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, impl: s.implName, format: s.fmt, x: p.x, y: p.y, q: p.q, step: p.step, count: p.count, std: p.std, t: p.t });
+        hits.push({ sx: px, sy: py, r: r, color: s.color, label: s.label, impl: s.implName, format: s.fmt, x: xOf(p), y: p.y, q: p.q, step: p.step, count: p.count, std: p.std, t: p.t, rig: encTime ? (p.rig || null) : null });
       });
       svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       s.points.forEach(function (p) {
         var r = scale ? scale.r(p.t) : PT_R;
-        svg.push('<circle class="q-pt" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + s.color + '"/>');
+        whisker(p, s.color);
+        svg.push('<circle class="q-pt" cx="' + sx(xOf(p)).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="' + r.toFixed(1) + '" fill="' + s.color + '"' + (encTime && p.rig ? ' stroke="#1a1a1a" stroke-width="1.2"' : "") + "/>");
       });
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
@@ -402,9 +448,18 @@
       esc(ariaLabel) + "</title>" + svg.join("") + "</svg></div>";
     container._hits = hits;
 
+    // Footnote mirrors the lossless chart: blanket caveat for single-pass axes,
+    // adaptive text once the encode-time axis has rigorously-anchored points.
+    var runsTxt = minRuns === Infinity ? "" : minRuns + " ";
+    var timeNote = "";
+    if (timeAxis) {
+      if (!encTime || nRig === 0) timeNote = timingNoteHTML();
+      else if (nRig === nTot) timeNote = timingNoteHTML("Encode times are isolated, repeated-trial measurements (" + runsTxt + "runs each, pinned to one core).");
+      else timeNote = timingNoteHTML("* Ringed/whiskered points are rigorously timed (" + runsTxt + "runs, ±σ, isolated on a dedicated core); the rest are single-pass wall-clocks.");
+    }
     container.innerHTML = plotHTML +
       (scale ? sizeLegendHTML(scale, "encode time") : "") +
-      (timeAxis ? timingNoteHTML() : "") +
+      timeNote +
       '<div class="q-tooltip" hidden></div>';
 
     // hover / click / keyboard — all share one nearest-point selection
@@ -428,12 +483,24 @@
       var crect = container.getBoundingClientRect();
       tip.hidden = false;
       var agg = best.count > 1;
+      // On the encode-time axis the x value IS the time, so fold the rigor marker
+      // into it ("(N runs ±σ)" vs "(single-pass)") and drop the redundant line.
+      var xLine;
+      if (encTime) {
+        xLine = '<span class="k">encode time</span> ' + xAxis.fmt(best.x) +
+          (best.rig
+            ? " (" + best.rig.runs + " runs ±" + fmtTime(best.rig.sd || 0) +
+              (best.rig.n < best.count ? ", rigorous on " + best.rig.n + "/" + best.count + " imgs" : "") + ")"
+            : " (single-pass)");
+      } else {
+        xLine = '<span class="k">' + esc(xAxis.name) + (agg ? " (mean)" : "") + "</span> " + xAxis.fmt(best.x);
+      }
       tip.innerHTML = "<b>" + esc(best.label) + "</b><br>" +
         '<span class="k">step</span> ' + esc(best.step) + "<br>" +
-        '<span class="k">' + esc(xAxis.name) + (agg ? " (mean)" : "") + "</span> " + xAxis.fmt(best.x) + "<br>" +
+        xLine + "<br>" +
         '<span class="k">' + esc(info.name) + (agg ? " (mean)" : "") + "</span> " + best.y.toFixed(2) +
         (agg && best.std > 0 ? " ± " + best.std.toFixed(2) : "") +
-        (isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
+        (!encTime && isNum(best.t) && best.t > 0 ? '<br><span class="k">encode time</span> ' + fmtTime(best.t) : "") +
         '<br><span class="k">images</span> ' + (agg ? best.count : "1 (single)") +
         (clickable && best.format ? '<br><span class="q-open-hint">click to view images</span>' : "");
       var tx = clientX - crect.left + 14, ty = clientY - crect.top + 12;
@@ -498,7 +565,7 @@
         var points = s.points.map(function (p) {
           var x = p.m[xKey], y = p.m[yKey];
           if (!isNum(x) || !isNum(y)) return null;
-          return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count };
+          return { x: x, y: y, std: p.sd[yKey] || 0, t: p.m.time_s, step: p.label, q: p.q, count: p.count, rig: p.rig || null };
         }).filter(Boolean).sort(function (a, b) { return a.x - b.x; });
         if (points.length) {
           series.push({
@@ -1199,14 +1266,27 @@
       var byLabel = {};
       (d.points || []).forEach(function (p) {
         var a = byLabel[p.label] || (byLabel[p.label] =
-          { bpp: 0, t: 0, n: 0, approx: false, worst: null, label: p.label });
+          { bpp: 0, t: 0, n: 0, approx: false, worst: null, label: p.label, rig: { sum: 0, sq: 0, vsum: 0, n: 0, runs: 0 } });
         a.bpp += p.bpp; a.t += isNum(p.time_s) ? p.time_s : 0; a.n += 1;
         var notExact = p.bit_exact === false || (p.bit_exact == null && isNum(p.psnr));
         if (notExact) { a.approx = true; if (isNum(p.psnr)) a.worst = a.worst == null ? p.psnr : Math.min(a.worst, p.psnr); }
+        // Pool the isolated, single-core rigorous decode timings (already gated to
+        // runs > 1 in plotting.decoder_fidelity) across this label's images.
+        if (isNum(p.time_rigorous_s) && (p.runs || 0) > 1) {
+          var rg = a.rig, rsd = p.time_stddev_s || 0;
+          rg.sum += p.time_rigorous_s; rg.sq += p.time_rigorous_s * p.time_rigorous_s; rg.vsum += rsd * rsd; rg.n += 1;
+          rg.runs = rg.runs === 0 ? p.runs : Math.min(rg.runs, p.runs);
+        }
       });
       var points = Object.keys(byLabel).map(function (k) {
-        var a = byLabel[k];
-        return { x: a.bpp / a.n, y: a.t / a.n, label: a.label, approx: a.approx, worst: a.worst };
+        var a = byLabel[k], rig = null;
+        if (a.rig.n > 0) {
+          var rmu = a.rig.sum / a.rig.n, within = a.rig.vsum / a.rig.n, between = Math.max(a.rig.sq / a.rig.n - rmu * rmu, 0);
+          rig = { t: rmu, sd: Math.sqrt(within + between), runs: a.rig.runs, n: a.rig.n };
+        }
+        // Plot the rigorous mean where the overlay anchored this step, else the
+        // single-pass mean decode time.
+        return { x: a.bpp / a.n, y: rig ? rig.t : a.t / a.n, label: a.label, approx: a.approx, worst: a.worst, rig: rig, count: a.n };
       }).sort(function (a, b) { return a.x - b.x; });
       var di = dashByFmt[d.format] || 0;
       dashByFmt[d.format] = di + 1;
@@ -1226,6 +1306,12 @@
         '" text-anchor="middle" class="q-tick">No series selected</text></svg></div>';
       return;
     }
+
+    // Rigor coverage of the visible points drives the axis mark + footnote.
+    var nRig = 0, nTot = 0, minRuns = Infinity;
+    vis.forEach(function (s) { s.points.forEach(function (p) {
+      nTot++; if (p.rig) { nRig++; if (p.rig.runs) minRuns = Math.min(minRuns, p.rig.runs); }
+    }); });
 
     var xs = [], ys = [];
     vis.forEach(function (s) { s.points.forEach(function (p) { xs.push(p.x); ys.push(p.y); }); });
@@ -1255,38 +1341,59 @@
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '"/>');
     svg.push('<line class="q-axis" x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '"/>');
     svg.push('<text class="q-axis-title" x="' + ((X0 + X1) / 2) + '" y="' + (VBH - 8) + '" text-anchor="middle">Input bits per pixel (bpp)</text>');
-    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better) *</text>');
+    // '*' only while some plotted decode time is single-pass (drops once all rigorous).
+    var decMarked = nRig < nTot;
+    svg.push('<text class="q-axis-title" transform="translate(16,' + ((Y0 + Y1) / 2) + ') rotate(-90)" text-anchor="middle">Decode time (lower is better)' + (decMarked ? " *" : "") + "</text>");
+    // A vertical ±σ whisker marks each rigorously-timed (anchored) decode point.
+    function vwhisker(p, color) {
+      if (!(p.rig && p.rig.sd > 0)) return;
+      var wx = sx(p.x).toFixed(1);
+      var wy0 = sy(Math.max(dymin, p.y - p.rig.sd)).toFixed(1);
+      var wy1 = sy(Math.min(dymax, p.y + p.rig.sd)).toFixed(1);
+      svg.push('<line class="q-whisker" x1="' + wx + '" y1="' + wy0 + '" x2="' + wx + '" y2="' + wy1 +
+        '" stroke="' + color + '" stroke-width="1.5" stroke-linecap="round"/>');
+    }
     vis.forEach(function (s) {
       var pts = [];
       s.points.forEach(function (p) {
         var px = sx(p.x), py = sy(p.y);
         pts.push({ x: px, y: py });
-        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst, approxExpected: s.approxExpected });
+        hits.push({ sx: px, sy: py, r: PT_R, color: s.color, impl: s.impl, step: p.label, bpp: p.x, t: p.y, approx: p.approx, worst: p.worst, approxExpected: s.approxExpected, rig: p.rig || null, count: p.count });
       });
       if (s.points.length > 1) {
         svg.push('<path class="q-line" d="' + smoothPath(pts) + '" stroke="' + s.color + '"' + (s.dash ? ' stroke-dasharray="' + s.dash + '"' : "") + "/>");
       }
       s.points.forEach(function (p) {
         var cx = sx(p.x).toFixed(1), cy = sy(p.y).toFixed(1);
+        vwhisker(p, s.color);
         if (p.approx) {
           svg.push('<circle class="q-pt q-pt-approx" cx="' + cx + '" cy="' + cy + '" r="4.5" fill="#fff" stroke="' + s.color + '"/>');
         } else {
-          svg.push('<circle class="q-pt" cx="' + cx + '" cy="' + cy + '" r="4.5" fill="' + s.color + '"/>');
+          svg.push('<circle class="q-pt" cx="' + cx + '" cy="' + cy + '" r="4.5" fill="' + s.color + '"' + (p.rig ? ' stroke="#1a1a1a" stroke-width="1.2"' : "") + "/>");
         }
       });
     });
     svg.push('<circle class="q-hl" r="7.5" visibility="hidden"/>');
+    var dRunsTxt = minRuns === Infinity ? "" : minRuns + " ";
+    var decNote;
+    if (nRig === 0) decNote = timingNoteHTML();
+    else if (nRig === nTot) decNote = timingNoteHTML("Decode times are isolated, repeated-trial measurements (" + dRunsTxt + "runs each, pinned to one core).");
+    else decNote = timingNoteHTML("* Ringed/whiskered points are rigorously timed (" + dRunsTxt + "runs, ±σ, isolated on a dedicated core); the rest are single-pass wall-clocks.");
     host.innerHTML = '<div class="q-plot"><svg role="img" aria-label="Decode time versus input bits per pixel" viewBox="0 0 ' + VBW + " " + VBH +
       '" preserveAspectRatio="xMidYMid meet">' + svg.join("") + "</svg></div>" +
       '<p class="q-note">Hollow markers = approximate decode (differs from the reference it is scored against); filled = bit-exact.</p>' +
-      timingNoteHTML() +
+      decNote +
       '<div class="q-tooltip" hidden></div>';
 
     attachScatterHover(host, hits, function (best) {
       return "<b>" + esc(best.impl) + "</b><br>" +
         '<span class="k">step</span> ' + esc(best.step) + "<br>" +
         '<span class="k">input bpp</span> ' + best.bpp.toFixed(3) + "<br>" +
-        '<span class="k">decode time</span> ' + fmtTime(best.t) + "<br>" +
+        '<span class="k">decode time</span> ' + fmtTime(best.t) +
+        (best.rig
+          ? " (" + best.rig.runs + " runs ±" + fmtTime(best.rig.sd || 0) +
+            (best.rig.n < best.count ? ", rigorous on " + best.rig.n + "/" + best.count + " imgs" : "") + ")"
+          : " (single-pass)") + "<br>" +
         '<span class="k">fidelity</span> ' +
         (best.approx
           ? (best.worst != null
