@@ -274,6 +274,12 @@ class Variant(BaseModel):
     # (propagated onto the derived Implementation). Needed for XYB, whose samples
     # a standard libjpeg decode cannot recover.
     scoring_decoder: Optional[str] = None
+    # Whether this curated variant runs in the DEFAULT sweep (`--params variants`).
+    # True → tagged `variant_kind="curated"` (default-on); False → registered but
+    # tagged `variant_kind="oat"`, so it only surfaces under `--params all` /
+    # `--full`. Lets us keep a hand-named/described variant (its tag, scoring
+    # decoder, etc.) while demoting a universal knob-sweep out of the lean default.
+    default_on: bool = True
 
 
 class TunableSchema(BaseModel):
@@ -875,38 +881,48 @@ _JXL_EFFORT_SWEEP = [str(i) for i in range(1, 10)]  # libjxl effort 1-9
 _ZENPNG_EFFORT_SWEEP = ["0", "1", "2", "7", "13", "17", "19", "22", "24"]
 
 
-# Curated JPEG secondary operating points (issue #4). 4:4:4 vs the default 4:2:0
-# is the single highest-value chroma axis; sequential vs progressive is added only
-# for the reference-class encoders to bound the default series count.
+# JPEG chroma + scan-order secondary operating points (issue #4). These are
+# universal knob sweeps: every JPEG encoder responds to them the same way (4:4:4
+# = larger + sharper chroma; sequential = same pixels, different entropy coding),
+# so they don't differentiate one encoder from another. All are demoted to the
+# `--full` (`--params all`) tier via `default_on=False`; the lean default keeps
+# only codec-signature variants (mozjpeg trellis, jpegli xyb, jxl modular). Each
+# still surfaces under `--full`, tagged `variant_kind="oat"`, under these names.
 _JPEG_444_VARIANT = Variant(
     tag="subsampling-444",
     overrides={"subsampling": "444"},
     description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
+    default_on=False,
 )
 _JPEG_SEQUENTIAL_VARIANT = Variant(
     tag="progressive-off",
     overrides={"progressive": "false"},
     description="Sequential (baseline) vs the default progressive scan",
+    default_on=False,
 )
-# The two intermediate chroma modes, wired for the perceptually-tuned encoders
-# (jpegli, zenjpeg) that honour all four; the reference-class libjpeg encoders
-# stay at 4:2:0/4:4:4 to bound the default series count.
+# The two intermediate chroma modes, wired only for the perceptually-tuned
+# encoders (jpegli, zenjpeg) that honour all four; near-duplicates of 4:2:2/4:2:0
+# in RD terms, so likewise `--full`-only.
 _JPEG_422_VARIANT = Variant(
     tag="subsampling-422",
     overrides={"subsampling": "422"},
     description="4:2:2 (horizontal chroma subsampling) vs the default 4:2:0",
+    default_on=False,
 )
 _JPEG_440_VARIANT = Variant(
     tag="subsampling-440",
     overrides={"subsampling": "440"},
     description="4:4:0 (vertical chroma subsampling) vs the default 4:2:0",
+    default_on=False,
 )
 
 
 def _jpeg_full_schema(variants: Optional[list["Variant"]] = None) -> "TunableSchema":
     """JPEG encoders exposing quality + progressive + chroma subsampling
     (libjpeg-turbo, mozjpeg, jpegli, jpeg-encoder, zenjpeg). `variants` selects the
-    curated secondary series; defaults to the 4:4:4 chroma variant."""
+    secondary series; defaults to the 4:4:4 chroma variant (which is `--full`-only,
+    since chroma/progressive are universal knob sweeps demoted from the lean
+    default — see the shared `_JPEG_*_VARIANT` constants)."""
     return TunableSchema(
         params=[
             Tunable(
@@ -971,26 +987,27 @@ def _mozjpeg_schema() -> "TunableSchema":
 
 
 def _jpegli_schema() -> "TunableSchema":
-    """jpegli exposes the shared JPEG knobs plus two jpegli-specific ones that are
-    its real differentiators over libjpeg-class encoders:
-      quality_control=distance -> native butteraugli distance quantization instead
-                                  of the libjpeg-style integer-quality path (the
-                                  default baseline stays on `quality` for continuity)
-      color=xyb                -> XYB perceptual colorspace (scored via jpegli-decode,
-                                  since a standard libjpeg decode mis-colours XYB)
-    Chroma spans all four modes (4:2:0/4:4:4/4:2:2/4:4:0). These land as curated
-    variant series; the base curve is unchanged."""
+    """jpegli's base curve runs in its native butteraugli DISTANCE mode
+    (``quality_control=distance``), not the libjpeg-style integer-quality path.
+
+    NOTABLE FINDING: distance mode traces the same quality-axis *range* and the
+    same quality as integer-quality control (the quality axis still sweeps 1-100;
+    jpegli maps each value through ``jpegli_quality_to_distance`` -> distance
+    quantizer), but at MUCH lower encode+decode time. So the integer path is
+    redundant as a default series — it is demoted to a ``--full`` OAT variant
+    (``jpegli-encode@quality_control-quality``, auto-emitted since `distance` is
+    now the base value), where the timing win can still be verified head-to-head.
+
+    The one jpegli-specific curated variant that stays default-on is:
+      color=xyb -> XYB perceptual colorspace (scored via jpegli-decode, since a
+                   standard libjpeg decode mis-colours XYB) — jpegli's headline
+                   mode and a genuinely distinct output/scoring path.
+    Chroma (4:4:4/4:2:2/4:4:0) is `--full`-only (shared demoted constants)."""
     schema = _jpeg_full_schema(
         variants=[
             _JPEG_444_VARIANT,
             _JPEG_422_VARIANT,
             _JPEG_440_VARIANT,
-            Variant(
-                tag="distance",
-                overrides={"quality_control": "distance"},
-                description="Native butteraugli distance quantization "
-                "(vs the default libjpeg-style integer quality)",
-            ),
             Variant(
                 tag="xyb",
                 overrides={"color": "xyb"},
@@ -1007,10 +1024,10 @@ def _jpegli_schema() -> "TunableSchema":
         Tunable(
             name="quality_control",
             kind="enum",
-            default="quality",
+            default="distance",
             choices=["quality", "distance"],
-            description="Quality mapping: libjpeg integer quality vs native "
-            "butteraugli distance",
+            description="Quality mapping: native butteraugli distance (base) vs "
+            "libjpeg-style integer quality",
         )
     )
     schema.params.append(
@@ -1022,14 +1039,19 @@ def _jpegli_schema() -> "TunableSchema":
             description="Colorspace: YCbCr vs XYB perceptual",
         )
     )
-    schema.perf_preset["quality_control"] = "quality"
+    # Distance is the base operating point (faster at equal quality/range); the
+    # integer-quality path becomes an OAT variant under `--full`.
+    schema.perf_preset["quality_control"] = "distance"
     schema.perf_preset["color"] = "ycbcr"
     return schema
 
 
 def _zenjpeg_schema() -> "TunableSchema":
     """zenjpeg (a pure-Rust jpegli port) exposes the shared JPEG knobs across all
-    four chroma modes. Two jpegli features are intentionally NOT surfaced:
+    four chroma modes (all `--full`-only, as universal chroma sweeps). It carries
+    no default-on curated variant — its differentiator is the base curve itself
+    (see the distance note below). Two jpegli features are intentionally NOT
+    surfaced at all:
       - distance quantization: zenjpeg's YCbCr quality is already mapped through
         jpegli's quality->distance formula, so its baseline IS the distance path
         (a separate variant would duplicate the base curve).
@@ -1061,7 +1083,8 @@ def _zenjpeg_schema() -> "TunableSchema":
 def _avif_schema(support_444: bool = True) -> "TunableSchema":
     """AVIF encoders via libavif (libavif, svt-av1) share a 0-100 quality knob plus
     a speed preset and chroma format. `speed` is a quality/throughput trade left to
-    the performance overlay; 4:4:4 chroma is the curated secondary series.
+    the performance overlay; 4:4:4 chroma is a `--full`-only secondary series (a
+    universal chroma sweep, demoted from the lean default).
 
     `support_444=False` restricts the encoder to 4:2:0 only and drops the 4:4:4
     series — SVT-AV1 (`Svt[error]: Only support 420 now`) rejects any other chroma
@@ -1101,6 +1124,7 @@ def _avif_schema(support_444: bool = True) -> "TunableSchema":
                 tag="yuv-444",
                 overrides={"yuv": "444"},
                 description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
+                default_on=False,  # universal chroma sweep -> `--full` only
             )
         ]
         if support_444
@@ -1123,7 +1147,9 @@ def _avif_schema(support_444: bool = True) -> "TunableSchema":
 
 TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     # --- JPEG ---
-    # Reference-class encoders also get the sequential (progressive-off) series.
+    # libjpeg-turbo has no codec-signature knob, so it carries no default-on
+    # variant; its 4:4:4 + sequential series are `--full`-only (shared demoted
+    # constants). It still enumerates them so they surface under --full.
     "libjpeg-turbo-encode": _jpeg_full_schema(
         variants=[_JPEG_444_VARIANT, _JPEG_SEQUENTIAL_VARIANT]
     ),
@@ -1251,6 +1277,7 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
                 tag="chroma-444",
                 overrides={"chroma": "444"},
                 description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
+                default_on=False,  # universal chroma sweep -> `--full` only
             )
         ],
         skipped=[
@@ -1333,6 +1360,7 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
                 tag="progressive-on",
                 overrides={"progressive": "1"},
                 description="Spectral progressive AC enabled",
+                default_on=False,  # small RD impact (streaming semantics) -> `--full`
             ),
             Variant(
                 tag="modular-on",
@@ -1415,6 +1443,7 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
                 tag="filter-none",
                 overrides={"filter": "none"},
                 description="No row filtering vs the default adaptive filter",
+                default_on=False,  # universal filter knob -> `--full` only
             )
         ],
     ),
@@ -1568,9 +1597,17 @@ def _expand_variants() -> None:
             continue
         seen: set = set()
         for v in schema.variants:
+            # Adding the override to `seen` regardless of default_on stops the OAT
+            # loop below from re-registering a demoted variant under a different
+            # tag (e.g. `progressive-off` vs `progressive-false`).
             seen.add(frozenset(v.overrides.items()))
             _derive_variant(
-                base, schema, v.tag, v.overrides, "curated", v.scoring_decoder
+                base,
+                schema,
+                v.tag,
+                v.overrides,
+                "curated" if v.default_on else "oat",
+                v.scoring_decoder,
             )
         for p in schema.params:
             if (
@@ -1683,7 +1720,9 @@ _PARAMS_ARG = Annotated[
     Field(
         description="Secondary-knob coverage: 'axis' = quality axis only; "
         "'variants' = curated per-impl variants (default); 'all' = also a "
-        "one-at-a-time expansion of every enum/bool knob."
+        "one-at-a-time expansion of every enum/bool knob (the demoted "
+        "chroma/progressive/etc. variants live here). Shortcut: --full == "
+        "--params all."
     ),
 ]
 
@@ -1752,6 +1791,16 @@ class RunArgs(BaseArgs):
         ),
     ] = 5
     params: _PARAMS_ARG = "variants"
+    full: Annotated[
+        bool,
+        tyro.conf.FlagCreatePairsOff,
+        Field(
+            description="Run every variant: shorthand for --params all (base + "
+            "curated + the one-at-a-time expansion of every enum/bool knob). "
+            "Restores the demoted chroma / progressive / integer-quality / "
+            "PNG-filter series the lean default omits. Overrides --params."
+        ),
+    ] = False
     demo: Annotated[
         bool,
         tyro.conf.FlagCreatePairsOff,
@@ -1875,8 +1924,13 @@ class RunArgs(BaseArgs):
     ] = 4
 
     @model_validator(mode="after")
-    def _apply_demo(self) -> "RunArgs":
-        """Expand the ``--demo`` preset into the concrete flags the runner reads.
+    def _apply_presets(self) -> "RunArgs":
+        """Expand the ``--full`` and ``--demo`` presets into the concrete flags the
+        runner reads.
+
+        ``--full`` is pure sugar for ``--params all`` (base + curated + the
+        one-at-a-time knob expansion); it wins over an explicit ``--params`` so
+        "give me everything" is unambiguous.
 
         Demo is a fast, complete-coverage sweep (see the field help): the quick
         metric pass (2 quality points, 1 decode point, all-cores-only timing,
@@ -1892,7 +1946,10 @@ class RunArgs(BaseArgs):
         maximize throughput for a fast functional check, not a rigorous
         measurement. Every relaxation below is confined to this ``if self.demo:``
         branch, so it never alters the non-demo defaults (physical N-1 pool,
-        pinned harnesses)."""
+        pinned harnesses). ``--demo`` deliberately keeps the lean default variant
+        set for speed; combine with ``--full`` for a full-coverage demo."""
+        if self.full:
+            self.params = "all"
         if self.demo:
             self.quick = True
             self.scaling = True

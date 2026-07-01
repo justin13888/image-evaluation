@@ -10,18 +10,18 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 
 | Encoder | Lang | Swept axis | Curated variants (default) | `--params all` adds | Other knobs read |
 |---|---|---|---|---|---|
-| `jpeg-encoder-encode` | rust | `quality` — 10→95 (11 pts, quality) | `subsampling-444` | `progressive-false` | `progressive`=true, `subsampling`=420 |
+| `jpeg-encoder-encode` | rust | `quality` — 10→95 (11 pts, quality) | — | `subsampling-444`, `progressive-false` | `progressive`=true, `subsampling`=420 |
 | `image-jpeg-encode` | rust | `quality` — 10→95 (11 pts, quality) | — | — | — |
-| `zenjpeg-encode` | rust | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `subsampling-422`, `subsampling-440` | `progressive-false` | `progressive`=true, `subsampling`=420 |
-| `libjpeg-turbo-encode` | c | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `progressive-off` | — | `progressive`=true, `subsampling`=420 |
-| `mozjpeg-encode` | c | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `progressive-off`, `trellis-off` | — | `progressive`=true, `subsampling`=420, `trellis`=true |
-| `jpegli-encode` | c++ | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `subsampling-422`, `subsampling-440`, `distance`, `xyb` | `progressive-false` | `progressive`=true, `subsampling`=420, `quality_control`=quality, `color`=ycbcr |
+| `zenjpeg-encode` | rust | `quality` — 10→95 (11 pts, quality) | — | `subsampling-444`, `subsampling-422`, `subsampling-440`, `progressive-false` | `progressive`=true, `subsampling`=420 |
+| `libjpeg-turbo-encode` | c | `quality` — 10→95 (11 pts, quality) | — | `subsampling-444`, `progressive-off` | `progressive`=true, `subsampling`=420 |
+| `mozjpeg-encode` | c | `quality` — 10→95 (11 pts, quality) | `trellis-off` | `subsampling-444`, `progressive-off` | `progressive`=true, `subsampling`=420, `trellis`=true |
+| `jpegli-encode` | c++ | `quality` — 10→95 (11 pts, quality) | `xyb` | `subsampling-444`, `subsampling-422`, `subsampling-440`, `progressive-false`, `quality_control-quality` | `progressive`=true, `subsampling`=420, `quality_control`=distance, `color`=ycbcr |
 
 ### PNG
 
 | Encoder | Lang | Swept axis | Curated variants (default) | `--params all` adds | Other knobs read |
 |---|---|---|---|---|---|
-| `image-png-encode` | rust | `compression` — fast→best (3 pts, effort, lossless) | `filter-none` | `filter-sub`, `filter-up`, `filter-avg`, `filter-paeth` | `filter`=adaptive |
+| `image-png-encode` | rust | `compression` — fast→best (3 pts, effort, lossless) | — | `filter-none`, `filter-sub`, `filter-up`, `filter-avg`, `filter-paeth` | `filter`=adaptive |
 | `zune-png-encode` | rust | — (single lossless point) | — | — | — |
 | `zenpng-encode` | rust | `effort` — 0→24 (9 pts, effort, lossless) | — | — | — |
 | `libpng-encode` | c | `compression` — 0→9 (10 pts, effort, lossless) | — | — | — |
@@ -41,8 +41,8 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 
 | Encoder | Lang | Swept axis | Curated variants (default) | `--params all` adds | Other knobs read |
 |---|---|---|---|---|---|
-| `rav1e-encode` | rust | `quality` — 20→90 (8 pts, quality) | `chroma-444` | — | `speed`=6†, `chroma`=420 |
-| `libavif-encode` | c | `quality` — 20→90 (8 pts, quality) | `yuv-444` | — | `speed`=6†, `yuv`=420 |
+| `rav1e-encode` | rust | `quality` — 20→90 (8 pts, quality) | — | `chroma-444` | `speed`=6†, `chroma`=420 |
+| `libavif-encode` | c | `quality` — 20→90 (8 pts, quality) | — | `yuv-444` | `speed`=6†, `yuv`=420 |
 | `svt-av1-encode` | c | `quality` — 20→90 (8 pts, quality) | — | — | `speed`=6†, `yuv`=420 |
 
 ### JXL
@@ -50,7 +50,7 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 | Encoder | Lang | Swept axis | Curated variants (default) | `--params all` adds | Other knobs read |
 |---|---|---|---|---|---|
 | `zune-jpegxl-encode` | rust | `quality` — 40→100 (8 pts, quality) | — | — | `effort`=7 |
-| `libjxl-encode` | c++ | `distance` — 15.0→0.1 (15 pts, quality) | `progressive-on`, `modular-on` | `progressive-0`, `modular-0` | `effort`=7, `progressive`=-1, `modular`=-1, `responsive`=-1†, `progressive_dc`=-1†, `decoding_speed`=0† |
+| `libjxl-encode` | c++ | `distance` — 15.0→0.1 (15 pts, quality) | `modular-on` | `progressive-on`, `progressive-0`, `modular-0` | `effort`=7, `progressive`=-1, `modular`=-1, `responsive`=-1†, `progressive_dc`=-1†, `decoding_speed`=0† |
 | `libjxl-lossless-encode` | c++ | `effort` — 1→9 (9 pts, effort, lossless) | — | — | `distance`=0.0 |
 
 ## Intentionally not swept (documented as irrelevant / deferred)

@@ -70,8 +70,12 @@ These are time-sensitive — re-check the dates against upstream releases before
    or its own decoder color-manages XYB→sRGB. Recorded as a skipped knob in `docs/tunables.md`.
    Note: zenjpeg's YCbCr quality is already mapped through jpegli's `quality_to_distance` formula
    (`Quality::ApproxJpegli`), so its baseline *is* the distance path — no separate `@distance`
-   variant is added (that would duplicate the base curve); jpegli, whose baseline uses the
-   libjpeg integer-quality path, does get a `@distance` variant.
+   variant is added (that would duplicate the base curve). **jpegli now matches this**: its base
+   curve runs in native butteraugli **distance** mode too (`quality_control=distance`), because
+   distance traces the same quality-axis range and the same quality as the libjpeg integer-quality
+   path but at **much lower encode+decode time** — so the integer path is redundant as a default
+   series. It is preserved only under `--full` as `jpegli-encode@quality_control-quality`, where the
+   distance-vs-integer timing win can be verified head-to-head.
 
 ## Notes
 
