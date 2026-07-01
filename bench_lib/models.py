@@ -523,6 +523,18 @@ IMPLEMENTATIONS: list[Implementation] = [
         type=BenchmarkType.DECODE,
         format=ImageFormat.PNG,
     ),
+    # oxipng: lossless PNG optimizer (MIT, oxipng/oxipng), built single-threaded
+    # (default-features=off drops rayon). Encodes optimized PNGs directly from raw
+    # pixels via RawImage, so it is a from-scratch encoder here -- no separate
+    # decoder (its output is standard PNG, scored through the reference decode).
+    Implementation(
+        name="oxipng-encode",
+        build="rust",
+        lang="rust",
+        bin="target/release/bench-oxipng-encode",
+        type=BenchmarkType.ENCODE,
+        format=ImageFormat.PNG,
+    ),
     Implementation(
         name="libpng-decode",
         build="cpp",
@@ -879,6 +891,10 @@ _JXL_EFFORT_SWEEP = [str(i) for i in range(1, 10)]  # libjxl effort 1-9
 # (None..Intense). 31+ needs the zopfli feature / runs minutes per MP, so it is
 # left out of the swept range (still reachable via --param effort=N).
 _ZENPNG_EFFORT_SWEEP = ["0", "1", "2", "7", "13", "17", "19", "22", "24"]
+# oxipng optimization level -o 0..6 plus `max`; a curated subset of the axis
+# (like the zenpng/libpng effort sweeps). Zopfli/interlace stay off here and are
+# reached as `--full` variants (still settable via --param deflate/interlace).
+_OXIPNG_LEVEL_SWEEP = ["0", "2", "4", "6", "max"]
 
 
 # JPEG chroma + scan-order secondary operating points (issue #4). These are
@@ -1468,6 +1484,47 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         quality_sweep=_ZENPNG_EFFORT_SWEEP,
         perf_preset={"effort": "13"},
         lossless=True,
+    ),
+    # oxipng: lossless; the swept axis is its optimization level (-o 0..6, max) with
+    # the fast libdeflate backend. Default -o 2 matches oxipng's own default. The
+    # Zopfli backend (~10-50x slower) and Adam7 interlacing are demoted to `--full`:
+    # the explicit `@zopfli` variant gives a clean tag (and pre-empts the auto OAT),
+    # while `interlace` auto-expands to `oxipng-encode@interlace-true`.
+    "oxipng-encode": TunableSchema(
+        params=[
+            Tunable(
+                name="level",
+                kind="enum",
+                default="2",
+                choices=["0", "1", "2", "3", "4", "5", "6", "max"],
+                description="oxipng optimization level (-o 0..6, max)",
+            ),
+            Tunable(
+                name="deflate",
+                kind="enum",
+                default="libdeflate",
+                choices=["libdeflate", "zopfli"],
+                description="DEFLATE backend (zopfli = max compression, very slow)",
+            ),
+            Tunable(
+                name="interlace",
+                kind="bool",
+                default="false",
+                description="Adam7 interlacing",
+            ),
+        ],
+        quality_axis="level",
+        quality_sweep=_OXIPNG_LEVEL_SWEEP,
+        perf_preset={"level": "2", "deflate": "libdeflate", "interlace": "false"},
+        lossless=True,
+        variants=[
+            Variant(
+                tag="zopfli",
+                overrides={"deflate": "zopfli"},
+                description="Zopfli DEFLATE backend (max compression, ~10-50x slower)",
+                default_on=False,  # slow -> `--full` only (also de-dups the OAT)
+            ),
+        ],
     ),
     "libpng-encode": TunableSchema(
         params=[Tunable(name="compression", kind="int", default="6", min=0, max=9)],

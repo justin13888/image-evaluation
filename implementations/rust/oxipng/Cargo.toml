@@ -1,0 +1,18 @@
+[package]
+name = "bench-oxipng"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench-oxipng-encode"
+path = "src/encode.rs"
+
+[dependencies]
+benchmark-harness = { path = "../../../harness/rust" }
+# Lossless PNG optimizer (MIT, oxipng/oxipng), pinned to the latest tag (issue #57).
+# default-features=false drops the `parallel` (rayon) and `binary` (clap CLI) features so
+# optimization is deterministically single-threaded -- matching the issue's single-core
+# fairness requirement -- while `zopfli` keeps the Zopfli DEFLATE backend available for the
+# `--full` deflate variant.
+oxipng = { version = "10.1.1", default-features = false, features = ["zopfli"] }
+anyhow = "1.0"
