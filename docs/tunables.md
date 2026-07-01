@@ -24,6 +24,7 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 | `image-png-encode` | rust | `compression` — fast→best (3 pts, effort, lossless) | — | `filter-none`, `filter-sub`, `filter-up`, `filter-avg`, `filter-paeth` | `filter`=adaptive |
 | `zune-png-encode` | rust | — (single lossless point) | — | — | — |
 | `zenpng-encode` | rust | `effort` — 0→24 (9 pts, effort, lossless) | — | — | — |
+| `oxipng-encode` | rust | `level` — 0→max (5 pts, effort, lossless) | — | `zopfli`, `interlace-true` | `deflate`=libdeflate, `interlace`=false |
 | `libpng-encode` | c | `compression` — 0→9 (10 pts, effort, lossless) | — | — | — |
 | `spng-encode` | c | — (single lossless point) | — | — | — |
 

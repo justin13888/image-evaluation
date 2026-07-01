@@ -510,6 +510,7 @@ We include modern formats and their most competitive implementations.
 | **png**        | Rust     | Standard `image-rs` crate                 |
 | **zune-png**   | Rust     | Highly optimized pure Rust implementation |
 | **zenpng**     | Rust     | Pure-Rust lossless codec from [imazen/zenpng](https://github.com/imazen/zenpng). **AGPL-3.0.** Encoder + decoder; swept over its 0–200 compression-effort axis (`zopfli` feature off, so the multi-minute high-effort presets are excluded from the sweep). |
+| **oxipng**     | Rust     | Lossless PNG optimizer from [oxipng/oxipng](https://github.com/oxipng/oxipng) (**MIT**). Encoder-only; built single-threaded (`parallel` feature off) and encodes optimized PNGs directly from raw pixels, swept over its optimization-level axis (`-o 0..6`, `max`). Zopfli backend and Adam7 interlacing are `--full`-only variants. |
 
 ### WEBP
 
