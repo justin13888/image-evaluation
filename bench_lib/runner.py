@@ -538,7 +538,9 @@ def _build_decoder_sweep(
     decoders = [
         impl
         for impl in IMPLEMENTATIONS
-        if impl.format == format and impl.type == BenchmarkType.DECODE
+        if impl.format == format
+        and impl.type == BenchmarkType.DECODE
+        and not impl.scoring_only
     ]
     if not decoders:
         return
@@ -624,7 +626,10 @@ def _decode_to_ppm(
     the decode to a single thread. `--threads 1` is also forced so codecs whose
     thread pool keys off the flag rather than env (e.g. libavif) stay capped —
     both levers are needed to avoid oversubscription under the parallel pool."""
-    ref_name = REFERENCE_DECODERS.get(task.impl.format)
+    # A variant may override the format's reference decoder when its output needs
+    # a special decode to recover sRGB (e.g. XYB JPEGs -> jpegli-decode); fall back
+    # to the one-trusted-decoder-per-format registry otherwise.
+    ref_name = task.impl.scoring_decoder or REFERENCE_DECODERS.get(task.impl.format)
     if not ref_name:
         raise RuntimeError(f"No reference decoder defined for {task.impl.format}")
     ref_dec = find_implementation_by_name(ref_name)

@@ -563,8 +563,17 @@ def build_libjxl():
     # staged jpegli archive as a second sentinel so an existing libjxl install
     # (built before jpegli support) is upgraded.
     jpegli_lib_dst = os.path.join(INSTALL_COMMON, "lib64", "libjpegli-static.a")
-    if is_built(sentinel) and is_built(jpegli_lib_dst):
-        print(f"  [{label}] Already built (incl. jpegli), skipping.")
+    # jpegli's XYB path also needs jxl_extras-internal (jxl::extras::EncodeJpeg /
+    # DecodeJpeg, which apply the sRGB<->XYB color transform + ICC a raw jpegli or
+    # plain libjpeg decode cannot). Stage it as a third sentinel so an install
+    # made before XYB support gets upgraded.
+    extras_lib_dst = os.path.join(INSTALL_COMMON, "lib64", "libjxl_extras-internal.a")
+    if (
+        is_built(sentinel)
+        and is_built(jpegli_lib_dst)
+        and is_built(extras_lib_dst)
+    ):
+        print(f"  [{label}] Already built (incl. jpegli + extras), skipping.")
         return
     src = os.path.join(VENDOR_DIR, "libjxl")
     if not is_built(sentinel):
@@ -584,11 +593,11 @@ def build_libjxl():
             label=label,
         )
     else:
-        # libjxl is already built; only jpegli still needs staging. Avoid a
-        # reconfigure (it can trip over a stale cached compiler path) and just
-        # build the jpegli target in the existing, already-configured build dir.
-        print(f"  [{label}] Already built; building + staging jpegli only.")
+        # libjxl is already built; only the jpegli / extras archives still need
+        # staging in the existing, already-configured build dir.
+        print(f"  [{label}] Already built; building + staging jpegli + extras only.")
     _build_and_stage_jpegli(label)
+    _build_and_stage_jxl_extras(label)
 
 
 def _build_and_stage_jpegli(label):
@@ -641,6 +650,83 @@ def _build_and_stage_jpegli(label):
             os.path.join(inc_dst_dir, header),
         )
     print(f"  [{label}] Staged jpegli-static + headers into {INSTALL_COMMON}")
+
+
+def _build_and_stage_jxl_extras(label):
+    """Build the jxl_extras-internal archive and stage it into INSTALL_COMMON.
+
+    jxl::extras::EncodeJpeg / DecodeJpeg carry the sRGB<->XYB color transform and
+    XYB ICC handling that a raw jpegli (or plain libjpeg) encode/decode cannot do,
+    so the XYB jpegli variant and its scoring decoder link against this archive.
+    It is defined in jxl_extras.cmake, which libjxl only includes when tools or
+    testing is enabled, and (like jpegli-static) it is EXCLUDE_FROM_ALL with no
+    install rule. So enable tools via a cheap reconfigure -- this only *defines*
+    the target; we build just this one archive, never the tool executables -- and
+    copy it by hand. Every other library it needs (libjxl.a, which as a static
+    archive carries all of jxl's internal symbols, plus libjxl_cms.a,
+    libjxl_threads.a, libhwy.a, libbrotli*.a, libjpegli-static.a) is already
+    installed by the main libjxl build.
+    """
+    build_dir = os.path.join(BUILD_DIR, "libjxl")
+    archive = "libjxl_extras-internal.a"
+
+    def _find_extras_lib():
+        candidate = os.path.join(build_dir, "lib", archive)
+        if os.path.exists(candidate):
+            return candidate
+        matches = glob.glob(
+            os.path.join(build_dir, "**", archive), recursive=True
+        )
+        return matches[0] if matches else None
+
+    src_lib = _find_extras_lib()
+    if src_lib is None:
+        # jxl_extras.cmake is gated behind JPEGXL_ENABLE_TOOLS OR BUILD_TESTING,
+        # both OFF in the main configure. Turn tools ON so the target exists; the
+        # tool executables stay unbuilt because we only ask for this archive.
+        # Disable the optional image codecs (APNG/GIF/EXR/system-JPEG/sjpeg): the
+        # XYB jpegli enc/dec path needs none of them, and leaving them in would
+        # make the archive depend on libpng/giflib/OpenEXR at our link step. The
+        # apng/gif/jpg codec sources compile unconditionally but only reference
+        # their libraries when find_package(PNG/GIF/JPEG) succeeds, so the lever
+        # is CMAKE_DISABLE_FIND_PACKAGE_* (they then compile as stubs).
+        run(
+            [
+                "cmake",
+                "-DJPEGXL_ENABLE_TOOLS=ON",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_PNG=ON",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_GIF=ON",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_JPEG=ON",
+                "-DJPEGXL_ENABLE_OPENEXR=OFF",
+                "-DJPEGXL_ENABLE_SJPEG=OFF",
+                ".",
+            ],
+            cwd=build_dir,
+            env=os.environ.copy(),
+            label=label,
+        )
+        run(
+            [
+                "cmake",
+                "--build",
+                ".",
+                "--target",
+                "jxl_extras-internal",
+                "--parallel",
+            ],
+            cwd=build_dir,
+            env=os.environ.copy(),
+            label=label,
+        )
+        src_lib = _find_extras_lib()
+    if src_lib is None:
+        print(f"ERROR: jxl_extras-internal built but {archive} not found")
+        sys.exit(1)
+
+    lib_dst_dir = os.path.join(INSTALL_COMMON, "lib64")
+    os.makedirs(lib_dst_dir, exist_ok=True)
+    shutil.copy2(src_lib, os.path.join(lib_dst_dir, archive))
+    print(f"  [{label}] Staged jxl_extras-internal into {INSTALL_COMMON}")
 
 
 def build_libwebp():

@@ -31,8 +31,56 @@ find_package(ZLIB REQUIRED)
 find_package(mimalloc REQUIRED)
 find_package(Threads REQUIRED)
 
-# Encoder binary (encode-only: jpegli's headline feature is its encoder).
-# ${HWY_LIB} follows ${JPEGLI_LIB} for correct static link order.
+# XYB mode (jpegli encode) and the XYB-aware scoring decoder go through
+# jxl::extras::EncodeJpeg / DecodeJpeg + the CMS, which live in libjxl's
+# jxl_extras-internal archive and its jxl / jxl_cms dependencies. As static
+# archives these carry all the internal jxl symbols the extras code needs;
+# vendor/build_vendor.py stages jxl_extras-internal alongside the others.
+find_library(JXL_EXTRAS_LIB NAMES jxl_extras-internal
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+find_library(JXL_LIB NAMES jxl
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+find_library(JXL_CMS_LIB NAMES jxl_cms
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+find_library(JXL_THREADS_LIB NAMES jxl_threads
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+find_library(BROTLI_ENC_LIB NAMES brotlienc
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+find_library(BROTLI_DEC_LIB NAMES brotlidec
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+find_library(BROTLI_COMMON_LIB NAMES brotlicommon
+             PATHS ${CMAKE_PREFIX_PATH} PATH_SUFFIXES lib64 lib
+             NO_DEFAULT_PATH REQUIRED)
+
+# The internal jxl static archives cross-reference each other, so wrap them in a
+# linker group. ${JPEGLI_LIB}/${HWY_LIB} follow for correct static link order.
+set(JXL_EXTRAS_LINK
+  -Wl,--start-group
+  ${JXL_EXTRAS_LIB} ${JXL_LIB} ${JXL_CMS_LIB} ${JXL_THREADS_LIB}
+  ${JPEGLI_LIB} ${HWY_LIB}
+  ${BROTLI_ENC_LIB} ${BROTLI_DEC_LIB} ${BROTLI_COMMON_LIB}
+  -Wl,--end-group)
+
+# Encoder binary. The classic YCbCr / distance / chroma paths use jpegli's raw C
+# API; the XYB variant uses jxl::extras::EncodeJpeg, hence the extras link.
 add_executable(bench-jpegli-encode encode.cpp)
-target_include_directories(bench-jpegli-encode PRIVATE ${LIBJXL_SRC} ${JPEGLI_GEN_INCLUDE})
-target_link_libraries(bench-jpegli-encode ${JPEGLI_LIB} ${HWY_LIB} Threads::Threads ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
+target_compile_definitions(bench-jpegli-encode PRIVATE JXL_STATIC_DEFINE)
+target_include_directories(bench-jpegli-encode PRIVATE
+  ${LIBJXL_SRC} ${JPEGLI_GEN_INCLUDE} ${CMAKE_PREFIX_PATH}/include)
+target_link_libraries(bench-jpegli-encode ${JXL_EXTRAS_LINK}
+  Threads::Threads ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
+
+# XYB-aware scoring decoder (jxl::extras::DecodeJpeg + CMS -> sRGB). Only used to
+# score XYB jpegli/zenjpeg outputs; a plain libjpeg decode would mis-colour them.
+add_executable(bench-jpegli-decode decode.cpp)
+target_compile_definitions(bench-jpegli-decode PRIVATE JXL_STATIC_DEFINE)
+target_include_directories(bench-jpegli-decode PRIVATE
+  ${LIBJXL_SRC} ${JPEGLI_GEN_INCLUDE} ${CMAKE_PREFIX_PATH}/include)
+target_link_libraries(bench-jpegli-decode ${JXL_EXTRAS_LINK}
+  Threads::Threads ZLIB::ZLIB "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")

@@ -57,6 +57,21 @@ These are time-sensitive — re-check the dates against upstream releases before
    flakiness without new coverage, so both `zenavif-*` implementations and the
    `implementations/rust/zenavif/` crate were removed. (Separately, `zenavif 0.1.6` also never
    exposed a chroma-subsampling knob.) Re-add once the upstream `rav1d-safe` race is fixed.
+4. **zenjpeg XYB not benchmarked — no round-trip to sRGB (`zenjpeg 0.8.4`).** *(2026-07-01)*
+   zenjpeg exposes `EncoderConfig::xyb()` (jpegli's headline perceptual mode), and the encode
+   wrapper can drive it, but its XYB output does not round-trip to correct sRGB through any
+   decoder wired into this harness: jpegli's decoder (`jxl::extras::DecodeJpeg`) *rejects*
+   zenjpeg's XYB bitstream outright, and zenjpeg's own decoder (`Decoder::new().decode()` →
+   `PixelFormat::Rgb`) does **not** invert XYB→sRGB (a smoke-test scored ≈ −160 SSIMULACRA2,
+   i.e. garbage; a linear→sRGB gamma pass did not recover it). Because the scored PPM would be
+   meaningless, zenjpeg is benchmarked in **YCbCr only** (4:4:4 / 4:2:2 / 4:4:0 / 4:2:0);
+   **jpegli carries the XYB comparison** (`jpegli-encode@xyb`, scored via the XYB-aware
+   `jpegli-decode`). Re-enable zenjpeg XYB once its encode/decode XYB path is jpegli-interoperable
+   or its own decoder color-manages XYB→sRGB. Recorded as a skipped knob in `docs/tunables.md`.
+   Note: zenjpeg's YCbCr quality is already mapped through jpegli's `quality_to_distance` formula
+   (`Quality::ApproxJpegli`), so its baseline *is* the distance path — no separate `@distance`
+   variant is added (that would duplicate the base curve); jpegli, whose baseline uses the
+   libjpeg integer-quality path, does get a `@distance` variant.
 
 ## Notes
 

@@ -213,6 +213,16 @@ class Implementation(BaseModel):
     # "oat"  -> a one-at-a-time variant only run under --params all.
     # Variants reuse their base's `bin`, so they add no build target.
     variant_kind: Optional[Literal["curated", "oat"]] = None
+    # A decoder that exists only to score another encoder's output (not a
+    # first-class codec under test), so it is excluded from the decoder sweep but
+    # still built and reachable via `scoring_decoder`. E.g. jpegli-decode, wired
+    # solely to recover sRGB from XYB JPEGs.
+    scoring_only: bool = False
+    # Override the format's reference decoder for metric scoring. Set by variants
+    # whose output an ordinary decoder cannot recover (e.g. XYB JPEGs, which the
+    # standard libjpeg decoder mis-colours -> `jpegli-decode`). None => use the
+    # format default in REFERENCE_DECODERS.
+    scoring_decoder: Optional[str] = None
 
     @property
     def is_variant(self) -> bool:
@@ -260,6 +270,10 @@ class Variant(BaseModel):
     # Knob -> fixed value, applied on top of perf_preset for this variant.
     overrides: Dict[str, str]
     description: str = ""
+    # Override the format's reference decoder for scoring this variant's output
+    # (propagated onto the derived Implementation). Needed for XYB, whose samples
+    # a standard libjpeg decode cannot recover.
+    scoring_decoder: Optional[str] = None
 
 
 class TunableSchema(BaseModel):
@@ -440,6 +454,18 @@ IMPLEMENTATIONS: list[Implementation] = [
         bin="implementations/cpp/jpegli/build/bench-jpegli-encode",
         type=BenchmarkType.ENCODE,
         format=ImageFormat.JPEG,
+    ),
+    # XYB-aware JPEG decoder (jxl::extras::DecodeJpeg + CMS -> sRGB). Not part of
+    # the decoder sweep; it exists only to score the jpegli XYB encode variant,
+    # whose samples a standard libjpeg decode mis-colours (see scoring_decoder).
+    Implementation(
+        name="jpegli-decode",
+        build="cpp",
+        lang="c++",
+        bin="implementations/cpp/jpegli/build/bench-jpegli-decode",
+        type=BenchmarkType.DECODE,
+        format=ImageFormat.JPEG,
+        scoring_only=True,
     ),
     # PNG
     Implementation(
@@ -862,6 +888,19 @@ _JPEG_SEQUENTIAL_VARIANT = Variant(
     overrides={"progressive": "false"},
     description="Sequential (baseline) vs the default progressive scan",
 )
+# The two intermediate chroma modes, wired for the perceptually-tuned encoders
+# (jpegli, zenjpeg) that honour all four; the reference-class libjpeg encoders
+# stay at 4:2:0/4:4:4 to bound the default series count.
+_JPEG_422_VARIANT = Variant(
+    tag="subsampling-422",
+    overrides={"subsampling": "422"},
+    description="4:2:2 (horizontal chroma subsampling) vs the default 4:2:0",
+)
+_JPEG_440_VARIANT = Variant(
+    tag="subsampling-440",
+    overrides={"subsampling": "440"},
+    description="4:4:0 (vertical chroma subsampling) vs the default 4:2:0",
+)
 
 
 def _jpeg_full_schema(variants: Optional[list["Variant"]] = None) -> "TunableSchema":
@@ -927,6 +966,94 @@ def _mozjpeg_schema() -> "TunableSchema":
         ("optimize_scans", "irrelevant: scan-order micro-opt, not RD-relevant here"),
         ("dc_scan_opt_mode", "irrelevant: DC scan tuning, marginal vs quality"),
         ("base_quant_tbl_idx", "irrelevant: alternate quant tables, niche"),
+    ]
+    return schema
+
+
+def _jpegli_schema() -> "TunableSchema":
+    """jpegli exposes the shared JPEG knobs plus two jpegli-specific ones that are
+    its real differentiators over libjpeg-class encoders:
+      quality_control=distance -> native butteraugli distance quantization instead
+                                  of the libjpeg-style integer-quality path (the
+                                  default baseline stays on `quality` for continuity)
+      color=xyb                -> XYB perceptual colorspace (scored via jpegli-decode,
+                                  since a standard libjpeg decode mis-colours XYB)
+    Chroma spans all four modes (4:2:0/4:4:4/4:2:2/4:4:0). These land as curated
+    variant series; the base curve is unchanged."""
+    schema = _jpeg_full_schema(
+        variants=[
+            _JPEG_444_VARIANT,
+            _JPEG_422_VARIANT,
+            _JPEG_440_VARIANT,
+            Variant(
+                tag="distance",
+                overrides={"quality_control": "distance"},
+                description="Native butteraugli distance quantization "
+                "(vs the default libjpeg-style integer quality)",
+            ),
+            Variant(
+                tag="xyb",
+                overrides={"color": "xyb"},
+                description="XYB perceptual colorspace (jpegli's headline mode)",
+                scoring_decoder="jpegli-decode",
+            ),
+        ]
+    )
+    # Widen chroma to the full set jpegli's wrapper honours.
+    for t in schema.params:
+        if t.name == "subsampling":
+            t.choices = ["420", "444", "422", "440"]
+    schema.params.append(
+        Tunable(
+            name="quality_control",
+            kind="enum",
+            default="quality",
+            choices=["quality", "distance"],
+            description="Quality mapping: libjpeg integer quality vs native "
+            "butteraugli distance",
+        )
+    )
+    schema.params.append(
+        Tunable(
+            name="color",
+            kind="enum",
+            default="ycbcr",
+            choices=["ycbcr", "xyb"],
+            description="Colorspace: YCbCr vs XYB perceptual",
+        )
+    )
+    schema.perf_preset["quality_control"] = "quality"
+    schema.perf_preset["color"] = "ycbcr"
+    return schema
+
+
+def _zenjpeg_schema() -> "TunableSchema":
+    """zenjpeg (a pure-Rust jpegli port) exposes the shared JPEG knobs across all
+    four chroma modes. Two jpegli features are intentionally NOT surfaced:
+      - distance quantization: zenjpeg's YCbCr quality is already mapped through
+        jpegli's quality->distance formula, so its baseline IS the distance path
+        (a separate variant would duplicate the base curve).
+      - XYB: zenjpeg 0.8.4's XYB output does not round-trip to correct sRGB through
+        any decoder wired here (jpegli's decoder rejects it; zenjpeg's own decoder
+        does not invert XYB->sRGB), so it cannot be scored fairly. See
+        docs/zen-integration.md."""
+    schema = _jpeg_full_schema(
+        variants=[_JPEG_444_VARIANT, _JPEG_422_VARIANT, _JPEG_440_VARIANT]
+    )
+    for t in schema.params:
+        if t.name == "subsampling":
+            t.choices = ["420", "444", "422", "440"]
+    schema.skipped = [
+        (
+            "quality_control (distance)",
+            "zenjpeg's YCbCr quality already maps via jpegli's "
+            "quality->distance formula; a distance variant would duplicate the base",
+        ),
+        (
+            "color (xyb)",
+            "zenjpeg 0.8.4 XYB output does not round-trip to sRGB through any "
+            "harness decoder; cannot be scored fairly (see docs/zen-integration.md)",
+        ),
     ]
     return schema
 
@@ -1001,7 +1128,7 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
         variants=[_JPEG_444_VARIANT, _JPEG_SEQUENTIAL_VARIANT]
     ),
     "mozjpeg-encode": _mozjpeg_schema(),
-    "jpegli-encode": _jpeg_full_schema(),
+    "jpegli-encode": _jpegli_schema(),
     "jpeg-encoder-encode": _jpeg_full_schema(),
     "image-jpeg-encode": TunableSchema(
         params=[
@@ -1013,7 +1140,7 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
     ),
     # zenjpeg exposes quality + progressive + chroma subsampling, like the other
     # full-featured JPEG encoders.
-    "zenjpeg-encode": _jpeg_full_schema(),
+    "zenjpeg-encode": _zenjpeg_schema(),
     # --- WEBP ---
     "libwebp-encode": TunableSchema(
         params=[
@@ -1396,15 +1523,24 @@ def _derive_variant(
     tag: str,
     overrides: Dict[str, str],
     kind: Literal["curated", "oat"],
+    scoring_decoder: Optional[str] = None,
 ) -> None:
     """Register one derived variant: an Implementation reusing the base binary plus
     a schema with `overrides` folded into perf_preset. Idempotent per derived name
-    (so a curated variant and an identical OAT one don't double-register)."""
+    (so a curated variant and an identical OAT one don't double-register).
+    `scoring_decoder` (from the curated Variant) overrides the format decoder used
+    to score this variant's output."""
     vname = variant_impl_name(base.name, tag)
     if vname in TUNABLE_SCHEMAS:
         return
     IMPLEMENTATIONS.append(
-        base.model_copy(update={"name": vname, "variant_kind": kind})
+        base.model_copy(
+            update={
+                "name": vname,
+                "variant_kind": kind,
+                "scoring_decoder": scoring_decoder,
+            }
+        )
     )
     TUNABLE_SCHEMAS[vname] = schema.model_copy(
         update={
@@ -1433,7 +1569,9 @@ def _expand_variants() -> None:
         seen: set = set()
         for v in schema.variants:
             seen.add(frozenset(v.overrides.items()))
-            _derive_variant(base, schema, v.tag, v.overrides, "curated")
+            _derive_variant(
+                base, schema, v.tag, v.overrides, "curated", v.scoring_decoder
+            )
         for p in schema.params:
             if (
                 p.name == schema.quality_axis

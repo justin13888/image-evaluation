@@ -12,10 +12,10 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 |---|---|---|---|---|---|
 | `jpeg-encoder-encode` | rust | `quality` — 10→95 (11 pts, quality) | `subsampling-444` | `progressive-false` | `progressive`=true, `subsampling`=420 |
 | `image-jpeg-encode` | rust | `quality` — 10→95 (11 pts, quality) | — | — | — |
-| `zenjpeg-encode` | rust | `quality` — 10→95 (11 pts, quality) | `subsampling-444` | `progressive-false` | `progressive`=true, `subsampling`=420 |
+| `zenjpeg-encode` | rust | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `subsampling-422`, `subsampling-440` | `progressive-false` | `progressive`=true, `subsampling`=420 |
 | `libjpeg-turbo-encode` | c | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `progressive-off` | — | `progressive`=true, `subsampling`=420 |
 | `mozjpeg-encode` | c | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `progressive-off`, `trellis-off` | — | `progressive`=true, `subsampling`=420, `trellis`=true |
-| `jpegli-encode` | c++ | `quality` — 10→95 (11 pts, quality) | `subsampling-444` | `progressive-false` | `progressive`=true, `subsampling`=420 |
+| `jpegli-encode` | c++ | `quality` — 10→95 (11 pts, quality) | `subsampling-444`, `subsampling-422`, `subsampling-440`, `distance`, `xyb` | `progressive-false` | `progressive`=true, `subsampling`=420, `quality_control`=quality, `color`=ycbcr |
 
 ### PNG
 
@@ -59,6 +59,8 @@ Knobs the implementation *reads* but is deliberately pinned (`pinned`), plus lib
 
 | Implementation | Knob(s) | Status | Why |
 |---|---|---|---|
+| `zenjpeg-encode` | `quality_control (distance)` | not wired | zenjpeg's YCbCr quality already maps via jpegli's quality->distance formula; a distance variant would duplicate the base |
+| `zenjpeg-encode` | `color (xyb)` | not wired | zenjpeg 0.8.4 XYB output does not round-trip to sRGB through any harness decoder; cannot be scored fairly (see docs/zen-integration.md) |
 | `mozjpeg-encode` | `optimize_scans` | not wired | irrelevant: scan-order micro-opt, not RD-relevant here |
 | `mozjpeg-encode` | `dc_scan_opt_mode` | not wired | irrelevant: DC scan tuning, marginal vs quality |
 | `mozjpeg-encode` | `base_quant_tbl_idx` | not wired | irrelevant: alternate quant tables, niche |
@@ -96,6 +98,7 @@ Decoders take no tunables here — they consume the bitstream as-is and are scor
 | `zenjpeg-decode` | jpeg | rust | — |
 | `libjpeg-turbo-decode` | jpeg | c | dct_method / fancy_upsampling (output forced to 8-bit RGB; scored vs golden) |
 | `mozjpeg-decode` | jpeg | c | — |
+| `jpegli-decode` | jpeg | c++ | — |
 | `image-png-decode` | png | rust | — |
 | `zune-png-decode` | png | rust | — |
 | `zenpng-decode` | png | rust | — |

@@ -13,6 +13,14 @@ struct BenchContext {
     subsampling: ChromaSubsampling,
 }
 
+// NOTE on XYB: zenjpeg exposes EncoderConfig::xyb() (jpegli's headline mode), but
+// its XYB output does not round-trip to correct sRGB through any decoder wired
+// into this harness -- jpegli's decoder rejects zenjpeg's XYB bitstream, and
+// zenjpeg's own decoder does not invert XYB->sRGB via the buffered decode API, so
+// the scored PPM is garbage. Rather than ship an unscoreable variant, zenjpeg is
+// benchmarked in YCbCr only; jpegli carries the XYB comparison. See
+// docs/zen-integration.md.
+
 impl BenchmarkImplementation for ZenjpegEncodeBench {
     fn name(&self) -> &'static str {
         "zenjpeg-encode"
@@ -22,11 +30,12 @@ impl BenchmarkImplementation for ZenjpegEncodeBench {
         let (width, height, rgb) = benchmark_harness::decode_ppm_rgb8(&args.input)?;
         let quality = args.param_u32("quality", 80).clamp(1, 100) as u8;
         let progressive = args.param_bool("progressive", true);
-        // 4:4:4 (no subsampling) vs 4:2:0 (quarter chroma).
-        let subsampling = if args.param_str("subsampling", "420") == "444" {
-            ChromaSubsampling::None
-        } else {
-            ChromaSubsampling::Quarter
+        // 4:4:4 (None) / 4:2:2 (HalfHorizontal) / 4:4:0 (HalfVertical) / 4:2:0 (Quarter).
+        let subsampling = match args.param_str("subsampling", "420").as_str() {
+            "444" => ChromaSubsampling::None,
+            "422" => ChromaSubsampling::HalfHorizontal,
+            "440" => ChromaSubsampling::HalfVertical,
+            _ => ChromaSubsampling::Quarter,
         };
         Ok(Box::new(BenchContext {
             rgb,
