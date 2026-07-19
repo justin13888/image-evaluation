@@ -2,6 +2,8 @@
 
 This repository contains benchmarks for various image format implementations, comparing performance across C, C++, and Rust libraries.
 
+> Notes: We compare all *software* implementations of all standard (and still relevant) image formats and encourage new contributions to be submitted via GitHub issues/PR. Additionally, this implies that all *hardware* implementations are out-of-scope; in general, software encoders always result in better quality at the cost of latency and a correct hardware decoder typically can achieve lower latencies than an equivalent software decoder since formats typically require byte-for-byte exactness except for odd ones like JPEG.
+
 ## Getting Started
 
 ### Prerequisites
