@@ -111,12 +111,7 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 # Quick smoke test (2 quality points per impl, anchor timing, all-cores only)
 ./bench run --dataset kodak --sample 3 --quick
 
-# Demo: a fast, deliberately NON-rigorous sweep that still fills EVERY section of
-# the HTML report (rate-distortion, lossless, decoder fidelity, BD-rate, plus the
-# performance / scaling / effort overlays and the image gallery). It implies
-# --quick and turns on --scaling + --effort, defaults --sample to 2 and --jobs to
-# all logical cores, and keeps --perf anchor: a single run per point at maximum
-# parallelism — meant for demonstrating the report, not for accurate numbers.
+# Run fast, concatenated run
 ./bench run --demo                  # built-in 'test' dataset; finishes quickly
 ./bench run --demo --dataset kodak  # a few real images for richer curves
 
@@ -140,12 +135,7 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 # Peak memory during the timing overlay; override inner-loop iters/warmup (default 10/2)
 ./bench run --dataset div2k --measure-memory --iterations 20 --warmup 3
 
-# Comprehensive clic2025 run sized for ~8h on ~8 cores: fewer quality points and a
-# trimmed decoder sweep keep the matrix feasible, while --scaling and --effort add
-# the resolution-scaling and effort/speed characterizations in the same bundle
-# TODO: refresh this estimate — it predates the --perf-images bound. A default
-# `./bench run -d clic2025` is now ~1h (quality matrix ~20-30 min + a bounded
-# rigorous-timing overlay ~25-45 min); the overlay, not the matrix, is the lever.
+# Comprehensive clic2025 (runs for several hours to multiple days depending on device)
 ./bench run --dataset clic2025 --quality-steps 6 --decode-steps 3 --scaling --effort
 
 # Resolution-scaling characterization on its own (time vs pixels, fitted exponent)
@@ -172,6 +162,8 @@ IQA metrics come from the [`iqa`](https://crates.io/crates/iqa) crate via the pu
 
 ### Results
 
+> Note: Our canonical run of the benchmark on our own hardware is posted on website.
+
 Every run writes a **bundle** to `./results/<timestamp>/` containing a `quality/` subfolder (always), a `performance/` subfolder (whenever `--perf` is not `off`), and `scaling/`/`effort/` subfolders (when `--scaling`/`--effort` are given), plus a top-level index and a self-contained report:
 
 ```
@@ -193,38 +185,6 @@ results/<timestamp>/
 **`performance/`** — the optional rigorous-timing overlay. `raw.json` (full Hyperfine output: `mean/median/stddev/min/max`, `times[]`, `exit_codes[]`), `summary.md` (timing table + grouped single-vs-all-cores charts, one per format/operation), timing `*.png`, `manifest.json` (`suite: performance`, with the `perf` mode), and `memory.csv` (with `--measure-memory`).
 
 **`report.html`** is a single offline-friendly file, **quality-first**. The quality view is primary and interactive: the full `metrics.json` is embedded inline and the rate-distortion curves are drawn client-side as SVG (no third-party JS) — per-format charts plus a combined cross-format Pareto chart of the best encoders, with metric (SSIMULACRA2/PSNR/SSIM/Butteraugli) and linear/log-x toggles, hover tooltips, a sortable BD-rate table, a **lossless compression-efficiency** section (bpp leaderboard + size-vs-effort chart), and a **decoder fidelity & speed** section (decode time + PSNR vs the golden decoder). Every operating point's encode/decode **time** is also a visible dimension ([issue #46](https://github.com/justin13888/image-evaluation/issues/46)): on the rate-distortion, Pareto and lossless-effort charts time is the point's **bubble size** (bigger = slower), and the decoder section adds a **speed-vs-bitrate scatter** (decode time vs input bpp, approximate-decode points ringed). A per-section **Show time** toggle (default on) hides the time dimension when you want the rate-distortion shape on its own. **Clicking a data point** (or focusing a chart and pressing Enter, with arrow keys to step between points) opens an in-report **lightbox** of the exact images aggregated into that point — loaded lazily from `assets/` by relative URL (never embedded, so `report.html` stays small) with an original-vs-reconstruction toggle and per-image metrics. The rigorous-timing overlay's charts (embedded as base64 PNGs) follow below it as the secondary view. Because the raw data is embedded, anything in the quality view can be recomputed from the report alone.
-
-### Publishing the report
-
-The `report.html` is self-contained and static, so a bundle can be hosted on **[Cloudflare Pages](https://pages.cloudflare.com/)**. The whole bundle directory is uploaded — `report.html` **plus the `assets/` image tree** it links to — so the gallery works on the live site. The `deploy-report` task picks a bundle, runs pre-flight checks, stages an `index.html` (so the site root serves the report), and uploads it with the [wrangler](https://developers.cloudflare.com/workers/wrangler/) CLI (provisioned by `mise install`).
-
-Cloudflare Pages' free tier allows **20,000 files per deployment** and **25 MiB per file** (no total-size or bandwidth cap); the deploy task fails fast if a bundle would exceed either. A default `clic2025` run lands within both — ≈10k image files (about half the file budget) and a largest file of ~10 MiB (a near-raw lossless PNG of a ~3 MP photo) — though, because the images are kept verbatim, the total is sizeable (≈12 GB, dominated by the lossless points). It uploads free, but if a larger dataset/sweep pushes past the 20k-file limit (or you want a lighter deploy), re-run with `--no-report-images` or deploy a `--sample`d subset.
-
-**One-time Cloudflare setup:**
-
-1. Create a [Cloudflare account](https://dash.cloudflare.com/sign-up).
-2. Create a Pages project named `image-evaluation` (the default name). Either:
-   - **Dashboard:** Workers & Pages → Create → Pages → **Upload assets** (Direct Upload), and name it `image-evaluation`; or
-   - **CLI:** `wrangler pages project create image-evaluation --production-branch master`.
-3. Authenticate wrangler, either:
-   - **Interactive:** `wrangler login` (opens a browser), or
-   - **Headless/CI:** export `CLOUDFLARE_API_TOKEN` (a token with the *Cloudflare Pages → Edit* permission) and `CLOUDFLARE_ACCOUNT_ID`.
-
-**Configure (optional)** — all have defaults; override via the environment or a gitignored `mise.local.toml` `[env]` block:
-
-```bash
-export CF_PAGES_PROJECT=my-project   # Pages project name (default: image-evaluation)
-export CF_PAGES_BRANCH=master        # production branch    (default: master)
-```
-
-**Deploy:**
-
-```bash
-mise run deploy-report                            # newest bundle under results/
-mise run deploy-report results/20260614_164319    # a specific bundle
-```
-
-The task fails fast with an actionable message if the bundle or its `report.html` is missing, if `wrangler` isn't installed, or if you are not authenticated. On success wrangler prints the live `*.pages.dev` URL, whose root loads the report.
 
 ## Methodology
 
