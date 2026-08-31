@@ -373,6 +373,7 @@ Scoring an encoder requires a decoder (its output is decoded back before it can 
 **Surfaced** — these fail the run or move a number:
 
 * **Crashes, aborts, and non-zero exits** in any encoder or decoder. Every invocation is checked; a single errored row aborts the whole sweep with no report written.
+* **Hangs.** Every codec, reference encode/decode and metric invocation carries a wall-clock ceiling (`--codec-timeout`, default 1800 s), so a wedged binary fails its row instead of stalling the sweep indefinitely.
 * **Missing, empty, or wrong-length output** — the harness hard-checks that a produced raster is exactly `width × height × 3` bytes.
 * **Lossless round-trip divergence** — PNG, WebP VP8L and JXL distance-0 are compared against the source by a definitive byte-level compare, not just PSNR. Any differing byte is reported as `[NOT bit-exact vs source: N bytes differ]`.
 * **Decoder disagreement with the format's golden decoder**, with the distinction that matters: AV1/AVIF and VP8/WebP have *normative* integer inverse transforms, so a mismatch there is a genuine defect; JPEG (accuracy-bounded IDCT, ITU-T T.81 Annex A / IEEE 1180) and lossy JXL (floating-point VarDCT) are not bit-reproducible across independent decoders, so a high finite PSNR there is faithful, **not** broken.
@@ -389,7 +390,6 @@ Scoring an encoder requires a decoder (its output is decoded back before it can 
 * **Animation and multi-frame.** AVIF decodes only the first frame and every other decoder is single-image; no animated bitstream is ever produced or consumed.
 * **Non-4:2:0 chroma on the decode side.** Subsampling is swept as an *encoder* knob only (and only under `--params all`); decoders always receive 4:2:0.
 * **Metadata preservation of any kind** — PPM cannot carry it, so a codec that silently drops everything scores identically to one that preserves it.
-* **Hangs.** No codec invocation carries a timeout, so an infinite loop wedges a worker indefinitely rather than failing.
 * **Multi-threaded decode correctness.** The only multi-threaded runs are in the rigorous-timing overlay, which passes `--discard` and never scores the output.
 * **The reference and golden implementations themselves.** They define ground truth by construction: each format's golden decoder is scored against its own output and is therefore trivially bit-exact. A bug shared by a format's reference encoder and its reference decoder is invisible.
 

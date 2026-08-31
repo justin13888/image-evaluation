@@ -27,6 +27,8 @@ from colorama import Fore, Style
 from PIL import Image as PILImage
 
 from bench_lib.build import build_project, build_projects
+from bench_lib.imageprep import codec_timeout as _codec_timeout
+from bench_lib.imageprep import set_codec_timeout
 from bench_lib.imageprep import single_thread_env as _single_thread_env
 from bench_lib.imageprep import to_canonical_ppm, to_viewable_png
 from bench_lib.models import (
@@ -248,6 +250,7 @@ def get_input_files(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,  # Capture stderr to avoid spam, unless error
             env=_single_thread_env(),
+            timeout=_codec_timeout(),
         )
         return (target_file, f)
 
@@ -358,6 +361,7 @@ def get_decode_inputs(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 env=_single_thread_env(),
+                timeout=_codec_timeout(),
             )
         return (target, ppm)
 
@@ -654,6 +658,7 @@ def _decode_to_ppm(
         check=True,
         stderr=subprocess.PIPE,
         env=env,
+        timeout=_codec_timeout(),
     )
 
 
@@ -735,6 +740,7 @@ def _run_iqa(
         text=True,
         check=True,
         env=env,
+        timeout=_codec_timeout(),
     )
     data = json.loads(res.stdout.strip())
     ss = data.get("ssimulacra2")
@@ -896,6 +902,7 @@ def _measure_one(
             capture_output=True,
             text=True,
             env=env,
+            timeout=_codec_timeout(),
         )
         elapsed_time = time.time() - start_time
 
@@ -1058,6 +1065,16 @@ def _measure_one(
         return (metric, status)
     except Exception as e:
         detail = ""
+        if isinstance(e, subprocess.TimeoutExpired):
+            # Distinct from a crash: the binary is alive but wedged. Name the
+            # lever, since the fix is either a genuinely slow operating point
+            # (raise the ceiling) or a hung codec (a real defect to chase).
+            detail += (
+                f"\n  {Fore.YELLOW}Timed out after {e.timeout:.0f}s — the codec "
+                f"did not finish a single iteration. Raise --codec-timeout if this "
+                f"operating point is legitimately this slow, or set it to 0 to "
+                f"disable the ceiling.{Style.RESET_ALL}"
+            )
         if isinstance(e, subprocess.CalledProcessError):
             if e.stderr:
                 detail += (
@@ -1982,6 +1999,10 @@ def run_sweep(args: RunArgs) -> None:
     timing overlay on the selected subset (each impl's preset point for ``anchor``,
     every point for ``all``) across both thread modes. Both halves cover the *same*
     operating-point sweep, so quality and performance are reported together."""
+    # Share the ceiling with every module that spawns a codec (runner, scaling,
+    # effort, imageprep) before any task runs.
+    set_codec_timeout(args.codec_timeout)
+
     if not args.skip_build:
         build_projects(args.formats)
     else:
