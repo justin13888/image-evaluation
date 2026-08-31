@@ -272,7 +272,7 @@ The benchmarks use a tiered collection of images to test different performance c
 
 **Preparation Phase:**
 
-* **For Encoding:** Images are taken as-is and converted to raw PPM (RGB24) or PAM (RGBA32) format.
+* **For Encoding:** Images are canonicalized to 8-bit P6 PPM (RGB24) by a single ImageMagick pass (`convert … -depth 8 ppm:`). Alpha is flattened and all metadata (ICC, EXIF) is dropped — see [Correctness Coverage](#correctness-coverage).
 * **For Decoding:** Images are pre-encoded using the **reference implementation** of the corresponding format at that encoder's fixed performance preset.
 
 #### Dataset Selection Strategy
@@ -365,6 +365,35 @@ The metric pass measures the fidelity of each output using the [`iqa`](https://c
 > - **Butteraugli** (derived from libjxl) estimates the perceptual difference between two images, with **lower** meaning closer to identical (0 = identical). Like the others it encodes specific assumptions and can disagree with human judgement on content it was not tuned for.
 >
 > These are all *automated, full-reference* metrics: they compare against the source pixels and say nothing about aesthetic quality, artifact *annoyance*, or content the metric was never trained on (e.g. text, screenshots, medical or satellite imagery). **Aggregate scores (BD-rate, Pareto fronts) can be sensitive to the metric, dataset, and operating points chosen, and a few points of SSIMULACRA2 may not be perceptible.** Treat these results as a reproducible *guide* for narrowing options, **not** as a substitute for a properly controlled human subjective study (e.g. MOS/2AFC) when determining the genuinely best-looking option for a given use case.
+
+#### Correctness Coverage
+
+Scoring an encoder requires a decoder (its output is decoded back before it can be compared) and scoring a decoder requires an encoder (the golden bitstream it consumes), so a sweep exercises both sides of every format. That makes it a real correctness signal for some defects and structurally blind to others. **A clean sweep means the codecs agree on opaque 8-bit RGB photographic content — not that they are conformant.**
+
+**Surfaced** — these fail the run or move a number:
+
+* **Crashes, aborts, and non-zero exits** in any encoder or decoder. Every invocation is checked; a single errored row aborts the whole sweep with no report written.
+* **Missing, empty, or wrong-length output** — the harness hard-checks that a produced raster is exactly `width × height × 3` bytes.
+* **Lossless round-trip divergence** — PNG, WebP VP8L and JXL distance-0 are compared against the source by a definitive byte-level compare, not just PSNR. Any differing byte is reported as `[NOT bit-exact vs source: N bytes differ]`.
+* **Decoder disagreement with the format's golden decoder**, with the distinction that matters: AV1/AVIF and VP8/WebP have *normative* integer inverse transforms, so a mismatch there is a genuine defect; JPEG (accuracy-bounded IDCT, ITU-T T.81 Annex A / IEEE 1180) and lossy JXL (floating-point VarDCT) are not bit-reproducible across independent decoders, so a high finite PSNR there is faithful, **not** broken.
+* **Wrong decoded dimensions** on any decode or lossless-encode row (a size mismatch counts as not-bit-exact).
+* **Gross quality or size regressions**, as SSIMULACRA2/PSNR/bpp outliers on the rate-distortion curve.
+
+**Not surfaced** — outside the pipeline by construction:
+
+* **ICC profiles and colour management.** Inputs are canonicalized to raw P6 PPM, which carries no colour metadata; no encoder writes a profile and no decoder reads one. The sole exception is the jpegli XYB variant, which embeds an XYB ICC and is routed to a colour-managed scoring decoder to be scoreable at all.
+* **Colour primaries, transfer characteristics, matrix coefficients and range.** Only `rav1e` tags these explicitly (full-range BT.709); every other encoder takes library defaults, and nothing verifies that the signalled tag matches the pixels. A codec that mis-signals its colour space but round-trips self-consistently scores perfectly.
+* **EXIF, XMP and orientation.** Never read, never written, never compared.
+* **Alpha.** Flattened to opaque RGB before any codec runs — including `pathological/alpha_gradient_4k.png`, whose alpha is destroyed by the conversion, so it exercises nothing about alpha.
+* **Bit depths above 8, grayscale, and palette inputs**, all normalized away upstream (see limitation 5).
+* **Animation and multi-frame.** AVIF decodes only the first frame and every other decoder is single-image; no animated bitstream is ever produced or consumed.
+* **Non-4:2:0 chroma on the decode side.** Subsampling is swept as an *encoder* knob only (and only under `--params all`); decoders always receive 4:2:0.
+* **Metadata preservation of any kind** — PPM cannot carry it, so a codec that silently drops everything scores identically to one that preserves it.
+* **Hangs.** No codec invocation carries a timeout, so an infinite loop wedges a worker indefinitely rather than failing.
+* **Multi-threaded decode correctness.** The only multi-threaded runs are in the rigorous-timing overlay, which passes `--discard` and never scores the output.
+* **The reference and golden implementations themselves.** They define ground truth by construction: each format's golden decoder is scored against its own output and is therefore trivially bit-exact. A bug shared by a format's reference encoder and its reference decoder is invisible.
+
+> **Note:** correctness here is *reported*, not *enforced* — a non-bit-exact lossless decode appears in the sweep log and the decoder-fidelity table, but only an outright error fails a run. There is also no codec-level test suite: `mise run test` covers report generation, not codec behaviour.
 
 #### Discard Checksum
 
@@ -559,6 +588,8 @@ We include modern formats and their most competitive implementations.
 7. **imazen "zen" implementations — AGPL + integration caveats** *(as of 2026-06-11)*. The `zen*` implementations ([zenjpeg](https://github.com/imazen/zenjpeg), [zenpng](https://github.com/imazen/zenpng), [zenwebp](https://github.com/imazen/zenwebp), [zenjxl](https://github.com/imazen/zenjxl)) are **AGPL-3.0** ([issue #34](https://github.com/justin13888/image-evaluation/issues/34)). The harness and repository remain MIT-licensed, but any benchmark binary that links a `zen*` library is an AGPL-derived work, so redistributing built binaries must honour the AGPL. Two integration caveats apply as of this date — see [`docs/zen-integration.md`](docs/zen-integration.md) for the live status:
    - **zenjxl is blocked** and not yet built: `zenjxl 0.2.1` requires `jxl-encoder ^0.3.2`, which is not published to crates.io (max published is 0.3.1), so the workspace cannot resolve it. Re-check once `jxl-encoder 0.3.2` is released.
    - **zenavif was dropped**: it is a thin wrapper over the pure-Rust `rav1d-safe` decoder, whose multithreaded CDEF SIMD path panics intermittently (`overlapping DisjointMut` in `cdef_arm.rs`) on AVIF decode. AVIF is already covered by libavif/rav1e/SVT-AV1 and the dav1d/rav1d/libgav1 decoders, so the wrapper added flakiness without coverage. Re-add once the upstream `rav1d-safe` race is fixed.
+
+8. **Correctness coverage is narrow.** The sweep validates codec-level fidelity on opaque 8-bit RGB — crashes, lossless round-trip divergence, and decoder disagreement with the format's golden decoder. It says nothing about ICC/colour-space handling, EXIF, alpha, higher bit depths, animation, or metadata preservation, and cannot detect a bug shared by a format's reference encoder and decoder (see [Correctness Coverage](#correctness-coverage)).
 
 ## Contributing
 
