@@ -1888,6 +1888,15 @@ class RunArgs(BaseArgs):
             "points suffice; default 3. Use 0 for the full encoder axis (legacy)."
         ),
     ] = 3
+    codec_timeout: Annotated[
+        float,
+        Field(
+            description="Wall-clock ceiling (seconds) for a single codec, reference "
+            "encode/decode or iqa-cli invocation in the metric pass. A wedged binary "
+            "fails its row instead of stalling a worker forever. Default 1800; use 0 "
+            "to disable."
+        ),
+    ] = 1800.0
     iterations: Annotated[
         int,
         tyro.conf.arg(aliases=["-i"]),

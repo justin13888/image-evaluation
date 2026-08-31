@@ -18,6 +18,32 @@ from typing import Dict, Optional
 from PIL import Image as PILImage
 
 
+# Wall-clock ceiling for a single codec / conversion subprocess, in seconds.
+# The metric pass runs every binary with ``--iterations 1``, so this is generous
+# by orders of magnitude against any observed operating point; it exists so a
+# wedged encoder or decoder fails its row instead of stalling a worker thread
+# forever. ``--codec-timeout`` overrides it via :func:`set_codec_timeout`.
+DEFAULT_CODEC_TIMEOUT_S: float = 1800.0
+
+_codec_timeout_s: float = DEFAULT_CODEC_TIMEOUT_S
+
+
+def set_codec_timeout(seconds: Optional[float]) -> None:
+    """Set the per-subprocess timeout every sweep shares. ``None`` restores the
+    default; a non-positive value disables the timeout entirely (the pre-existing
+    behaviour, for anyone deliberately profiling a very slow point)."""
+    global _codec_timeout_s
+    if seconds is None:
+        _codec_timeout_s = DEFAULT_CODEC_TIMEOUT_S
+    else:
+        _codec_timeout_s = float(seconds)
+
+
+def codec_timeout() -> Optional[float]:
+    """Timeout to pass to ``subprocess.run``; ``None`` means no limit."""
+    return _codec_timeout_s if _codec_timeout_s > 0 else None
+
+
 def single_thread_env() -> Dict[str, str]:
     """Process environment that pins rayon-/OMP-based codecs (and iqa-cli) to a
     single thread, so a parallel pool of one-thread tasks saturates the CPU
@@ -69,6 +95,7 @@ def to_canonical_ppm(src: str, out_ppm: str, target_px: Optional[int] = None) ->
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=codec_timeout(),
         )
         os.replace(tmp, out_ppm)
     finally:
@@ -99,6 +126,7 @@ def to_viewable_png(src: str, out_png: str) -> bool:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=codec_timeout(),
         )
         os.replace(tmp, out_png)
     finally:
