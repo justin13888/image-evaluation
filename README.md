@@ -8,7 +8,7 @@ This repository contains benchmarks for various image format implementations, co
 
 ### Prerequisites
 
-* [mise](https://mise.jdx.dev/) — task runner and tool manager (install: `curl https://mise.run | sh`). It provisions the project's `uv` (Python package manager) and [`hk`](https://hk.jdx.dev/) (git hooks); run `mise install` to fetch them. Rust (via rustup) and the system C/C++ build tools below are not managed by mise.
+* [mise](https://mise.jdx.dev/) — task runner and tool manager (install: `curl https://mise.run | sh`). It provisions the project's `uv` (Python package manager), [`hk`](https://hk.jdx.dev/) (git hooks) and `clang-format` (pinned, so local and CI formatting agree); run `mise install` to fetch them. Rust (via rustup) and the system C/C++ build tools below are not managed by mise.
 * Rust toolchain ([rustup](https://rustup.rs/))
 * CMake, Clang, ccache
 * Autoconf + Automake (to build the vendored NASM assembler)
@@ -18,14 +18,14 @@ This repository contains benchmarks for various image format implementations, co
   On Ubuntu/Debian:
 
   ```bash
-  sudo apt install build-essential clang clang-format cmake ccache autoconf automake \
+  sudo apt install build-essential clang cmake ccache autoconf automake \
     meson ninja-build pkg-config imagemagick hyperfine wget unzip
   ```
 
   On macOS:
 
   ```bash
-  brew install clang-format cmake ccache autoconf automake meson ninja pkg-config imagemagick hyperfine wget unzip
+  brew install cmake ccache autoconf automake meson ninja pkg-config imagemagick hyperfine wget unzip
   ```
 
 The NASM assembler (used to assemble the x86-64 SIMD kernels in aom, dav1d, rav1d, libjpeg-turbo, mozjpeg, SVT-AV1, and libwebp) is also vendored as a git submodule and built from source automatically — you no longer need a system-wide `nasm`. All C/C++ image libraries (zlib, mimalloc, libjpeg-turbo, mozjpeg, libpng, spng, libwebp, dav1d, aom, SVT-AV1, libgav1, libavif, libjxl) and Rust libraries (rav1d, jxl-rs) are vendored as git submodules and built automatically; image-quality metrics come from the published [`iqa-cli`](https://crates.io/crates/iqa-cli) binary (installed from crates.io via `cargo install`, building the [`iqa`](https://crates.io/crates/iqa) crate with lcms2 compiled from source). No system dev packages for these libraries are required.

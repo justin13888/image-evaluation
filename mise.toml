@@ -7,6 +7,12 @@ uv = "0.11.21"
 node = "22"
 "npm:wrangler" = "4"
 meson = "latest"
+# clang-format backs the fmt-cpp / check-fmt-cpp tasks. Pinned exactly: the
+# formatter's output drifts between major releases, so an unpinned version would
+# reformat the tree (and fail CI) purely by upgrading. Provisioning it here keeps
+# local and CI formatting on the same version, the way nasm is vendored rather
+# than assumed present.
+"clang-format" = "23.1.0"
 
 [hooks]
 # Wire the git hooks (hk.pkl) automatically after `mise install`.
