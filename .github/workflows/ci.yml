@@ -42,9 +42,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang ccache autoconf automake meson ninja-build pkg-config
 
-      - name: Install clang-format
-        run: sudo apt-get install -y clang-format
-
       - name: Install mise tools
         uses: jdx/mise-action@v3
 
