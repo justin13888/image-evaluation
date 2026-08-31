@@ -69,13 +69,17 @@ fn to_canonical_rgb8(samples: &[u8], channels: usize) -> Result<Vec<u8>> {
     match channels {
         3 => out.extend_from_slice(samples),
         4 => samples
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .for_each(|c| out.extend_from_slice(&c[..3])),
         1 => samples
             .iter()
             .for_each(|&g| out.extend_from_slice(&[g, g, g])),
         2 => samples
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .for_each(|c| out.extend_from_slice(&[c[0], c[0], c[0]])),
         n => anyhow::bail!("unsupported channel count {n}"),
     }
