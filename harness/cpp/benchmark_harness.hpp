@@ -200,11 +200,35 @@ inline RGBImage decode_ppm_rgb8(const std::string& input_path) {
     pos++;
   }
 
-  // Skip max value
+  // Parse the max value rather than skipping it. It determines the sample
+  // width: maxval <= 255 is one byte per sample, anything larger is two
+  // (big-endian). Skipping it silently reinterprets a 16-bit raster as 8-bit
+  // garbage, and diverges from the Rust harness, which honours maxval via the
+  // `image` crate -- so the two harnesses would not agree on the same input.
+  // The pipeline canonicalizes every input to 8-bit upstream, so reject rather
+  // than downconvert: this is a contract check, not a conversion path.
   while (pos < buffer.size() &&
          (data[pos] == ' ' || data[pos] == '\n' || data[pos] == '\r'))
     pos++;
-  while (pos < buffer.size() && data[pos] >= '0' && data[pos] <= '9') pos++;
+  int maxval = 0;
+  size_t maxval_digits = 0;
+  while (pos < buffer.size() && data[pos] >= '0' && data[pos] <= '9') {
+    // Clamp instead of overflowing on a pathological run of digits; any value
+    // this large is rejected immediately below anyway.
+    if (maxval < 1000000) maxval = maxval * 10 + (data[pos] - '0');
+    maxval_digits++;
+    pos++;
+  }
+  if (maxval_digits == 0 || maxval <= 0) {
+    throw std::runtime_error("Malformed PPM header: missing or invalid maxval");
+  }
+  if (maxval > 255) {
+    throw std::runtime_error(
+        "Unsupported PPM maxval " + std::to_string(maxval) +
+        ": this harness is 8-bit only (maxval <= 255). Inputs are "
+        "canonicalized "
+        "with `convert ... -depth 8 ppm:` before benchmarking.");
+  }
   // Exactly one whitespace character separates the maxval from the raster.
   // Do NOT skip further: the first pixel byte may itself be a whitespace
   // value (e.g. 0x0a/0x0d/0x20), which a greedy skip would wrongly consume.
