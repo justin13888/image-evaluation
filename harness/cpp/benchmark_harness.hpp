@@ -109,37 +109,6 @@ inline std::vector<uint8_t> encode_ppm_rgb8(
   return output;
 }
 
-/// Encodes RGB pixel data as PPM P6 format (16-bit per channel).
-///
-/// @param width Image width in pixels
-/// @param height Image height in pixels
-/// @param rgb_data RGB pixel data (u16 values, 3 values per pixel, row-major
-/// order)
-/// @return A vector containing the complete PPM file (header + pixel data in
-/// big-endian)
-inline std::vector<uint8_t> encode_ppm_rgb16(
-    uint32_t width, uint32_t height, const std::vector<uint16_t>& rgb_data) {
-  size_t expected_size = static_cast<size_t>(width) * height * 3;
-  if (rgb_data.size() != expected_size) {
-    throw std::runtime_error(
-        "RGB data size mismatch: expected " + std::to_string(expected_size) +
-        " u16 values, got " + std::to_string(rgb_data.size()));
-  }
-
-  std::string header = "P6\n" + std::to_string(width) + " " +
-                       std::to_string(height) + "\n65535\n";
-  std::vector<uint8_t> output;
-  output.reserve(header.size() + rgb_data.size() * 2);
-  output.insert(output.end(), header.begin(), header.end());
-
-  // Convert to big-endian
-  for (uint16_t val : rgb_data) {
-    output.push_back(static_cast<uint8_t>(val >> 8));
-    output.push_back(static_cast<uint8_t>(val & 0xFF));
-  }
-  return output;
-}
-
 struct RGBImage {
   int width;
   int height;
