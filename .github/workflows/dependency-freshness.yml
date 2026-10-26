@@ -1,0 +1,70 @@
+name: Dependency freshness
+
+# Advisory, monthly report of benchmarked implementations with a newer upstream
+# release (scripts/check_updates.py). Outdated dependencies never fail the run:
+# they are reported through a single tracking issue, so an upgrade stays a
+# deliberate, re-validated change. Only a failed lookup turns the run red.
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dependency-freshness
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for upstream releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Submodule pins are read from HEAD's tree, so no submodule checkout.
+      - uses: actions/checkout@v4
+
+      - name: Check for updates
+        id: check
+        run: |
+          set +e
+          python3 scripts/check_updates.py --output report.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      # Only the default branch reflects what is benchmarked; a dispatch from any
+      # other branch reports in the step summary without touching the issue.
+      - name: Update tracking issue
+        if: >-
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+          && (steps.check.outputs.status == '0' || steps.check.outputs.status == '1')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.check.outputs.status }}
+          TITLE: Outdated benchmarked implementations
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Only an issue this workflow opened counts, not a same-titled one by anyone else.
+          number=$(gh issue list --state open --author app/github-actions \
+            --search "in:title \"$TITLE\"" --json number,title --jq 'map(select(.title == env.TITLE)) | first | .number // empty')
+
+          if [ "$STATUS" = 0 ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "Every benchmarked implementation is on its latest release ($RUN_URL)."
+            fi
+          elif [ -z "$number" ]; then
+            gh issue create --title "$TITLE" --body-file report.md
+          elif [ "$(gh issue view "$number" --json body --jq .body)" != "$(cat report.md)" ]; then
+            # Editing a body sends no notification; the comment does.
+            gh issue edit "$number" --body-file report.md
+            gh issue comment "$number" --body "The report changed ($RUN_URL)."
+          fi
+
+      - name: Fail on lookup errors
+        if: steps.check.outputs.status != '0' && steps.check.outputs.status != '1'
+        run: |
+          echo "::error::Dependency lookups failed (exit ${{ steps.check.outputs.status }}); see the step summary."
+          exit 1
