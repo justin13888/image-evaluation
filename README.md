@@ -555,3 +555,4 @@ Contributions are welcome!
 * **Image Sets:** Proposals for additional pathological or domain-specific test images are welcome.
 * Run `mise run fix` before committing, or let the pre-commit hook handle it automatically.
 * CI runs `mise run check` and `mise run test` on all PRs.
+* **Keeping implementations current:** `mise run check-updates` lists vendored submodules whose pinned release tag has a newer stable tag upstream, and implementation crates whose locked version trails crates.io. The `Dependency freshness` workflow runs it on the 1st of every month. It is advisory only: the workflow stays green and keeps one `Outdated benchmarked implementations` issue open (and closes it once everything is current). The run fails only when a lookup itself fails. Bumping a codec changes benchmark results, so upgrades stay a deliberate, re-validated change.
