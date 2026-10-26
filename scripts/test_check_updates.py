@@ -7,6 +7,7 @@ ordering, sparse-index and lockfile resolution, and report rendering. No network
 import json
 import os
 import sys
+import tempfile
 import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -56,6 +57,9 @@ def test_release_tags():
     assert pinned_release_tag("c0ff", tags) == "v1.6.0"
     assert pinned_release_tag("ccc3", tags) is None, "pre-release pins are not releases"
     assert pinned_release_tag("9999", tags) is None
+    # aom tags one commit both v3.14.1-rc1 and v3.14.1: the release wins.
+    shared = {"v3.14.1-rc1": "abc", "v3.14.1": "abc", "v3.14": "abc"}
+    assert pinned_release_tag("abc", shared) == "v3.14.1"
     # Numeric, not lexicographic (1.10 > 1.6), pre-releases skipped, prefix-scoped.
     assert latest_release_tag("v", tags) == "v1.10.0"
     assert latest_release_tag("", tags) == "1.99.0"
@@ -147,13 +151,19 @@ def test_lockfile_resolution():
         "zune-jpeg",
         "0.5.5",
     )
+    expect_lookup_error(
+        lambda: locked_version(lock, "bench-demo", "missing"), "an unlocked dependency"
+    )
+    print("✓ lockfile: benchmarked crates resolve to their locked versions")
+
+
+def expect_lookup_error(fn, what):
     try:
-        locked_version(lock, "bench-demo", "missing")
+        fn()
     except LookupError:
         pass
     else:
-        raise AssertionError("an unlocked dependency must be a lookup failure")
-    print("✓ lockfile: benchmarked crates resolve to their locked versions")
+        raise AssertionError(f"{what} must be a lookup failure")
 
 
 def test_benchmarked_crates_cover_repo():
@@ -169,6 +179,28 @@ def test_benchmarked_crates_cover_repo():
     print(
         f"✓ BENCHMARKED_CRATES: {len(pins)} codec pins cover the Rust implementations"
     )
+
+
+def test_incomplete_repo_is_a_failure():
+    # Finding nothing, or an implementation nobody listed, must never read as
+    # "everything current".
+    real_root = check_updates.REPO_ROOT
+    with tempfile.TemporaryDirectory() as root:
+        check_updates.REPO_ROOT = root
+        try:
+            expect_lookup_error(check_updates.list_submodules, "a missing .gitmodules")
+            impl = os.path.join(root, "implementations", "rust", "new-codec")
+            os.makedirs(impl)
+            with open(os.path.join(impl, "Cargo.toml"), "w") as f:
+                f.write('[package]\nname = "bench-new-codec"\n')
+            with open(os.path.join(root, "Cargo.lock"), "w") as f:
+                f.write("version = 4\n")
+            expect_lookup_error(
+                check_updates.collect_crate_pins, "an unlisted implementation"
+            )
+        finally:
+            check_updates.REPO_ROOT = real_root
+    print("✓ incomplete repo: missing submodules / unlisted implementation fail")
 
 
 def test_report():
@@ -193,6 +225,7 @@ def main():
     test_semver()
     test_lockfile_resolution()
     test_benchmarked_crates_cover_repo()
+    test_incomplete_repo_is_a_failure()
     test_report()
     print("\nAll dependency freshness checks passed.")
 

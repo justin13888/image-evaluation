@@ -48,7 +48,7 @@ BETA_TAG_RULES: dict[str, Callable[[tuple[int, ...]], bool]] = {
 BENCHMARKED_CRATES: dict[str, list[str]] = {
     "image-jpeg": ["image", "image/zune-jpeg"],
     "image-png": ["image", "image/png"],
-    "image-webp": ["image", "image-webp"],
+    "image-webp": ["image", "image/image-webp"],
     "jpeg-decoder": ["jpeg-decoder"],
     "jpeg-encoder": ["jpeg-encoder"],
     "jxl-oxide": ["jxl-oxide"],
@@ -165,11 +165,15 @@ def list_submodules() -> list[tuple[str, str]]:
     """(path, url) for every submodule in .gitmodules, in file order."""
     parser = configparser.ConfigParser()
     parser.read(os.path.join(REPO_ROOT, ".gitmodules"))
-    return [
+    submodules = [
         (parser[section]["path"], parser[section]["url"])
         for section in parser.sections()
         if section.startswith("submodule ")
     ]
+    # ConfigParser ignores a missing file; finding nothing must not read as current.
+    if not submodules:
+        raise LookupError("no submodules found in .gitmodules")
+    return submodules
 
 
 def check_submodule(path: str, url: str) -> Row:
@@ -341,18 +345,20 @@ def main() -> int:
     )
     ap.add_argument("--output", help="also write the markdown report to this file")
     args = ap.parse_args()
-
     try:
-        rows, errors = run_checks()
+        return run(args.output)
     except Exception:
         # An uncaught exception would exit 1, which reads as "outdated".
         traceback.print_exc()
         return 2
 
+
+def run(output: str | None) -> int:
+    rows, errors = run_checks()
     report = render_report(rows, errors)
     print(report, end="")
-    if args.output:
-        with open(args.output, "w") as f:
+    if output:
+        with open(output, "w") as f:
             f.write(report)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as f:
