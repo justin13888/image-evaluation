@@ -43,7 +43,7 @@ Every encoder is swept across one **quality/effort axis** (a rate-distortion cur
 | Encoder | Lang | Swept axis | Curated variants (default) | `--params all` adds | Other knobs read |
 |---|---|---|---|---|---|
 | `rav1e-encode` | rust | `quality` — 20→90 (8 pts, quality) | — | `chroma-444` | `speed`=6†, `chroma`=420 |
-| `libavif-encode` | c | `quality` — 20→90 (8 pts, quality) | — | `yuv-444` | `speed`=6†, `yuv`=420 |
+| `libavif-encode` | c | `quality` — 20→90 (8 pts, quality) | `tune-ssim` | `yuv-444`, `tune-ssimulacra2`, `tune-psnr` | `speed`=6†, `yuv`=420, `tune`=iq |
 | `svt-av1-encode` | c | `quality` — 20→90 (8 pts, quality) | — | — | `speed`=6†, `yuv`=420 |
 
 ### JXL
@@ -74,9 +74,10 @@ Knobs the implementation *reads* but is deliberately pinned (`pinned`), plus lib
 | `rav1e-encode` | `tiling` | not wired | irrelevant: tile_rows/tile_cols affect parallelism, not RD |
 | `rav1e-encode` | `film_grain` | not wired | deferred: needs calibrated noise params (TODO in encode.rs) |
 | `libavif-encode` | `speed` | pinned (wired) | speed is a quality/throughput trade — covered by the performance overlay, not a default RD series |
-| `libavif-encode` | `codec-specific-options` | not wired | deferred: aom/svt keys (tune/aq-mode/sharpness/denoise) via avifEncoderSetCodecSpecificOption are backend- and version-specific; tracked for follow-up |
+| `libavif-encode` | `codec-specific-options` | not wired | deferred: aom/svt keys (aq-mode/sharpness/denoise) via avifEncoderSetCodecSpecificOption are backend- and version-specific; tracked for follow-up |
 | `libavif-encode` | `tiling` | not wired | irrelevant: tileRowsLog2/tileColsLog2 affect parallelism, not RD |
 | `libavif-encode` | `min/maxQuantizer` | not wired | deprecated by libavif in favour of `quality` |
+| `libavif-encode` | `tune (vmaf*/butteraugli)` | not wired | unavailable: needs libaom built with CONFIG_TUNE_VMAF / CONFIG_TUNE_BUTTERAUGLI plus external libvmaf / libjxl |
 | `svt-av1-encode` | `speed` | pinned (wired) | speed is a quality/throughput trade — covered by the performance overlay, not a default RD series |
 | `svt-av1-encode` | `codec-specific-options` | not wired | deferred: aom/svt keys (tune/aq-mode/sharpness/denoise) via avifEncoderSetCodecSpecificOption are backend- and version-specific; tracked for follow-up |
 | `svt-av1-encode` | `tiling` | not wired | irrelevant: tileRowsLog2/tileColsLog2 affect parallelism, not RD |

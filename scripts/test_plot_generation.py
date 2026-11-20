@@ -547,6 +547,35 @@ def test_variant_series_roundtrip():
     print("✓ variant series round-trip:", parsed["impl"])
 
 
+def test_libaom_tune_series():
+    """libavif-encode (libaom backend) pins tune=iq on its base series and derives
+    one series per comparison tune: ssim by default, ssimulacra2/psnr only under
+    --full. SVT-AV1 shares the AVIF schema but must not receive the aom-only knob."""
+    from bench_lib.models import IMPLEMENTATIONS, schema_for
+
+    base = schema_for("libavif-encode")
+    assert base.perf_preset.get("tune") == "iq", "base series must pin tune=iq"
+    assert base.quality_params("65").get("tune") == "iq", "tune must reach the binary"
+    kinds = {i.name: i.variant_kind for i in IMPLEMENTATIONS}
+    expected = {
+        "libavif-encode@tune-ssim": ("curated", "ssim"),
+        "libavif-encode@tune-ssimulacra2": ("oat", "ssimulacra2"),
+        "libavif-encode@tune-psnr": ("oat", "psnr"),
+    }
+    for name, (kind, tune) in expected.items():
+        assert kinds.get(name) == kind, (
+            f"{name}: expected {kind}, got {kinds.get(name)}"
+        )
+        assert schema_for(name).perf_preset.get("tune") == tune, name
+    # No duplicate OAT series for a tune already covered by a named variant.
+    tune_series = [n for n in kinds if n.startswith("libavif-encode@tune")]
+    assert sorted(tune_series) == sorted(expected), tune_series
+    svt = schema_for("svt-av1-encode")
+    assert "tune" not in {p.name for p in svt.params}, "tune is libaom-only"
+    assert "tune" not in svt.perf_preset, "tune is libaom-only"
+    print("✓ libaom tune series: iq base + ssim/ssimulacra2/psnr variants")
+
+
 def test_tunables_doc_in_sync():
     """docs/tunables.md must match what the schemas generate — the overview is the
     single in-code source of truth, so drift fails CI (run ./bench docs to fix)."""
@@ -615,6 +644,7 @@ def main():
     test_quality_summary()
     test_report_html()
     test_variant_series_roundtrip()
+    test_libaom_tune_series()
     test_asset_paths()
     test_tunables_doc_in_sync()
     print("\nAll plot/report generation checks passed.")

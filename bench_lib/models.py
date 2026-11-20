@@ -1096,7 +1096,9 @@ def _zenjpeg_schema() -> "TunableSchema":
     return schema
 
 
-def _avif_schema(support_444: bool = True) -> "TunableSchema":
+def _avif_schema(
+    support_444: bool = True, support_tune: bool = False
+) -> "TunableSchema":
     """AVIF encoders via libavif (libavif, svt-av1) share a 0-100 quality knob plus
     a speed preset and chroma format. `speed` is a quality/throughput trade left to
     the performance overlay; 4:4:4 chroma is a `--full`-only secondary series (a
@@ -1104,60 +1106,114 @@ def _avif_schema(support_444: bool = True) -> "TunableSchema":
 
     `support_444=False` restricts the encoder to 4:2:0 only and drops the 4:4:4
     series — SVT-AV1 (`Svt[error]: Only support 420 now`) rejects any other chroma
-    format, so exposing the variant would just produce guaranteed-failing runs."""
-    return TunableSchema(
-        params=[
-            Tunable(
-                name="quality",
-                kind="int",
-                default="65",
-                min=0,
-                max=100,
-                description="AVIF quality (0-100)",
-            ),
-            Tunable(
-                name="speed",
-                kind="int",
-                default="6",
-                min=0,
-                max=10,
-                skip_reason="speed is a quality/throughput trade — covered by the "
-                "performance overlay, not a default RD series",
-            ),
-            Tunable(
-                name="yuv",
-                kind="enum",
-                default="420",
-                choices=["420", "444"] if support_444 else ["420"],
-                description="Chroma subsampling (YUV format)",
-            ),
-        ],
-        quality_axis="quality",
-        quality_sweep=_AVIF_QUALITY_SWEEP,
-        perf_preset={"quality": "65", "speed": "6", "yuv": "420"},
-        variants=[
+    format, so exposing the variant would just produce guaranteed-failing runs.
+
+    `support_tune=True` (libaom backend only) exposes libaom's `--tune`. The base
+    series pins `tune=iq` explicitly — libavif already picks it by default for
+    lossy YUV stills on libaom >= 3.13, but pinning it keeps the baseline from
+    shifting silently on a libavif/libaom bump. `ssim` (libavif's pre-1.3 default)
+    is a default-on comparison; `ssimulacra2` and `psnr` are `--full` only. Only
+    `iq` gets libavif's IQ-specific quality->QP table, so equal `quality` values
+    are not equal QPs across tunes: compare the series as RD curves."""
+    params = [
+        Tunable(
+            name="quality",
+            kind="int",
+            default="65",
+            min=0,
+            max=100,
+            description="AVIF quality (0-100)",
+        ),
+        Tunable(
+            name="speed",
+            kind="int",
+            default="6",
+            min=0,
+            max=10,
+            skip_reason="speed is a quality/throughput trade — covered by the "
+            "performance overlay, not a default RD series",
+        ),
+        Tunable(
+            name="yuv",
+            kind="enum",
+            default="420",
+            choices=["420", "444"] if support_444 else ["420"],
+            description="Chroma subsampling (YUV format)",
+        ),
+    ]
+    perf_preset = {"quality": "65", "speed": "6", "yuv": "420"}
+    variants = []
+    if support_444:
+        variants.append(
             Variant(
                 tag="yuv-444",
                 overrides={"yuv": "444"},
                 description="4:4:4 (no chroma subsampling) vs the default 4:2:0",
                 default_on=False,  # universal chroma sweep -> `--full` only
             )
+        )
+    skipped = [
+        (
+            "codec-specific-options",
+            "deferred: aom/svt keys ("
+            + ("" if support_tune else "tune/")
+            + "aq-mode/sharpness/denoise) via "
+            "avifEncoderSetCodecSpecificOption are backend- and "
+            "version-specific; tracked for follow-up",
+        ),
+        (
+            "tiling",
+            "irrelevant: tileRowsLog2/tileColsLog2 affect parallelism, not RD",
+        ),
+        ("min/maxQuantizer", "deprecated by libavif in favour of `quality`"),
+    ]
+    if support_tune:
+        params.append(
+            Tunable(
+                name="tune",
+                kind="enum",
+                default="iq",
+                choices=["iq", "ssim", "ssimulacra2", "psnr"],
+                description="libaom tuning metric (--tune)",
+            )
+        )
+        perf_preset["tune"] = "iq"
+        variants += [
+            Variant(
+                tag="tune-ssim",
+                overrides={"tune": "ssim"},
+                description="libaom tune=ssim (libavif's pre-1.3 default) vs "
+                "the tune=iq base",
+                default_on=True,  # codec-signature: the still-image tune shift
+            ),
+            Variant(
+                tag="tune-ssimulacra2",
+                overrides={"tune": "ssimulacra2"},
+                description="libaom tune=ssimulacra2 (IQ's tool set, no adaptive "
+                "sharpness, fine-tuned for SSIMULACRA2)",
+                default_on=False,
+            ),
+            Variant(
+                tag="tune-psnr",
+                overrides={"tune": "psnr"},
+                description="libaom tune=psnr (libaom's own default, MSE reference)",
+                default_on=False,
+            ),
         ]
-        if support_444
-        else [],
-        skipped=[
+        skipped.append(
             (
-                "codec-specific-options",
-                "deferred: aom/svt keys (tune/aq-mode/sharpness/denoise) via "
-                "avifEncoderSetCodecSpecificOption are backend- and "
-                "version-specific; tracked for follow-up",
-            ),
-            (
-                "tiling",
-                "irrelevant: tileRowsLog2/tileColsLog2 affect parallelism, not RD",
-            ),
-            ("min/maxQuantizer", "deprecated by libavif in favour of `quality`"),
-        ],
+                "tune (vmaf*/butteraugli)",
+                "unavailable: needs libaom built with CONFIG_TUNE_VMAF / "
+                "CONFIG_TUNE_BUTTERAUGLI plus external libvmaf / libjxl",
+            )
+        )
+    return TunableSchema(
+        params=params,
+        quality_axis="quality",
+        quality_sweep=_AVIF_QUALITY_SWEEP,
+        perf_preset=perf_preset,
+        variants=variants,
+        skipped=skipped,
     )
 
 
@@ -1308,7 +1364,8 @@ TUNABLE_SCHEMAS: Dict[str, "TunableSchema"] = {
             ),
         ],
     ),
-    "libavif-encode": _avif_schema(),
+    # libaom backend: exposes --tune (iq base + ssim/ssimulacra2/psnr series).
+    "libavif-encode": _avif_schema(support_tune=True),
     # SVT-AV1 only encodes YUV 4:2:0 ("Svt[error]: Only support 420 now"), so it
     # gets the AVIF schema without the 4:4:4 chroma series.
     "svt-av1-encode": _avif_schema(support_444=False),
