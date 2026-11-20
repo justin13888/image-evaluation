@@ -5,6 +5,7 @@
 #include <avif/avif.h>
 
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "benchmark_harness.hpp"
@@ -25,6 +26,10 @@ class AvifEncodeBenchBase : public BenchmarkImplementation {
     yuv_format = (param_str(args, "yuv", "420") == "444")
                      ? AVIF_PIXEL_FORMAT_YUV444
                      : AVIF_PIXEL_FORMAT_YUV420;
+    // libaom `--tune` (iq, ssim, ssimulacra2, psnr, ...). Empty = libavif's
+    // default, which for a lossy YUV still on libaom >= 3.13 is already `iq`.
+    // Only the aom backend understands it; other backends ignore the knob.
+    tune = param_str(args, "tune", "");
   }
 
   std::vector<uint8_t> run(const Args &args) override {
@@ -58,6 +63,16 @@ class AvifEncodeBenchBase : public BenchmarkImplementation {
     if (args.threads > 0) {
       encoder->maxThreads = args.threads;
     }
+    if (!tune.empty() && codec_ == AVIF_CODEC_CHOICE_AOM) {
+      // Forwarded to aom_codec_set_option(); an unknown value fails the
+      // avifEncoderWrite below rather than silently encoding with the default.
+      if (avifEncoderSetCodecSpecificOption(encoder, "tune", tune.c_str()) !=
+          AVIF_RESULT_OK) {
+        avifEncoderDestroy(encoder);
+        avifImageDestroy(image);
+        throw std::runtime_error("avifEncoderSetCodecSpecificOption failed");
+      }
+    }
 
     avifRWData output = AVIF_DATA_EMPTY;
     avifResult result = avifEncoderWrite(encoder, image, &output);
@@ -86,4 +101,5 @@ class AvifEncodeBenchBase : public BenchmarkImplementation {
   int quality;
   int speed;
   avifPixelFormat yuv_format;
+  std::string tune;
 };
