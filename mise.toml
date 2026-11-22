@@ -154,12 +154,23 @@ depends = ["build-nasm"]
 run = "cargo test"
 
 [tasks.test-python]
-description = "Run the Python plot-generation tests"
-run = "uv run python scripts/test_plot_generation.py"
+description = "Run the Python plot-generation and dependency-freshness tests"
+run = [
+    "uv run python scripts/test_plot_generation.py",
+    "uv run python scripts/test_check_updates.py",
+]
 
 [tasks.test]
 description = "Run all tests"
 depends = ["test-rust", "test-python"]
+
+# --- Maintenance tasks ---
+
+[tasks.check-updates]
+description = "Report vendored submodules and crates.io deps with a newer upstream release (network)"
+# Advisory: exits 1 when something is outdated, 2 when a lookup failed. Also run
+# monthly by .github/workflows/dependency-freshness.yml.
+run = "python3 scripts/check_updates.py"
 
 # --- Deploy task ---
 
